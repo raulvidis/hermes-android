@@ -25,13 +25,16 @@ This repo contains **two components**:
 ## Install as hermes-agent plugin (v0.3.0+)
 
 ```bash
-# Copy the plugin into hermes's plugin directory
+curl -sSL https://raw.githubusercontent.com/raulvidis/hermes-android/main/install.sh | bash
+```
+
+Or manually:
+```bash
 mkdir -p ~/.hermes/plugins
 cp -r hermes-android-plugin ~/.hermes/plugins/hermes-android
-
-# Restart hermes — run /plugins to verify
-# Should show: ✓ hermes-android v0.2.0 (14 tools)
 ```
+
+Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.2.0 (14 tools)`
 
 ## Quick Start
 
