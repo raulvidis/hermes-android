@@ -163,5 +163,4 @@ This is a working prototype. The vision: **give Hermes its own phone** — a ful
 
 ## Links
 
-- **hermes-agent PR**: [NousResearch/hermes-agent#1345](https://github.com/NousResearch/hermes-agent/pull/1345)
 - **hermes-agent**: [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
