@@ -1,0 +1,40 @@
+name: Build Android Bridge
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. 检出代码
+    - uses: actions/checkout@v4
+
+    # 2. 设置 JDK 17
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # 3. 关键步骤：进入 hermes-android-bridge 目录
+    - name: Navigate to Bridge Directory
+      run: cd hermes-android-bridge
+
+    # 4. 授予权限并构建 (指定工作目录)
+    - name: Build Debug APK
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleDebug
+      working-directory: ./hermes-android-bridge
+
+    # 5. 上传产物 (APK)
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: hermes-bridge-apk
+        # 这里的路径也要对应上，通常是 app/build/outputs/apk/debug/
+        path: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
