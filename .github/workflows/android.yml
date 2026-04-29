@@ -10,8 +10,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -21,6 +19,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Download gradle wrapper jar
+        run: curl -sL "https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradle/wrapper/gradle-wrapper.jar" -o hermes-android-bridge/gradle/wrapper/gradle-wrapper.jar
 
       - name: Grant execute permission for gradlew
         run: chmod +x hermes-android-bridge/gradlew
