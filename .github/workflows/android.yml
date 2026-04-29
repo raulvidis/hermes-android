@@ -22,22 +22,21 @@ jobs:
 
       - name: Grant execute permission for gradlew
         run: chmod +x hermes-android-bridge/gradlew
-        working-directory: hermes-android
 
       - name: Build debug APK
         run: ./gradlew assembleDebug
-        working-directory: hermes-android/hermes-android-bridge
+        working-directory: hermes-android-bridge
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: hermes-android-bridge
-          path: hermes-android/hermes-android-bridge/app/build/outputs/apk/debug/*.apk
+          path: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
 
       - name: Upload to Releases
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: hermes-android/hermes-android-bridge/app/build/outputs/apk/debug/*.apk
+          files: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
