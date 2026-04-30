@@ -1,0 +1,34 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+
+      - name: Grant execute permission
+        run: chmod +x hermes-android-bridge/gradlew
+
+      - name: Build Debug APK
+        run: ./hermes-android-bridge/gradlew assembleDebug
+        working-directory: hermes-android-bridge
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-android-apk
+          path: hermes-android-bridge/app/build/outputs/apk/debug/app-debug.apk
