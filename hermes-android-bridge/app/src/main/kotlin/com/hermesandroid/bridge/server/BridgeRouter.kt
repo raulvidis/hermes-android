@@ -1,6 +1,5 @@
 package com.hermesandroid.bridge.server
 
-import com.google.gson.Gson
 import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.executor.ActionExecutor
@@ -9,6 +8,7 @@ import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
+import com.hermesandroid.bridge.BuildConfig
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -17,20 +17,9 @@ import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private val gson = Gson()
-
 fun Application.configureRouting() {
     routing {
-        intercept(ApplicationCallPipeline.Plugins) {
-            val path = call.request.path()
-            if (path != "/ping") {
-                val authHeader = call.request.header(HttpHeaders.Authorization)
-                if (!PairingManager.validateToken(authHeader)) {
-                    call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Unauthorized"))
-                    finish()
-                }
-            }
-        }
+        // Auth interceptor is in BridgeServer.kt — no need to duplicate here
 
         get("/ping") {
             val serviceRunning = BridgeAccessibilityService.instance != null
@@ -40,7 +29,7 @@ fun Application.configureRouting() {
                 "status" to "ok",
                 "accessibilityService" to serviceRunning,
                 "authenticated" to authenticated,
-                "version" to "0.1.0"
+                "version" to BuildConfig.VERSION_NAME
             ))
         }
 
@@ -89,11 +78,9 @@ fun Application.configureRouting() {
         }
 
         post("/open_app") {
-            val body = call.receiveText()
-            val json = gson.fromJson(body, Map::class.java)
-            val pkg = json["package"] as? String
-                ?: return@post call.respond(HttpStatusCode.BadRequest, "Missing package")
-            val result = ActionExecutor.openApp(pkg)
+            data class OpenAppRequest(val packageName: String)
+            val req = call.receive<OpenAppRequest>()
+            val result = ActionExecutor.openApp(req.packageName)
             call.respond(result)
         }
 
@@ -141,12 +128,11 @@ fun Application.configureRouting() {
         get("/current_app") {
             val result = withContext(Dispatchers.Main) {
                 val service = BridgeAccessibilityService.instance
-                val windows = service?.windows
-                val foreground = windows?.firstOrNull()?.root
-                mapOf(
-                    "package" to (foreground?.packageName ?: "unknown"),
-                    "className" to (foreground?.className ?: "unknown")
-                )
+                val root = service?.windows?.firstOrNull()?.root
+                val pkg = root?.packageName?.toString() ?: "unknown"
+                val cls = root?.className?.toString() ?: "unknown"
+                root?.recycle()
+                mapOf("package" to pkg, "className" to cls)
             }
             call.respond(result)
         }
@@ -270,7 +256,9 @@ fun Application.configureRouting() {
         get("/contacts") {
             val query = call.request.queryParameters["query"] ?: ""
             val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
-            val result = ActionExecutor.searchContacts(query, limit)
+            val result = withContext(Dispatchers.IO) {
+                ActionExecutor.searchContacts(query, limit)
+            }
             call.respond(result)
         }
 
@@ -314,9 +302,8 @@ fun Application.configureRouting() {
         post("/screen_record") {
             data class RecordRequest(val durationMs: Long = 5000)
             val req = call.receive<RecordRequest>()
-            val result = withContext(Dispatchers.IO) {
-                ScreenRecorder.record(req.durationMs)
-            }
+            // ScreenRecorder.record() handles its own threading internally via HandlerThread
+            val result = ScreenRecorder.record(req.durationMs)
             call.respond(result)
         }
 

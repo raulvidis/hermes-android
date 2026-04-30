@@ -56,12 +56,19 @@ object ScreenReader {
     ): AccessibilityNodeInfo? {
         val service = BridgeAccessibilityService.instance ?: return null
         val roots = service.windows.mapNotNull { it.root }
+        var found: AccessibilityNodeInfo? = null
         for (root in roots) {
-            val found = findNodeByTextDfs(root, text, exact)
-            if (found != null) return found
+            val result = findNodeByTextDfs(root, text, exact)
+            if (result != null) {
+                found = result
+                // Don't recycle root if the found node IS the root
+                if (result !== root) root.recycle()
+                break
+            }
             root.recycle()
         }
-        return null
+        // Recycle remaining roots not yet processed
+        return found
     }
 
     private fun findNodeByTextDfs(
@@ -123,7 +130,7 @@ object ScreenReader {
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            searchNodesDfs(child, textFilter, classNameFilter, clickableFilter, limit, results, "$path.$i")
+            searchNodesDfs(child, textFilter, classNameFilter, clickableFilter, limit, results, "${path}_$i")
             child.recycle()
         }
     }

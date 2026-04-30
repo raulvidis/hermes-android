@@ -14,6 +14,7 @@ import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import com.hermesandroid.bridge.service.BridgeNotificationListener
+import com.hermesandroid.bridge.BuildConfig
 import kotlinx.coroutines.*
 import okhttp3.*
 
@@ -187,9 +188,9 @@ object RelayClient {
             base = "$base:8766"
         }
         val scheme = if (useTls) "wss" else "ws"
-        val url = "$scheme://$base/ws?token=$pairingCode"
-        Log.i(TAG, "Built WebSocket URL: $url")
-        return url
+        val url = "$scheme://$base/ws?token=***"
+        Log.i(TAG, "Built WebSocket URL: $scheme://$base/ws?token=***")
+        return "$scheme://$base/ws?token=$pairingCode"
     }
 
     private suspend fun handleMessage(ws: WebSocket, text: String) {
@@ -242,13 +243,15 @@ object RelayClient {
                     "status" to "ok",
                     "accessibilityService" to serviceRunning,
                     "authenticated" to true,
-                    "version" to "0.1.0"
+                    "version" to BuildConfig.VERSION_NAME
                 ) to 200
             }
 
             method == "GET" && path == "/screen" -> {
                 val bounds = params.get("bounds")?.asString == "true"
-                val tree = ScreenReader.readCurrentScreen(bounds)
+                val tree = withContext(Dispatchers.Main) {
+                    ScreenReader.readCurrentScreen(bounds)
+                }
                 mapOf("tree" to tree, "count" to countAllNodes(tree)) to 200
             }
 
@@ -332,13 +335,15 @@ object RelayClient {
             }
 
             method == "GET" && path == "/current_app" -> {
-                val service = BridgeAccessibilityService.instance
-                val windows = service?.windows
-                val foreground = windows?.firstOrNull()?.root
-                mapOf(
-                    "package" to (foreground?.packageName ?: "unknown"),
-                    "className" to (foreground?.className ?: "unknown")
-                ) to 200
+                val result = withContext(Dispatchers.Main) {
+                    val service = BridgeAccessibilityService.instance
+                    val root = service?.windows?.firstOrNull()?.root
+                    val pkg = root?.packageName?.toString() ?: "unknown"
+                    val cls = root?.className?.toString() ?: "unknown"
+                    root?.recycle()
+                    mapOf("package" to pkg, "className" to cls)
+                }
+                result to 200
             }
 
             method == "GET" && path == "/clipboard" -> {
@@ -405,13 +410,17 @@ object RelayClient {
                 val className = body.get("className")?.asString
                 val clickable = body.get("clickable")?.asBoolean
                 val limit = body.get("limit")?.asInt ?: 20
-                val result = ActionExecutor.findNodes(text, className, clickable, limit)
+                val result = withContext(Dispatchers.Main) {
+                    ActionExecutor.findNodes(text, className, clickable, limit)
+                }
                 result to 200
             }
 
             method == "POST" && path == "/diff_screen" -> {
                 val previousHash = body.get("previousHash")?.asString ?: ""
-                val result = ActionExecutor.diffScreen(previousHash)
+                val result = withContext(Dispatchers.Main) {
+                    ActionExecutor.diffScreen(previousHash)
+                }
                 result to 200
             }
 
@@ -427,7 +436,9 @@ object RelayClient {
             }
 
             method == "GET" && path == "/screen_hash" -> {
-                val result = ActionExecutor.screenHash()
+                val result = withContext(Dispatchers.Main) {
+                    ActionExecutor.screenHash()
+                }
                 result to 200
             }
 

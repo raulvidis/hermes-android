@@ -17,7 +17,12 @@ class BridgeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_CLICKED or
+                    AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -76,7 +81,12 @@ class BridgeAccessibilityService : AccessibilityService() {
 
     fun stopForeground() {
         if (!isForeground) return
-        stopForeground(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
         isForeground = false
     }
 
