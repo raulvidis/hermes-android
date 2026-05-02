@@ -1,0 +1,53 @@
+name: Build Bridge APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'hermes-android-bridge/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'hermes-android-bridge/**'
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: hermes-android-bridge
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-bridge-debug
+          path: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload APK to latest release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-build
+          name: Latest Build
+          body: |
+            Auto-built from latest `${{ github.event.repository.default_branch }}` commit.
+            Commit: `${{ github.sha }}`
+          files: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
