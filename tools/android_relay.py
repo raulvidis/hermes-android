@@ -197,49 +197,54 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     # WebSocket endpoint
     app.router.add_get("/ws", lambda req: _handle_ws(req, state))
 
-    # HTTP bridge endpoints (GET)
-    for path in ("/ping", "/screen", "/screenshot", "/apps", "/current_app"):
-        app.router.add_get(path, lambda req, p=path: _handle_http(req, state, p))
+    # HTTP bridge endpoints — method per path
+    ROUTES = {
+        # GET-only
+        "/ping":          "GET",
+        "/screen":        "GET",
+        "/screenshot":    "GET",
+        "/apps":          "GET",
+        "/current_app":   "GET",
+        "/notifications": "GET",
+        "/contacts":      "GET",
+        "/events":        "GET",
+        "/screen_hash":   "GET",
+        "/location":      "GET",
+        "/widgets":       "GET",
+        # POST-only
+        "/tap":           "POST",
+        "/tap_text":      "POST",
+        "/type":          "POST",
+        "/swipe":         "POST",
+        "/open_app":      "POST",
+        "/press_key":     "POST",
+        "/scroll":        "POST",
+        "/wait":          "POST",
+        "/long_press":    "POST",
+        "/drag":          "POST",
+        "/describe_node": "POST",
+        "/find_nodes":    "POST",
+        "/diff_screen":   "POST",
+        "/pinch":         "POST",
+        "/send_sms":      "POST",
+        "/call":          "POST",
+        "/media":         "POST",
+        "/intent":        "POST",
+        "/broadcast":     "POST",
+        "/speak":         "POST",
+        "/stop_speaking": "POST",
+        "/screen_record": "POST",
+        "/events/stream": "POST",
+        # READ + WRITE
+        "/clipboard":     "BOTH",
+    }
 
-    # HTTP bridge endpoints (POST)
-    for path in (
-        "/tap",
-        "/tap_text",
-        "/type",
-        "/swipe",
-        "/open_app",
-        "/press_key",
-        "/scroll",
-        "/wait",
-        "/long_press",
-        "/drag",
-        "/describe_node",
-        "/find_nodes",
-        "/diff_screen",
-        "/pinch",
-        "/send_sms",
-        "/call",
-        "/media",
-        "/intent",
-        "/broadcast",
-        "/speak",
-        "/stop_speaking",
-        "/screen_record",
-        "/events/stream",
-    ):
-        app.router.add_post(path, lambda req, p=path: _handle_http(req, state, p))
-
-    # HTTP bridge endpoints (GET) — additional
-    for path in (
-        "/clipboard",
-        "/notifications",
-        "/contacts",
-        "/events",
-        "/screen_hash",
-        "/location",
-        "/widgets",
-    ):
-        app.router.add_get(path, lambda req, p=path: _handle_http(req, state, p))
+    for path, method in ROUTES.items():
+        handler = lambda req, p=path: _handle_http(req, state, p)
+        if method in ("GET", "BOTH"):
+            app.router.add_get(path, handler)
+        if method in ("POST", "BOTH"):
+            app.router.add_post(path, handler)
 
     runner = web.AppRunner(app)
     state.runner = runner
