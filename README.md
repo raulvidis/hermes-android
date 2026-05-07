@@ -72,7 +72,7 @@ Hermes will reply with the server address. Enter it in the app and tap **Connect
 ### 4. Done
 The agent can now control your phone. Try: "open Instagram", "take a screenshot", "what apps do I have?"
 
-## Tools (36)
+## Tools (38)
 
 | Tool | Description |
 |------|-------------|
