@@ -749,7 +749,7 @@ def android_setup(pairing_code: str) -> str:
 
         # Start the relay server
         try:
-            from .android_relay import start_relay, is_relay_running, is_phone_connected
+            from .android_relay import start_relay, is_phone_connected
 
             start_relay(pairing_code=pairing_code, port=port)
 

@@ -775,7 +775,6 @@ def android_setup(pairing_code: str) -> str:
         try:
             from tools.android_relay import (
                 start_relay,
-                is_relay_running,
                 is_phone_connected,
             )
 

@@ -65,6 +65,22 @@ class TestSchemas:
             assert "parameters" in schema, f"{name} missing 'parameters'"
 
 
+class TestCodeQuality:
+    def test_no_unused_relay_imports_in_setup(self):
+        """Verify android_setup only imports what it uses from android_relay."""
+        import inspect
+        import tools.android_tool as mod
+
+        source = inspect.getsource(mod.android_setup)
+        # is_relay_running was imported but never used — should not appear
+        assert "is_relay_running" not in source, (
+            "is_relay_running is imported but unused in android_setup"
+        )
+        # These should be present (used functions)
+        assert "start_relay" in source
+        assert "is_phone_connected" in source
+
+
 class TestPing:
     @responses.activate
     def test_ping_success(self, bridge_url):
