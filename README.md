@@ -105,7 +105,8 @@ The car head unit needs network access to reach the relay server:
 
 All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) work normally.
 
-## Tools (36)
+
+## Tools (38)
 
 | Tool | Description |
 |------|-------------|

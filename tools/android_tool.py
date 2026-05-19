@@ -90,6 +90,22 @@ def _check_requirements() -> bool:
         return False
 
 
+def _extract_response(r: requests.Response) -> dict:
+    """Extract JSON from a response, preserving error body on HTTP errors."""
+    try:
+        body = r.json()
+    except (ValueError, requests.exceptions.JSONDecodeError):
+        body = {"error": r.text or f"HTTP {r.status_code}"}
+
+    if not r.ok:
+        # If the body doesn't already have an error key, wrap it
+        if "error" not in body:
+            body = {"error": body}
+        raise requests.exceptions.HTTPError(json.dumps(body), response=r)
+
+    return body
+
+
 def _post(path: str, payload: dict) -> dict:
     r = requests.post(
         f"{_bridge_url()}{path}",
@@ -97,16 +113,14 @@ def _post(path: str, payload: dict) -> dict:
         headers=_auth_headers(),
         timeout=_timeout(),
     )
-    r.raise_for_status()
-    return r.json()
+    return _extract_response(r)
 
 
 def _get(path: str) -> dict:
     r = requests.get(
         f"{_bridge_url()}{path}", headers=_auth_headers(), timeout=_timeout()
     )
-    r.raise_for_status()
-    return r.json()
+    return _extract_response(r)
 
 
 # ── Tool implementations ───────────────────────────────────────────────────────

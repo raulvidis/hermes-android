@@ -1012,6 +1012,49 @@ class TestBroadcast:
         assert "error" in result
 
 
+class TestHTTPErrorPreservation:
+    """Tests that HTTP error response bodies are preserved in error messages."""
+
+    @responses.activate
+    def test_post_preserves_json_error_body(self, bridge_url):
+        """When the bridge returns a JSON error with non-200 status, the error body is preserved."""
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/tap",
+            json={"error": "Node not found: bad_id", "code": "NODE_MISSING"},
+            status=404,
+        )
+        result = json.loads(android_tap(node_id="bad_id"))
+        assert "error" in result
+        # The error message should contain the JSON body from the response
+        assert "Node not found" in str(result["error"])
+
+    @responses.activate
+    def test_get_preserves_json_error_body(self, bridge_url):
+        """When the bridge returns a JSON error on GET, the error body is preserved."""
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/screen",
+            json={"error": "Accessibility service not running", "code": "SERVICE_DOWN"},
+            status=503,
+        )
+        result = json.loads(android_read_screen())
+        assert "error" in result
+        assert "Accessibility service not running" in str(result["error"])
+
+    @responses.activate
+    def test_post_handles_non_json_error(self, bridge_url):
+        """When the bridge returns a non-JSON error, we still get a useful message."""
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/tap",
+            body="Internal Server Error",
+            status=500,
+        )
+        result = json.loads(android_tap(x=100, y=200))
+        assert "error" in result
+
+
 class TestHardwareUnavailable:
     @responses.activate
     def test_send_sms_unavailable(self, bridge_url):
