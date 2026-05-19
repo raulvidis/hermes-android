@@ -14,6 +14,7 @@ import os
 import time
 import requests
 from typing import Optional
+from urllib.parse import quote
 
 # ── Config ────────────────────────────────────────────────────────────────────
 #
@@ -657,7 +658,7 @@ def android_search_contacts(query: str, limit: int = 20) -> str:
     Useful for finding numbers to call or send SMS to.
     """
     try:
-        data = _get(f"/contacts?query={query}&limit={limit}")
+        data = _get(f"/contacts?query={quote(query)}&limit={limit}")
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -762,7 +763,7 @@ def android_setup(pairing_code: str) -> str:
 
         # Start the relay server
         try:
-            from .android_relay import start_relay, is_relay_running, is_phone_connected
+            from .android_relay import start_relay, is_phone_connected
 
             start_relay(pairing_code=pairing_code, port=port)
 

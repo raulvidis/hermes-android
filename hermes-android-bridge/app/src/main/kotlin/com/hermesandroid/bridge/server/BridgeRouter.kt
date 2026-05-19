@@ -1,5 +1,6 @@
 package com.hermesandroid.bridge.server
 
+import com.hermesandroid.bridge.model.DeviceCapabilities
 import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.executor.ActionExecutor
@@ -233,6 +234,10 @@ fun Application.configureRouting() {
         }
 
         post("/send_sms") {
+            if (!DeviceCapabilities.hasTelephony) {
+                call.respond(mapOf("success" to false, "error" to "SMS not available on this device"))
+                return@post
+            }
             data class SmsRequest(val to: String, val body: String)
             val req = call.receive<SmsRequest>()
             val result = ActionExecutor.sendSms(req.to, req.body)
@@ -240,6 +245,10 @@ fun Application.configureRouting() {
         }
 
         post("/call") {
+            if (!DeviceCapabilities.hasTelephony) {
+                call.respond(mapOf("success" to false, "error" to "Phone calls not available on this device"))
+                return@post
+            }
             data class CallRequest(val number: String)
             val req = call.receive<CallRequest>()
             val result = ActionExecutor.makeCall(req.number)
@@ -254,6 +263,10 @@ fun Application.configureRouting() {
         }
 
         get("/contacts") {
+            if (!DeviceCapabilities.hasTelephony) {
+                call.respond(mapOf("success" to false, "error" to "Contacts not available on this device"))
+                return@get
+            }
             val query = call.request.queryParameters["query"] ?: ""
             val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
             val result = withContext(Dispatchers.IO) {

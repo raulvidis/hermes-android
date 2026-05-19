@@ -48,7 +48,7 @@ After the user taps Connect on their phone, the phone connects to this server vi
 
 ## Available Tools
 
-You have these 14 tools. Use them by name — they are function calls.
+You have these 38 tools. Use them by name — they are function calls.
 
 ### Connectivity
 - `android_ping()` — check if phone is connected and responding

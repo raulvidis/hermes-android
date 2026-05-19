@@ -34,7 +34,7 @@ mkdir -p ~/.hermes/plugins
 cp -r hermes-android-plugin ~/.hermes/plugins/hermes-android
 ```
 
-Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.3.0 (36 tools)`
+Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.3.0 (38 tools)`
 
 ## Quick Start
 
@@ -71,6 +71,40 @@ Hermes will reply with the server address. Enter it in the app and tap **Connect
 
 ### 4. Done
 The agent can now control your phone. Try: "open Instagram", "take a screenshot", "what apps do I have?"
+
+## Android Automotive OS (Car Head Units)
+
+The bridge app can run on Android Automotive OS (AAOS) car head units. Phone-specific features (SMS, calls, contacts) gracefully return errors when the hardware is unavailable.
+
+### Installation
+
+1. Build the APK: `cd hermes-android-bridge && ./gradlew assembleDebug`
+2. Sideload via ADB: `adb install app/build/outputs/apk/debug/app-debug.apk`
+   - USB: connect directly to the head unit's USB port
+   - WiFi: `adb connect <head-unit-ip>:5555` then install
+3. Grant Accessibility Service: **Settings > Accessibility > Hermes Bridge > Enable**
+4. Grant overlay permission: **Settings > Apps > Special access > Draw over apps > Hermes Bridge**
+5. Skip phone-specific permissions (SMS, calls, contacts) — not applicable
+
+### Connection
+
+The car head unit needs network access to reach the relay server:
+
+- **USB tethering** (recommended): `adb forward tcp:8766 tcp:8766`, then enter `http://localhost:8766` in the app
+- **WiFi**: enter the relay server's `http://<ip>:8766` in the app (both devices on same network)
+
+### Limitations
+
+| Tool | Status on AAOS |
+|------|---------------|
+| `android_send_sms` | Not available — returns error |
+| `android_call` | Not available — returns error |
+| `android_search_contacts` | Not available — returns error |
+| `android_location` | Depends on car unit GPS configuration |
+| `android_screen_record` | May behave differently (restricted MediaProjection on some OEMs) |
+
+All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) work normally.
+
 
 ## Tools (38)
 

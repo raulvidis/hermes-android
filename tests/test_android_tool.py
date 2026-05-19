@@ -38,6 +38,11 @@ from tools.android_tool import (
     android_search_contacts,
     android_send_intent,
     android_broadcast,
+    android_speak,
+    android_speak_stop,
+    android_find_nodes,
+    android_diff_screen,
+    android_pinch,
     _SCHEMAS,
     _HANDLERS,
 )
@@ -58,6 +63,22 @@ class TestSchemas:
             assert "name" in schema, f"{name} missing 'name'"
             assert "description" in schema, f"{name} missing 'description'"
             assert "parameters" in schema, f"{name} missing 'parameters'"
+
+
+class TestCodeQuality:
+    def test_no_unused_relay_imports_in_setup(self):
+        """Verify android_setup only imports what it uses from android_relay."""
+        import inspect
+        import tools.android_tool as mod
+
+        source = inspect.getsource(mod.android_setup)
+        # is_relay_running was imported but never used — should not appear
+        assert "is_relay_running" not in source, (
+            "is_relay_running is imported but unused in android_setup"
+        )
+        # These should be present (used functions)
+        assert "start_relay" in source
+        assert "is_phone_connected" in source
 
 
 class TestPing:
@@ -905,6 +926,36 @@ class TestSearchContacts:
         result = json.loads(android_search_contacts("test"))
         assert "error" in result
 
+    @responses.activate
+    def test_search_contacts_special_chars_url_encoded(self, bridge_url):
+        """Query strings with special chars (& ? +) must be URL-encoded."""
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": True, "data": {"contacts": [], "count": 0}},
+        )
+        # The ampersand, plus, and space must NOT break the URL
+        result = json.loads(android_search_contacts("Tom & Jerry+Smith"))
+        assert result["success"] is True
+        # Verify the actual request URL has the query properly encoded
+        assert len(responses.calls) == 1
+        request_url = responses.calls[0].request.url
+        assert "query=" in request_url
+        # The raw '&' in the name must be encoded so it doesn't create a new param
+        assert "Tom%20%26%20Jerry%2BSmith" in request_url or "Tom+%26+Jerry%2BSmith" in request_url
+
+    @responses.activate
+    def test_search_contacts_unicode_url_encoded(self, bridge_url):
+        """Unicode query strings must be properly encoded."""
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": True, "data": {"contacts": [], "count": 0}},
+        )
+        result = json.loads(android_search_contacts("José García"))
+        assert result["success"] is True
+        assert len(responses.calls) == 1
+
 
 class TestSendIntent:
     @responses.activate
@@ -1001,4 +1052,223 @@ class TestHTTPErrorPreservation:
             status=500,
         )
         result = json.loads(android_tap(x=100, y=200))
+        assert "error" in result
+
+
+class TestHardwareUnavailable:
+    @responses.activate
+    def test_send_sms_unavailable(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/send_sms",
+            json={"success": False, "error": "SMS not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_send_sms("+1234567890", "test"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
+
+    @responses.activate
+    def test_call_unavailable(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/call",
+            json={"success": False, "error": "Phone calls not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_call("+1234567890"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
+
+    @responses.activate
+    def test_contacts_unavailable(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": False, "error": "Contacts not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_search_contacts("John"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
+class TestSpeak:
+    @responses.activate
+    def test_speak(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/speak",
+            json={"success": True, "message": "Speaking: Hello world"},
+        )
+        result = json.loads(android_speak("Hello world"))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_speak_flush(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/speak",
+            json={"success": True},
+        )
+        result = json.loads(android_speak("Urgent!", flush=True))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_speak_failure(self, bridge_url):
+        responses.add(
+            responses.POST, f"{bridge_url}/speak", body=ConnectionError("refused")
+        )
+        result = json.loads(android_speak("test"))
+        assert "error" in result
+
+
+class TestSpeakStop:
+    @responses.activate
+    def test_speak_stop(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/stop_speaking",
+            json={"success": True, "message": "Speech stopped"},
+        )
+        result = json.loads(android_speak_stop())
+        assert result["success"] is True
+
+    @responses.activate
+    def test_speak_stop_failure(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/stop_speaking",
+            body=ConnectionError("refused"),
+        )
+        result = json.loads(android_speak_stop())
+        assert "error" in result
+
+
+class TestFindNodes:
+    @responses.activate
+    def test_find_nodes_by_text(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/find_nodes",
+            json={
+                "success": True,
+                "nodes": [{"nodeId": "n5", "text": "Login", "clickable": True}],
+                "count": 1,
+            },
+        )
+        result = json.loads(android_find_nodes(text="Login"))
+        assert result["success"] is True
+        assert result["count"] == 1
+
+    @responses.activate
+    def test_find_nodes_by_class(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/find_nodes",
+            json={"success": True, "nodes": [], "count": 0},
+        )
+        result = json.loads(
+            android_find_nodes(class_name="android.widget.Button")
+        )
+        assert result["success"] is True
+
+    @responses.activate
+    def test_find_nodes_clickable(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/find_nodes",
+            json={"success": True, "nodes": [], "count": 0},
+        )
+        result = json.loads(android_find_nodes(clickable=True))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_find_nodes_with_limit(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/find_nodes",
+            json={"success": True, "nodes": [], "count": 0},
+        )
+        result = json.loads(android_find_nodes(text="a", limit=5))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_find_nodes_failure(self, bridge_url):
+        responses.add(
+            responses.POST, f"{bridge_url}/find_nodes", body=ConnectionError("refused")
+        )
+        result = json.loads(android_find_nodes(text="test"))
+        assert "error" in result
+
+
+class TestDiffScreen:
+    @responses.activate
+    def test_diff_screen_changed(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/diff_screen",
+            json={"success": True, "changed": True, "newHash": "def456"},
+        )
+        result = json.loads(android_diff_screen("abc123"))
+        assert result["success"] is True
+        assert result["changed"] is True
+        assert result["newHash"] == "def456"
+
+    @responses.activate
+    def test_diff_screen_unchanged(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/diff_screen",
+            json={"success": True, "changed": False, "newHash": "abc123"},
+        )
+        result = json.loads(android_diff_screen("abc123"))
+        assert result["changed"] is False
+
+    @responses.activate
+    def test_diff_screen_failure(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/diff_screen",
+            body=ConnectionError("refused"),
+        )
+        result = json.loads(android_diff_screen("abc"))
+        assert "error" in result
+
+
+class TestPinch:
+    @responses.activate
+    def test_pinch_zoom_in(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/pinch",
+            json={"success": True, "message": "Pinched at (540, 960) scale=2.0"},
+        )
+        result = json.loads(android_pinch(540, 960, scale=2.0))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_pinch_zoom_out(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/pinch",
+            json={"success": True},
+        )
+        result = json.loads(android_pinch(540, 960, scale=0.5))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_pinch_custom_duration(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/pinch",
+            json={"success": True},
+        )
+        result = json.loads(android_pinch(540, 960, duration=500))
+        assert result["success"] is True
+
+    @responses.activate
+    def test_pinch_failure(self, bridge_url):
+        responses.add(
+            responses.POST, f"{bridge_url}/pinch", body=ConnectionError("refused")
+        )
+        result = json.loads(android_pinch(0, 0))
         assert "error" in result
