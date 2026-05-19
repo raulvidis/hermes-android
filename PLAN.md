@@ -42,8 +42,8 @@ Phone -> Relay:  {"request_id": "uuid", "result": {...}, "status": 200}
 ```
 hermes-android/
 ├── hermes-android-plugin/        # v0.3 plugin system integration
-│   ├── __init__.py               # register(ctx) — registers 14 tools via plugin API
-│   ├── android_tool.py           # tool handlers + schemas (14 tools)
+│   ├── __init__.py               # register(ctx) — registers 38 tools via plugin API
+│   ├── android_tool.py           # tool handlers + schemas (38 tools)
 │   ├── android_relay.py          # aiohttp relay server (WebSocket + HTTP bridge)
 │   ├── plugin.yaml               # plugin metadata
 │   └── skill.md                  # hermes-agent skill instructions
@@ -82,7 +82,7 @@ hermes-android/
 
 ### Plugin system (preferred)
 
-Drop `hermes-android-plugin/` into `~/.hermes/plugins/hermes-android`. The `register(ctx)` function in `__init__.py` registers all 14 tools via `ctx.register_tool()`.
+Drop `hermes-android-plugin/` into `~/.hermes/plugins/hermes-android`. The `register(ctx)` function in `__init__.py` registers all 38 tools via `ctx.register_tool()`.
 
 ### Legacy tools/ directory
 

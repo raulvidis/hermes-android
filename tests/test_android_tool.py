@@ -65,6 +65,22 @@ class TestSchemas:
             assert "parameters" in schema, f"{name} missing 'parameters'"
 
 
+class TestCodeQuality:
+    def test_no_unused_relay_imports_in_setup(self):
+        """Verify android_setup only imports what it uses from android_relay."""
+        import inspect
+        import tools.android_tool as mod
+
+        source = inspect.getsource(mod.android_setup)
+        # is_relay_running was imported but never used — should not appear
+        assert "is_relay_running" not in source, (
+            "is_relay_running is imported but unused in android_setup"
+        )
+        # These should be present (used functions)
+        assert "start_relay" in source
+        assert "is_phone_connected" in source
+
+
 class TestPing:
     @responses.activate
     def test_ping_success(self, bridge_url):
@@ -910,6 +926,36 @@ class TestSearchContacts:
         result = json.loads(android_search_contacts("test"))
         assert "error" in result
 
+    @responses.activate
+    def test_search_contacts_special_chars_url_encoded(self, bridge_url):
+        """Query strings with special chars (& ? +) must be URL-encoded."""
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": True, "data": {"contacts": [], "count": 0}},
+        )
+        # The ampersand, plus, and space must NOT break the URL
+        result = json.loads(android_search_contacts("Tom & Jerry+Smith"))
+        assert result["success"] is True
+        # Verify the actual request URL has the query properly encoded
+        assert len(responses.calls) == 1
+        request_url = responses.calls[0].request.url
+        assert "query=" in request_url
+        # The raw '&' in the name must be encoded so it doesn't create a new param
+        assert "Tom%20%26%20Jerry%2BSmith" in request_url or "Tom+%26+Jerry%2BSmith" in request_url
+
+    @responses.activate
+    def test_search_contacts_unicode_url_encoded(self, bridge_url):
+        """Unicode query strings must be properly encoded."""
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": True, "data": {"contacts": [], "count": 0}},
+        )
+        result = json.loads(android_search_contacts("José García"))
+        assert result["success"] is True
+        assert len(responses.calls) == 1
+
 
 class TestSendIntent:
     @responses.activate
@@ -966,6 +1012,42 @@ class TestBroadcast:
         assert "error" in result
 
 
+class TestHardwareUnavailable:
+    @responses.activate
+    def test_send_sms_unavailable(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/send_sms",
+            json={"success": False, "error": "SMS not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_send_sms("+1234567890", "test"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
+
+    @responses.activate
+    def test_call_unavailable(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/call",
+            json={"success": False, "error": "Phone calls not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_call("+1234567890"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
+
+    @responses.activate
+    def test_contacts_unavailable(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/contacts",
+            json={"success": False, "error": "Contacts not available on this device"},
+            status=200,
+        )
+        result = json.loads(android_search_contacts("John"))
+        assert result["success"] is False
+        assert "not available" in result["error"]
 class TestSpeak:
     @responses.activate
     def test_speak(self, bridge_url):

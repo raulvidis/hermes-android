@@ -24,6 +24,7 @@ Command JSON format:
 # to enable wss:// connections. Without these, the relay uses plaintext http.
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -351,7 +352,9 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
         )
 
     token = request.query.get("token", "")
-    if token.upper() != state.pairing_code.upper():
+    # Constant-time comparison to mitigate timing side-channel attacks that
+    # could otherwise leak the pairing code byte-by-byte.
+    if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
         _auth_record_failure(remote_ip)
         logger.warning(
             "Phone WS rejected — bad token (got %s) from %s", token, remote_ip
