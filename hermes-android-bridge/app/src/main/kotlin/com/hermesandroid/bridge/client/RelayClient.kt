@@ -114,7 +114,11 @@ object RelayClient {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket connected to $wsUrl")
                 isConnected = true
-                BridgeAccessibilityService.instance?.startForeground()
+                try {
+                    BridgeAccessibilityService.instance?.startForeground()
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Could not promote bridge service to foreground", e)
+                }
                 notifyStatus(true, "Connected to $serverUrl")
             }
 

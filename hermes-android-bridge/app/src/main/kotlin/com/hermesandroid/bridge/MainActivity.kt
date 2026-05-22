@@ -89,10 +89,11 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_CODE_SCREEN_RECORD) {
             if (resultCode == RESULT_OK && data != null) {
-                val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                val projection = mpm.getMediaProjection(resultCode, data)
-                if (projection != null) {
-                    ScreenRecorder.setProjection(projection)
+                val service = BridgeAccessibilityService.instance
+                if (service == null) {
+                    Toast.makeText(this, "Enable Accessibility Service before screen recording", Toast.LENGTH_LONG).show()
+                } else {
+                    ScreenRecorder.setProjectionPermission(resultCode, data)
                     Toast.makeText(this, "Screen recording permission granted", Toast.LENGTH_SHORT).show()
                 }
             } else {
@@ -143,8 +144,14 @@ class MainActivity : Activity() {
 
         switchScreenRecord.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !ScreenRecorder.hasPermission()) {
-                val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CODE_SCREEN_RECORD)
+                val service = BridgeAccessibilityService.instance
+                if (service == null) {
+                    Toast.makeText(this, "Enable Accessibility Service before screen recording", Toast.LENGTH_LONG).show()
+                    updatePermissionSwitches()
+                } else {
+                    val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    startActivityForResult(mpm.createScreenCaptureIntent(), REQUEST_CODE_SCREEN_RECORD)
+                }
             }
         }
     }

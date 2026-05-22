@@ -4,11 +4,14 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
 class BridgeAccessibilityService : AccessibilityService() {
 
     companion object {
+        private const val TAG = "BridgeA11yService"
+
         @Volatile
         var instance: BridgeAccessibilityService? = null
             private set
@@ -38,9 +41,22 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
 
     private var isForeground = false
+    private var foregroundTypes = 0
 
-    fun startForeground() {
-        if (isForeground) return
+    fun startForeground(includeMediaProjection: Boolean = false) {
+        val requestedTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                if (includeMediaProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    0
+                }
+        } else {
+            0
+        }
+
+        if (isForeground && (foregroundTypes and requestedTypes) == requestedTypes) return
+
         val channelId = "hermes_bridge_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
@@ -70,13 +86,13 @@ class BridgeAccessibilityService : AccessibilityService() {
                 .build()
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(1, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            Log.i(TAG, "Starting foreground service with types=$requestedTypes")
+            startForeground(1, notification, requestedTypes)
         } else {
             startForeground(1, notification)
         }
         isForeground = true
+        foregroundTypes = requestedTypes
     }
 
     fun stopForeground() {
@@ -88,6 +104,7 @@ class BridgeAccessibilityService : AccessibilityService() {
             stopForeground(true)
         }
         isForeground = false
+        foregroundTypes = 0
     }
 
     override fun onInterrupt() {
