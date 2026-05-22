@@ -15,7 +15,8 @@ import java.security.SecureRandom
  *  - Uses java.security.SecureRandom (CSPRNG) instead of kotlin.random.Random
  *    (which is a non-cryptographic PRNG and can be predicted from a few outputs).
  *  - Token comparison uses MessageDigest.isEqual for constant-time equality
- *    to mitigate timing side-channel attacks.
+ *    to mitigate timing side-channel attacks. No early size check is performed
+ *    to avoid leaking the code length through response-time differences.
  */
 object PairingManager {
 
@@ -69,7 +70,9 @@ object PairingManager {
         if (expected.isEmpty()) return false
         val a = token.toByteArray(Charsets.UTF_8)
         val b = expected.toByteArray(Charsets.UTF_8)
-        if (a.size != b.size) return false
+        // No early size check — MessageDigest.isEqual handles unequal lengths
+        // in constant time, preventing a timing side-channel that would leak
+        // the pairing code length.
         return MessageDigest.isEqual(a, b)
     }
 }
