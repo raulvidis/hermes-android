@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -32,7 +32,6 @@ jobs:
         working-directory: hermes-android-bridge
         run: |
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            # Download Gradle distribution and generate wrapper
             GRADLE_VER="8.6"
             curl -sL "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip" -o /tmp/gradle.zip
             unzip -q /tmp/gradle.zip -d /tmp
@@ -40,7 +39,7 @@ jobs:
           fi
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           validate-wrappers: false
 
@@ -49,7 +48,7 @@ jobs:
         run: ./gradlew assembleDebug
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-bridge-debug
           path: hermes-android-bridge/app/build/outputs/apk/debug/*.apk
