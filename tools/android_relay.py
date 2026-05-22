@@ -346,6 +346,10 @@ def _auth_record_failure(ip: str) -> None:
 # ── WebSocket handler (phone side) ───────────────────────────────────────────
 
 
+def _mask_token(token: str) -> str:
+    return (token[:2] + "****") if len(token) >= 2 else "****"
+
+
 async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketResponse:
     # Rate limiting — check before token validation
     remote_ip = request.remote or "unknown"
@@ -360,9 +364,8 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     # could otherwise leak the pairing code byte-by-byte.
     if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
         _auth_record_failure(remote_ip)
-        masked = (token[:2] + "****") if len(token) >= 2 else "****"
         logger.warning(
-            "Phone WS rejected — bad token (got %s) from %s", masked, remote_ip
+            "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
         )
         raise web.HTTPForbidden(text="Invalid pairing code")
 
