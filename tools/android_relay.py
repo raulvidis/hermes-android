@@ -48,7 +48,11 @@ class _RelayState:
     """Holds all mutable state for one running relay instance."""
 
     def __init__(self, pairing_code: str, port: int):
-        self.pairing_code: str = pairing_code
+        self.pairing_codes: set[str] = _parse_pairing_codes(pairing_code)
+        self.device_aliases: dict[str, str] = _parse_device_aliases()
+        self.default_device: Optional[str] = _normalize_token(
+            os.getenv("ANDROID_DEFAULT_DEVICE", "")
+        )
         self.port: int = port
 
         # asyncio loop running in the background thread
@@ -60,12 +64,12 @@ class _RelayState:
         self.runner: Optional[web.AppRunner] = None
         self.site: Optional[web.TCPSite] = None
 
-        # The single connected phone WebSocket (or None)
-        self.phone_ws: Optional[web.WebSocketResponse] = None
+        # Connected phone WebSockets keyed by pairing token.
+        self.phone_ws: dict[str, web.WebSocketResponse] = {}
         self.phone_ws_lock = asyncio.Lock()  # created lazily in the event loop
 
-        # Pending requests: request_id -> asyncio.Future
-        self.pending: dict[str, asyncio.Future] = {}
+        # Pending requests: request_id -> (asyncio.Future, token)
+        self.pending: dict[str, tuple[asyncio.Future, str]] = {}
         self.pending_lock: Optional[asyncio.Lock] = None  # created lazily
 
         # Shutdown event
@@ -73,6 +77,41 @@ class _RelayState:
 
 
 # ── Public API (called from sync code) ────────────────────────────────────────
+
+
+def _normalize_token(token: str) -> str:
+    return token.strip().upper()
+
+
+def _parse_pairing_codes(pairing_code: str) -> set[str]:
+    raw_codes = [pairing_code, os.getenv("ANDROID_BRIDGE_TOKENS", "")]
+    codes: set[str] = set()
+    for raw in raw_codes:
+        for code in raw.replace(";", ",").split(","):
+            normalized = _normalize_token(code)
+            if normalized:
+                codes.add(normalized)
+    if not codes:
+        raise ValueError("At least one pairing code is required")
+    return codes
+
+
+def _parse_device_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    raw = os.getenv("ANDROID_BRIDGE_DEVICES", "")
+    for entry in raw.replace(";", ",").split(","):
+        if "=" not in entry:
+            continue
+        alias, token = entry.split("=", 1)
+        normalized_alias = alias.strip()
+        normalized_token = _normalize_token(token)
+        if normalized_alias and normalized_token:
+            aliases[normalized_alias] = normalized_token
+    return aliases
+
+
+def _mask_token(token: str) -> str:
+    return (token[:2] + "****") if len(token) >= 2 else "****"
 
 
 def start_relay(pairing_code: str, port: int = 0) -> None:
@@ -134,8 +173,7 @@ def is_phone_connected() -> bool:
         s = _relay_instance
         if s is None:
             return False
-        ws = s.phone_ws
-        return ws is not None and not ws.closed
+        return any(not ws.closed for ws in s.phone_ws.values())
 
 
 def get_relay_url() -> str:
@@ -150,7 +188,7 @@ def set_pairing_code(code: str) -> None:
     with _relay_lock:
         s = _relay_instance
         if s is not None:
-            s.pairing_code = code
+            s.pairing_codes = _parse_pairing_codes(code)
             logger.info("Pairing code updated")
 
 
@@ -197,6 +235,7 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
 
     # WebSocket endpoint
     app.router.add_get("/ws", lambda req: _handle_ws(req, state))
+    app.router.add_get("/devices", lambda req: _handle_devices(req, state))
 
     # HTTP bridge endpoints — method per path
     ROUTES = {
@@ -264,7 +303,7 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     await state.shutdown_event.wait()
 
     # Cleanup
-    await _cleanup_phone(state, reason="relay shutdown")
+    await _cleanup_all_phones(state, reason="relay shutdown")
     await runner.cleanup()
     logger.info("Relay server cleaned up")
 
@@ -359,29 +398,32 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
             text="Too many failed authentication attempts. Try again later."
         )
 
-    token = request.query.get("token", "")
+    token = _normalize_token(request.query.get("token", ""))
     # Constant-time comparison to mitigate timing side-channel attacks that
     # could otherwise leak the pairing code byte-by-byte.
-    if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
+    if not any(hmac.compare_digest(token, code) for code in state.pairing_codes):
         _auth_record_failure(remote_ip)
         logger.warning(
-            "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
+            "Phone WS rejected — bad token (got %s) from %s",
+            _mask_token(token),
+            remote_ip,
         )
         raise web.HTTPForbidden(text="Invalid pairing code")
 
     ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
 
-    # Only one phone at a time — kick previous if any
+    # Keep one connection per token. A reconnect replaces only that device.
     async with state.phone_ws_lock:
-        if state.phone_ws is not None and not state.phone_ws.closed:
-            logger.info("Replacing previous phone connection")
-            await state.phone_ws.close(
+        existing = state.phone_ws.get(token)
+        if existing is not None and not existing.closed:
+            logger.info("Replacing previous phone connection for token=%s", _mask_token(token))
+            await existing.close(
                 code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced"
             )
-        state.phone_ws = ws
+        state.phone_ws[token] = ws
 
-    logger.info("Phone connected from %s", request.remote)
+    logger.info("Phone connected from %s token=%s", request.remote, _mask_token(token))
 
     try:
         async for msg in ws:
@@ -391,7 +433,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
                 logger.error("Phone WS error: %s", ws.exception())
                 break
     finally:
-        await _cleanup_phone(state, reason="phone disconnected")
+        await _cleanup_phone(state, token, ws, reason="phone disconnected")
 
     return ws
 
@@ -410,31 +452,45 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
         return
 
     async with state.pending_lock:
-        future = state.pending.pop(request_id, None)
+        pending = state.pending.pop(request_id, None)
 
-    if future is None:
+    if pending is None:
         logger.debug(
             "No pending future for request_id=%s (possibly timed out)", request_id
         )
         return
 
+    future, _token = pending
     if not future.done():
         future.set_result(data)
 
 
-async def _cleanup_phone(state: _RelayState, reason: str = "") -> None:
-    """Clean up phone connection and cancel all pending requests."""
+async def _cleanup_phone(
+    state: _RelayState,
+    token: str,
+    ws: Optional[web.WebSocketResponse] = None,
+    reason: str = "",
+) -> None:
+    """Clean up one phone connection and cancel pending requests for that token."""
     async with state.phone_ws_lock:
-        ws = state.phone_ws
-        state.phone_ws = None
+        current = state.phone_ws.get(token)
+        if ws is None:
+            ws = current
+        if current is ws:
+            state.phone_ws.pop(token, None)
 
     if ws is not None and not ws.closed:
         await ws.close()
 
-    # Fail all pending futures
+    # Fail pending futures for this device only.
     async with state.pending_lock:
-        pending = dict(state.pending)
-        state.pending.clear()
+        pending = {
+            rid: fut
+            for rid, (fut, pending_token) in state.pending.items()
+            if pending_token == token
+        }
+        for rid in pending:
+            state.pending.pop(rid, None)
 
     for rid, fut in pending.items():
         if not fut.done():
@@ -444,21 +500,114 @@ async def _cleanup_phone(state: _RelayState, reason: str = "") -> None:
         logger.info("Cancelled %d pending requests (%s)", len(pending), reason)
 
 
+async def _cleanup_all_phones(state: _RelayState, reason: str = "") -> None:
+    async with state.phone_ws_lock:
+        phones = list(state.phone_ws.items())
+    for token, ws in phones:
+        await _cleanup_phone(state, token, ws, reason=reason)
+
+
 # ── HTTP handler (tool side) ─────────────────────────────────────────────────
 
 _RESPONSE_TIMEOUT = 30  # seconds
+
+
+def _device_name(state: _RelayState, token: str) -> str:
+    for alias, alias_token in state.device_aliases.items():
+        if alias_token == token:
+            return alias
+    return token
+
+
+def _resolve_requested_token(
+    state: _RelayState,
+    request: web.Request,
+    body: Optional[dict] = None,
+) -> tuple[Optional[str], Optional[web.Response]]:
+    requested = (
+        request.query.get("device")
+        or request.query.get("token")
+        or request.query.get("target_device")
+        or request.headers.get("X-Android-Device")
+    )
+    if body:
+        requested = requested or body.pop("device", None) or body.pop("target_device", None)
+
+    if requested:
+        requested_text = str(requested).strip()
+        token = state.device_aliases.get(requested_text, _normalize_token(requested_text))
+        if token not in state.pairing_codes:
+            return None, web.json_response(
+                {"error": f"Unknown Android device '{requested_text}'"},
+                status=404,
+            )
+        return token, None
+
+    if state.default_device:
+        token = state.device_aliases.get(state.default_device, state.default_device)
+        if token in state.pairing_codes:
+            return token, None
+
+    connected = [token for token, ws in state.phone_ws.items() if not ws.closed]
+    if len(connected) == 1:
+        return connected[0], None
+
+    if not connected:
+        return None, web.json_response(
+            {
+                "error": "No phone connected. Open the Hermes app on your phone and connect."
+            },
+            status=503,
+        )
+
+    return None, web.json_response(
+        {
+            "error": "Multiple phones are connected. Specify device.",
+            "devices": [_device_name(state, token) for token in connected],
+        },
+        status=400,
+    )
+
+
+async def _handle_devices(request: web.Request, state: _RelayState) -> web.Response:
+    """Return configured devices and their connection state."""
+    async with state.phone_ws_lock:
+        connected = {token for token, ws in state.phone_ws.items() if not ws.closed}
+
+    devices = []
+    for token in sorted(state.pairing_codes):
+        devices.append(
+            {
+                "device": _device_name(state, token),
+                "token": _mask_token(token),
+                "connected": token in connected,
+                "default": token == state.default_device,
+            }
+        )
+    return web.json_response({"devices": devices})
 
 
 async def _handle_http(
     request: web.Request, state: _RelayState, path: str
 ) -> web.Response:
     """Forward an HTTP request from a tool to the phone over WebSocket."""
+    body = {}
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+    token, error_response = _resolve_requested_token(state, request, body)
+    if error_response is not None:
+        return error_response
+
     async with state.phone_ws_lock:
-        ws = state.phone_ws
+        ws = state.phone_ws.get(token) if token else None
         if ws is None or ws.closed:
             return web.json_response(
                 {
-                    "error": "No phone connected. Open the Hermes app on your phone and connect."
+                    "error": f"Android device '{_device_name(state, token or '')}' is not connected."
                 },
                 status=503,
             )
@@ -467,13 +616,8 @@ async def _handle_http(
     request_id = str(uuid.uuid4())
     method = request.method  # GET or POST
     params = dict(request.query)
-
-    body = {}
-    if method == "POST":
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+    for key in ("device", "token", "target_device"):
+        params.pop(key, None)
 
     command = {
         "request_id": request_id,
@@ -487,7 +631,7 @@ async def _handle_http(
     # Register a future *before* sending so we never miss the reply
     future = state.loop.create_future()
     async with state.pending_lock:
-        state.pending[request_id] = future
+        state.pending[request_id] = (future, token)
 
     try:
         await ws.send_json(command)

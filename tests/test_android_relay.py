@@ -7,6 +7,7 @@ from tools.android_relay import (
     is_phone_connected,
     get_relay_url,
     set_pairing_code,
+    _RelayState,
     _auth_is_blocked,
     _auth_record_failure,
     _auth_lock,
@@ -67,6 +68,20 @@ class TestRelayLifecycle:
         start_relay(pairing_code="NEPCODE", port=19878)
         assert is_relay_running()
         stop_relay()
+
+    def test_state_accepts_multiple_pairing_codes(self):
+        state = _RelayState("FIRST1,SECOND2", 19879)
+        assert state.pairing_codes == {"FIRST1", "SECOND2"}
+
+    def test_state_accepts_tokens_from_env(self, monkeypatch):
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKENS", "THIRD3,FOURTH4")
+        state = _RelayState("FIRST1", 19880)
+        assert state.pairing_codes == {"FIRST1", "THIRD3", "FOURTH4"}
+
+    def test_device_aliases_from_env(self, monkeypatch):
+        monkeypatch.setenv("ANDROID_BRIDGE_DEVICES", "old=LRW2U7,new=EMDMFU")
+        state = _RelayState("LRW2U7,EMDMFU", 19881)
+        assert state.device_aliases == {"old": "LRW2U7", "new": "EMDMFU"}
 
 
 class TestRateLimiting:

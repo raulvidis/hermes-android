@@ -6,6 +6,7 @@ import pytest
 # Import tool functions directly (not via registry)
 from tools.android_tool import (
     android_ping,
+    android_devices,
     android_read_screen,
     android_tap,
     android_tap_text,
@@ -49,11 +50,11 @@ from tools.android_tool import (
 
 
 class TestSchemas:
-    def test_all_38_tools_have_schemas(self):
-        assert len(_SCHEMAS) == 38
+    def test_all_39_tools_have_schemas(self):
+        assert len(_SCHEMAS) == 39
 
-    def test_all_38_tools_have_handlers(self):
-        assert len(_HANDLERS) == 38
+    def test_all_39_tools_have_handlers(self):
+        assert len(_HANDLERS) == 39
 
     def test_schema_names_match_handler_names(self):
         assert set(_SCHEMAS.keys()) == set(_HANDLERS.keys())
@@ -63,6 +64,14 @@ class TestSchemas:
             assert "name" in schema, f"{name} missing 'name'"
             assert "description" in schema, f"{name} missing 'description'"
             assert "parameters" in schema, f"{name} missing 'parameters'"
+
+    def test_device_parameter_added_to_targetable_tools(self):
+        for name, schema in _SCHEMAS.items():
+            properties = schema["parameters"].get("properties", {})
+            if name in {"android_setup", "android_devices"}:
+                assert "device" not in properties
+            else:
+                assert "device" in properties
 
 
 class TestCodeQuality:
@@ -102,6 +111,28 @@ class TestPing:
         )
         result = json.loads(android_ping())
         assert result["status"] == "error"
+
+
+class TestDevices:
+    @responses.activate
+    def test_devices(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={"devices": [{"device": "phone-a", "connected": True}]},
+        )
+        result = json.loads(android_devices())
+        assert result["devices"][0]["device"] == "phone-a"
+
+    @responses.activate
+    def test_handler_targets_device(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/ping?device=phone-a",
+            json={"status": "ok", "accessibilityService": True},
+        )
+        result = json.loads(_HANDLERS["android_ping"]({"device": "phone-a"}))
+        assert result["status"] == "ok"
 
 
 class TestReadScreen:

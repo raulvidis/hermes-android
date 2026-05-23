@@ -12,9 +12,10 @@ via ctx.register_tool().
 import json
 import os
 import time
+import contextvars
 import requests
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 # ── Config ────────────────────────────────────────────────────────────────────
 #
@@ -34,6 +35,15 @@ def _bridge_url() -> str:
 
 def _bridge_token() -> Optional[str]:
     return os.getenv("ANDROID_BRIDGE_TOKEN")
+
+
+_CURRENT_DEVICE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "android_device", default=None
+)
+
+
+def _selected_device(device: Optional[str] = None) -> Optional[str]:
+    return device or _CURRENT_DEVICE.get() or os.getenv("ANDROID_DEFAULT_DEVICE")
 
 
 def _relay_port() -> int:
@@ -82,9 +92,17 @@ def _extract_response(r: requests.Response) -> dict:
     return body
 
 
-def _post(path: str, payload: dict) -> dict:
+def _with_device(path: str, device: Optional[str] = None) -> str:
+    selected = _selected_device(device)
+    if not selected or path.startswith("/devices"):
+        return path
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}{urlencode({'device': selected})}"
+
+
+def _post(path: str, payload: dict, device: Optional[str] = None) -> dict:
     r = requests.post(
-        f"{_bridge_url()}{path}",
+        f"{_bridge_url()}{_with_device(path, device)}",
         json=payload,
         headers=_auth_headers(),
         timeout=_timeout(),
@@ -92,9 +110,11 @@ def _post(path: str, payload: dict) -> dict:
     return _extract_response(r)
 
 
-def _get(path: str) -> dict:
+def _get(path: str, device: Optional[str] = None) -> dict:
     r = requests.get(
-        f"{_bridge_url()}{path}", headers=_auth_headers(), timeout=_timeout()
+        f"{_bridge_url()}{_with_device(path, device)}",
+        headers=_auth_headers(),
+        timeout=_timeout(),
     )
     return _extract_response(r)
 
@@ -108,6 +128,15 @@ def android_ping() -> str:
         return json.dumps({"status": "ok", "bridge": data})
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
+
+
+def android_devices() -> str:
+    """List configured Android devices and whether each one is connected."""
+    try:
+        data = _get("/devices")
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 def android_read_screen(include_bounds: bool = False) -> str:
@@ -739,6 +768,12 @@ def android_setup(pairing_code: str) -> str:
     try:
         port = _relay_port()
         public_ip = _get_public_ip()
+        pairing_codes = [
+            code.strip().upper()
+            for code in pairing_code.replace(";", ",").split(",")
+            if code.strip()
+        ]
+        bridge_token = pairing_codes[0] if pairing_codes else pairing_code
 
         # Save config to ~/.hermes/.env
         relay_url = f"http://localhost:{port}"
@@ -746,7 +781,8 @@ def android_setup(pairing_code: str) -> str:
             from hermes_cli.config import save_env_value
 
             save_env_value("ANDROID_BRIDGE_URL", relay_url)
-            save_env_value("ANDROID_BRIDGE_TOKEN", pairing_code)
+            save_env_value("ANDROID_BRIDGE_TOKEN", bridge_token)
+            save_env_value("ANDROID_BRIDGE_TOKENS", ",".join(pairing_codes))
             save_env_value("ANDROID_RELAY_PORT", str(port))
         except ImportError:
             from pathlib import Path
@@ -754,12 +790,14 @@ def android_setup(pairing_code: str) -> str:
             env_path = Path.home() / ".hermes" / ".env"
             env_path.parent.mkdir(parents=True, exist_ok=True)
             _update_env_file(env_path, "ANDROID_BRIDGE_URL", relay_url)
-            _update_env_file(env_path, "ANDROID_BRIDGE_TOKEN", pairing_code)
+            _update_env_file(env_path, "ANDROID_BRIDGE_TOKEN", bridge_token)
+            _update_env_file(env_path, "ANDROID_BRIDGE_TOKENS", ",".join(pairing_codes))
             _update_env_file(env_path, "ANDROID_RELAY_PORT", str(port))
 
         # Update current process env
         os.environ["ANDROID_BRIDGE_URL"] = relay_url
-        os.environ["ANDROID_BRIDGE_TOKEN"] = pairing_code
+        os.environ["ANDROID_BRIDGE_TOKEN"] = bridge_token
+        os.environ["ANDROID_BRIDGE_TOKENS"] = ",".join(pairing_codes)
 
         # Start the relay server
         try:
@@ -833,6 +871,11 @@ _SCHEMAS = {
     "android_ping": {
         "name": "android_ping",
         "description": "Check if the Android bridge is reachable. Call this first before any other android_ tools.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_devices": {
+        "name": "android_devices",
+        "description": "List configured Android devices and whether each device is connected. Use this before targeting a specific device.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "android_read_screen": {
@@ -1403,45 +1446,67 @@ _SCHEMAS = {
     },
 }
 
+_DEVICE_PARAMETER = {
+    "type": "string",
+    "description": "Optional Android device alias or pairing token to target when multiple devices are connected.",
+}
+
+for _tool_name, _schema in _SCHEMAS.items():
+    if _tool_name in {"android_setup", "android_devices"}:
+        continue
+    _schema["parameters"].setdefault("properties", {})["device"] = _DEVICE_PARAMETER
+
+
 # ── Tool handlers map ──────────────────────────────────────────────────────────
 
+
+def _with_target_device(args: dict, handler):
+    call_args = dict(args or {})
+    device = call_args.pop("device", None)
+    token = _CURRENT_DEVICE.set(device)
+    try:
+        return handler(call_args)
+    finally:
+        _CURRENT_DEVICE.reset(token)
+
 _HANDLERS = {
-    "android_ping": lambda args, **kw: android_ping(),
-    "android_read_screen": lambda args, **kw: android_read_screen(**args),
-    "android_tap": lambda args, **kw: android_tap(**args),
-    "android_tap_text": lambda args, **kw: android_tap_text(**args),
-    "android_type": lambda args, **kw: android_type(**args),
-    "android_swipe": lambda args, **kw: android_swipe(**args),
-    "android_open_app": lambda args, **kw: android_open_app(**args),
-    "android_press_key": lambda args, **kw: android_press_key(**args),
-    "android_screenshot": lambda args, **kw: android_screenshot(),
-    "android_scroll": lambda args, **kw: android_scroll(**args),
-    "android_wait": lambda args, **kw: android_wait(**args),
-    "android_get_apps": lambda args, **kw: android_get_apps(),
-    "android_current_app": lambda args, **kw: android_current_app(),
+    "android_ping": lambda args, **kw: _with_target_device(args, lambda _args: android_ping()),
+    "android_devices": lambda args, **kw: android_devices(),
+    "android_read_screen": lambda args, **kw: _with_target_device(args, lambda call_args: android_read_screen(**call_args)),
+    "android_tap": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap(**call_args)),
+    "android_tap_text": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap_text(**call_args)),
+    "android_type": lambda args, **kw: _with_target_device(args, lambda call_args: android_type(**call_args)),
+    "android_swipe": lambda args, **kw: _with_target_device(args, lambda call_args: android_swipe(**call_args)),
+    "android_open_app": lambda args, **kw: _with_target_device(args, lambda call_args: android_open_app(**call_args)),
+    "android_press_key": lambda args, **kw: _with_target_device(args, lambda call_args: android_press_key(**call_args)),
+    "android_screenshot": lambda args, **kw: _with_target_device(args, lambda _args: android_screenshot()),
+    "android_scroll": lambda args, **kw: _with_target_device(args, lambda call_args: android_scroll(**call_args)),
+    "android_wait": lambda args, **kw: _with_target_device(args, lambda call_args: android_wait(**call_args)),
+    "android_get_apps": lambda args, **kw: _with_target_device(args, lambda _args: android_get_apps()),
+    "android_current_app": lambda args, **kw: _with_target_device(args, lambda _args: android_current_app()),
     "android_setup": lambda args, **kw: android_setup(**args),
-    "android_clipboard_read": lambda args, **kw: android_clipboard_read(),
-    "android_clipboard_write": lambda args, **kw: android_clipboard_write(**args),
-    "android_notifications": lambda args, **kw: android_notifications(**args),
-    "android_long_press": lambda args, **kw: android_long_press(**args),
-    "android_drag": lambda args, **kw: android_drag(**args),
-    "android_describe_node": lambda args, **kw: android_describe_node(**args),
-    "android_screen_hash": lambda args, **kw: android_screen_hash(),
-    "android_macro": lambda args, **kw: android_macro(**args),
-    "android_location": lambda args, **kw: android_location(),
-    "android_send_sms": lambda args, **kw: android_send_sms(**args),
-    "android_call": lambda args, **kw: android_call(**args),
-    "android_speak": lambda args, **kw: android_speak(**args),
-    "android_speak_stop": lambda args, **kw: android_speak_stop(),
-    "android_events": lambda args, **kw: android_events(**args),
-    "android_event_stream": lambda args, **kw: android_event_stream(**args),
-    "android_screen_record": lambda args, **kw: android_screen_record(**args),
-    "android_read_widgets": lambda args, **kw: android_read_widgets(),
-    "android_find_nodes": lambda args, **kw: android_find_nodes(**args),
-    "android_diff_screen": lambda args, **kw: android_diff_screen(**args),
-    "android_pinch": lambda args, **kw: android_pinch(**args),
-    "android_media": lambda args, **kw: android_media(**args),
-    "android_search_contacts": lambda args, **kw: android_search_contacts(**args),
-    "android_send_intent": lambda args, **kw: android_send_intent(**args),
-    "android_broadcast": lambda args, **kw: android_broadcast(**args),
+    "android_clipboard_read": lambda args, **kw: _with_target_device(args, lambda _args: android_clipboard_read()),
+    "android_clipboard_write": lambda args, **kw: _with_target_device(args, lambda call_args: android_clipboard_write(**call_args)),
+    "android_notifications": lambda args, **kw: _with_target_device(args, lambda call_args: android_notifications(**call_args)),
+    "android_long_press": lambda args, **kw: _with_target_device(args, lambda call_args: android_long_press(**call_args)),
+    "android_drag": lambda args, **kw: _with_target_device(args, lambda call_args: android_drag(**call_args)),
+    "android_describe_node": lambda args, **kw: _with_target_device(args, lambda call_args: android_describe_node(**call_args)),
+    "android_screen_hash": lambda args, **kw: _with_target_device(args, lambda _args: android_screen_hash()),
+    "android_macro": lambda args, **kw: _with_target_device(args, lambda call_args: android_macro(**call_args)),
+    "android_location": lambda args, **kw: _with_target_device(args, lambda _args: android_location()),
+    "android_send_sms": lambda args, **kw: _with_target_device(args, lambda call_args: android_send_sms(**call_args)),
+    "android_call": lambda args, **kw: _with_target_device(args, lambda call_args: android_call(**call_args)),
+    "android_speak": lambda args, **kw: _with_target_device(args, lambda call_args: android_speak(**call_args)),
+    "android_speak_stop": lambda args, **kw: _with_target_device(args, lambda _args: android_speak_stop()),
+    "android_events": lambda args, **kw: _with_target_device(args, lambda call_args: android_events(**call_args)),
+    "android_event_stream": lambda args, **kw: _with_target_device(args, lambda call_args: android_event_stream(**call_args)),
+    "android_screen_record": lambda args, **kw: _with_target_device(args, lambda call_args: android_screen_record(**call_args)),
+    "android_read_widgets": lambda args, **kw: _with_target_device(args, lambda _args: android_read_widgets()),
+    "android_find_nodes": lambda args, **kw: _with_target_device(args, lambda call_args: android_find_nodes(**call_args)),
+    "android_diff_screen": lambda args, **kw: _with_target_device(args, lambda call_args: android_diff_screen(**call_args)),
+    "android_pinch": lambda args, **kw: _with_target_device(args, lambda call_args: android_pinch(**call_args)),
+    "android_media": lambda args, **kw: _with_target_device(args, lambda call_args: android_media(**call_args)),
+    "android_search_contacts": lambda args, **kw: _with_target_device(args, lambda call_args: android_search_contacts(**call_args)),
+    "android_send_intent": lambda args, **kw: _with_target_device(args, lambda call_args: android_send_intent(**call_args)),
+    "android_broadcast": lambda args, **kw: _with_target_device(args, lambda call_args: android_broadcast(**call_args)),
 }
