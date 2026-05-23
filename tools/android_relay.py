@@ -519,6 +519,15 @@ def _device_name(state: _RelayState, token: str) -> str:
     return token
 
 
+def _device_aliases(state: _RelayState, token: str) -> list[str]:
+    aliases = [
+        alias for alias, alias_token in state.device_aliases.items() if alias_token == token
+    ]
+    if token not in aliases:
+        aliases.append(token)
+    return aliases
+
+
 def _resolve_requested_token(
     state: _RelayState,
     request: web.Request,
@@ -579,6 +588,7 @@ async def _handle_devices(request: web.Request, state: _RelayState) -> web.Respo
         devices.append(
             {
                 "device": _device_name(state, token),
+                "aliases": _device_aliases(state, token),
                 "token": _mask_token(token),
                 "connected": token in connected,
                 "default": token == state.default_device,

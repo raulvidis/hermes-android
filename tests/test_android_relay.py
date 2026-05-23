@@ -15,6 +15,7 @@ from tools.android_relay import (
     _auth_failures,
     _AUTH_MAX_ATTEMPTS,
     _mask_token,
+    _device_aliases,
 )
 
 
@@ -82,6 +83,7 @@ class TestRelayLifecycle:
         monkeypatch.setenv("ANDROID_BRIDGE_DEVICES", "old=LRW2U7,new=EMDMFU")
         state = _RelayState("LRW2U7,EMDMFU", 19881)
         assert state.device_aliases == {"old": "LRW2U7", "new": "EMDMFU"}
+        assert _device_aliases(state, "LRW2U7") == ["old", "LRW2U7"]
 
 
 class TestRateLimiting:

@@ -64,10 +64,16 @@ def _bridge_token() -> Optional[str]:
 _CURRENT_DEVICE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "android_device", default=None
 )
+_ACTIVE_DEVICE: Optional[str] = None
 
 
 def _selected_device(device: Optional[str] = None) -> Optional[str]:
-    return device or _CURRENT_DEVICE.get() or os.getenv("ANDROID_DEFAULT_DEVICE")
+    return (
+        device
+        or _CURRENT_DEVICE.get()
+        or _ACTIVE_DEVICE
+        or os.getenv("ANDROID_DEFAULT_DEVICE")
+    )
 
 
 def _relay_port() -> int:
@@ -158,7 +164,67 @@ def android_devices() -> str:
     """List configured Android devices and whether each one is connected."""
     try:
         data = _get("/devices")
+        data["active_device"] = _selected_device()
+        data["usage"] = (
+            "Use android_select_device(device) before a multi-step task, or pass "
+            "device to individual android_* calls. Call android_read_screen after "
+            "selecting a device before tapping."
+        )
         return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_select_device(device: str) -> str:
+    """
+    Select the Android device that subsequent android_* tool calls should target.
+    Use a device alias from android_devices(), such as 'old' or 'lrw2u7'.
+    """
+    global _ACTIVE_DEVICE
+    try:
+        requested = str(device).strip()
+        if not requested:
+            return json.dumps({"error": "device is required"})
+
+        data = _get("/devices")
+        devices = data.get("devices", [])
+        connected = []
+        for item in devices:
+            aliases = [item.get("device"), *item.get("aliases", [])]
+            aliases = [str(alias) for alias in aliases if alias]
+            if item.get("connected"):
+                connected.append(item.get("device"))
+            if requested.lower() in {alias.lower() for alias in aliases}:
+                if not item.get("connected"):
+                    return json.dumps(
+                        {
+                            "error": f"Android device '{requested}' is configured but not connected.",
+                            "devices": devices,
+                        }
+                    )
+                _ACTIVE_DEVICE = item.get("device") or requested
+                return json.dumps(
+                    {
+                        "status": "ok",
+                        "active_device": _ACTIVE_DEVICE,
+                        "message": (
+                            f"Selected Android device '{_ACTIVE_DEVICE}'. "
+                            "Subsequent android_* calls will target it unless a device argument is provided."
+                        ),
+                        "devices": devices,
+                    }
+                )
+
+        return json.dumps(
+            {
+                "error": (
+                    f"Unknown Android device '{requested}'. Call android_devices and choose "
+                    "one of the listed device names or aliases."
+                ),
+                "connected_devices": connected,
+                "devices": devices,
+            }
+        )
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -902,8 +968,22 @@ _SCHEMAS = {
     },
     "android_devices": {
         "name": "android_devices",
-        "description": "List configured Android devices and whether each device is connected. Use this before targeting a specific device.",
+        "description": "List configured Android devices, aliases, connection state, and the currently selected target device. Use this before choosing a device.",
         "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_select_device": {
+        "name": "android_select_device",
+        "description": "Select which Android device subsequent android_* calls should target. Call android_devices first when the user refers to a phone ambiguously. After selecting, call android_read_screen before tapping.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device": {
+                    "type": "string",
+                    "description": "Device alias from android_devices, such as old, new, lrw2u7, or emdmfu.",
+                }
+            },
+            "required": ["device"],
+        },
     },
     "android_read_screen": {
         "name": "android_read_screen",
@@ -1479,7 +1559,7 @@ _DEVICE_PARAMETER = {
 }
 
 for _tool_name, _schema in _SCHEMAS.items():
-    if _tool_name in {"android_setup", "android_devices"}:
+    if _tool_name in {"android_setup", "android_devices", "android_select_device"}:
         continue
     _schema["parameters"].setdefault("properties", {})["device"] = _DEVICE_PARAMETER
 
@@ -1499,6 +1579,7 @@ def _with_target_device(args: dict, handler):
 _HANDLERS = {
     "android_ping": lambda args, **kw: _with_target_device(args, lambda _args: android_ping()),
     "android_devices": lambda args, **kw: android_devices(),
+    "android_select_device": lambda args, **kw: android_select_device(**args),
     "android_read_screen": lambda args, **kw: _with_target_device(args, lambda call_args: android_read_screen(**call_args)),
     "android_tap": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap(**call_args)),
     "android_tap_text": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap_text(**call_args)),
