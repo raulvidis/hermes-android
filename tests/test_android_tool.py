@@ -54,9 +54,9 @@ from tools.android_tool import (
 def reset_active_device():
     import tools.android_tool as mod
 
-    mod._ACTIVE_DEVICE = None
+    token = mod._ACTIVE_DEVICE.set(None)
     yield
-    mod._ACTIVE_DEVICE = None
+    mod._ACTIVE_DEVICE.reset(token)
 
 
 class TestSchemas:
@@ -157,13 +157,14 @@ class TestDevices:
         )
         responses.add(
             responses.GET,
-            f"{bridge_url}/ping?device=phone-a",
+            f"{bridge_url}/ping?device=old",
             json={"status": "ok", "accessibilityService": True},
         )
 
         selected = json.loads(android_select_device("old"))
         assert selected["status"] == "ok"
-        assert selected["active_device"] == "phone-a"
+        assert selected["active_device"] == "old"
+        assert selected["matched_device"] == "phone-a"
 
         result = json.loads(android_ping())
         assert result["status"] == "ok"
@@ -238,10 +239,20 @@ class TestDevices:
         )
 
         selected = json.loads(android_select_device("old"))
-        assert selected["active_device"] == "phone-a"
+        assert selected["active_device"] == "old"
 
         result = json.loads(_HANDLERS["android_ping"]({"device": "phone-b"}))
         assert result["status"] == "ok"
+
+    def test_active_device_is_context_local(self):
+        import contextvars
+        import tools.android_tool as mod
+
+        ctx = contextvars.copy_context()
+        ctx.run(mod._ACTIVE_DEVICE.set, "phone-a")
+
+        assert ctx.run(mod._selected_device) == "phone-a"
+        assert mod._selected_device() is None
 
 
 class TestReadScreen:

@@ -514,7 +514,7 @@ _RESPONSE_TIMEOUT = 30  # seconds
 
 def _device_name(state: _RelayState, token: str) -> str:
     for alias, alias_token in state.device_aliases.items():
-        if alias_token == token:
+        if alias_token == token and _normalize_token(alias) == token:
             return alias
     return token
 

@@ -40,14 +40,16 @@ def _bridge_token() -> Optional[str]:
 _CURRENT_DEVICE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "android_device", default=None
 )
-_ACTIVE_DEVICE: Optional[str] = None
+_ACTIVE_DEVICE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "android_active_device", default=None
+)
 
 
 def _selected_device(device: Optional[str] = None) -> Optional[str]:
     return (
         device
         or _CURRENT_DEVICE.get()
-        or _ACTIVE_DEVICE
+        or _ACTIVE_DEVICE.get()
         or os.getenv("ANDROID_DEFAULT_DEVICE")
     )
 
@@ -154,9 +156,8 @@ def android_devices() -> str:
 def android_select_device(device: str) -> str:
     """
     Select the Android device that subsequent android_* tool calls should target.
-    Use a device alias from android_devices(), such as 'old' or 'lrw2u7'.
+    Use a device alias from android_devices(), such as 'phone-a' or 'lrw2u7'.
     """
-    global _ACTIVE_DEVICE
     try:
         requested = str(device).strip()
         if not requested:
@@ -178,13 +179,14 @@ def android_select_device(device: str) -> str:
                             "devices": devices,
                         }
                     )
-                _ACTIVE_DEVICE = item.get("device") or requested
+                _ACTIVE_DEVICE.set(requested)
                 return json.dumps(
                     {
                         "status": "ok",
-                        "active_device": _ACTIVE_DEVICE,
+                        "active_device": requested,
+                        "matched_device": item.get("device"),
                         "message": (
-                            f"Selected Android device '{_ACTIVE_DEVICE}'. "
+                            f"Selected Android device '{requested}'. "
                             "Subsequent android_* calls will target it unless a device argument is provided."
                         ),
                         "devices": devices,
@@ -952,7 +954,7 @@ _SCHEMAS = {
             "properties": {
                 "device": {
                     "type": "string",
-                    "description": "Device alias from android_devices, such as old, new, lrw2u7, or emdmfu.",
+                    "description": "Device alias from android_devices, such as phone-a, work, lrw2u7, or emdmfu.",
                 }
             },
             "required": ["device"],
@@ -1549,45 +1551,53 @@ def _with_target_device(args: dict, handler):
     finally:
         _CURRENT_DEVICE.reset(token)
 
+def _make_handler(func, *, target_device: bool = True, pass_args: bool = True):
+    def _call(call_args: dict):
+        return func(**call_args) if pass_args else func()
+
+    if not target_device:
+        return lambda args, **kw: _call(dict(args or {}))
+    return lambda args, **kw: _with_target_device(args, _call)
+
 _HANDLERS = {
-    "android_ping": lambda args, **kw: _with_target_device(args, lambda _args: android_ping()),
-    "android_devices": lambda args, **kw: android_devices(),
-    "android_select_device": lambda args, **kw: android_select_device(**args),
-    "android_read_screen": lambda args, **kw: _with_target_device(args, lambda call_args: android_read_screen(**call_args)),
-    "android_tap": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap(**call_args)),
-    "android_tap_text": lambda args, **kw: _with_target_device(args, lambda call_args: android_tap_text(**call_args)),
-    "android_type": lambda args, **kw: _with_target_device(args, lambda call_args: android_type(**call_args)),
-    "android_swipe": lambda args, **kw: _with_target_device(args, lambda call_args: android_swipe(**call_args)),
-    "android_open_app": lambda args, **kw: _with_target_device(args, lambda call_args: android_open_app(**call_args)),
-    "android_press_key": lambda args, **kw: _with_target_device(args, lambda call_args: android_press_key(**call_args)),
-    "android_screenshot": lambda args, **kw: _with_target_device(args, lambda _args: android_screenshot()),
-    "android_scroll": lambda args, **kw: _with_target_device(args, lambda call_args: android_scroll(**call_args)),
-    "android_wait": lambda args, **kw: _with_target_device(args, lambda call_args: android_wait(**call_args)),
-    "android_get_apps": lambda args, **kw: _with_target_device(args, lambda _args: android_get_apps()),
-    "android_current_app": lambda args, **kw: _with_target_device(args, lambda _args: android_current_app()),
-    "android_setup": lambda args, **kw: android_setup(**args),
-    "android_clipboard_read": lambda args, **kw: _with_target_device(args, lambda _args: android_clipboard_read()),
-    "android_clipboard_write": lambda args, **kw: _with_target_device(args, lambda call_args: android_clipboard_write(**call_args)),
-    "android_notifications": lambda args, **kw: _with_target_device(args, lambda call_args: android_notifications(**call_args)),
-    "android_long_press": lambda args, **kw: _with_target_device(args, lambda call_args: android_long_press(**call_args)),
-    "android_drag": lambda args, **kw: _with_target_device(args, lambda call_args: android_drag(**call_args)),
-    "android_describe_node": lambda args, **kw: _with_target_device(args, lambda call_args: android_describe_node(**call_args)),
-    "android_screen_hash": lambda args, **kw: _with_target_device(args, lambda _args: android_screen_hash()),
-    "android_macro": lambda args, **kw: _with_target_device(args, lambda call_args: android_macro(**call_args)),
-    "android_location": lambda args, **kw: _with_target_device(args, lambda _args: android_location()),
-    "android_send_sms": lambda args, **kw: _with_target_device(args, lambda call_args: android_send_sms(**call_args)),
-    "android_call": lambda args, **kw: _with_target_device(args, lambda call_args: android_call(**call_args)),
-    "android_speak": lambda args, **kw: _with_target_device(args, lambda call_args: android_speak(**call_args)),
-    "android_speak_stop": lambda args, **kw: _with_target_device(args, lambda _args: android_speak_stop()),
-    "android_events": lambda args, **kw: _with_target_device(args, lambda call_args: android_events(**call_args)),
-    "android_event_stream": lambda args, **kw: _with_target_device(args, lambda call_args: android_event_stream(**call_args)),
-    "android_screen_record": lambda args, **kw: _with_target_device(args, lambda call_args: android_screen_record(**call_args)),
-    "android_read_widgets": lambda args, **kw: _with_target_device(args, lambda _args: android_read_widgets()),
-    "android_find_nodes": lambda args, **kw: _with_target_device(args, lambda call_args: android_find_nodes(**call_args)),
-    "android_diff_screen": lambda args, **kw: _with_target_device(args, lambda call_args: android_diff_screen(**call_args)),
-    "android_pinch": lambda args, **kw: _with_target_device(args, lambda call_args: android_pinch(**call_args)),
-    "android_media": lambda args, **kw: _with_target_device(args, lambda call_args: android_media(**call_args)),
-    "android_search_contacts": lambda args, **kw: _with_target_device(args, lambda call_args: android_search_contacts(**call_args)),
-    "android_send_intent": lambda args, **kw: _with_target_device(args, lambda call_args: android_send_intent(**call_args)),
-    "android_broadcast": lambda args, **kw: _with_target_device(args, lambda call_args: android_broadcast(**call_args)),
+    "android_ping": _make_handler(android_ping, pass_args=False),
+    "android_devices": _make_handler(android_devices, target_device=False, pass_args=False),
+    "android_select_device": _make_handler(android_select_device, target_device=False),
+    "android_read_screen": _make_handler(android_read_screen),
+    "android_tap": _make_handler(android_tap),
+    "android_tap_text": _make_handler(android_tap_text),
+    "android_type": _make_handler(android_type),
+    "android_swipe": _make_handler(android_swipe),
+    "android_open_app": _make_handler(android_open_app),
+    "android_press_key": _make_handler(android_press_key),
+    "android_screenshot": _make_handler(android_screenshot, pass_args=False),
+    "android_scroll": _make_handler(android_scroll),
+    "android_wait": _make_handler(android_wait),
+    "android_get_apps": _make_handler(android_get_apps, pass_args=False),
+    "android_current_app": _make_handler(android_current_app, pass_args=False),
+    "android_setup": _make_handler(android_setup, target_device=False),
+    "android_clipboard_read": _make_handler(android_clipboard_read, pass_args=False),
+    "android_clipboard_write": _make_handler(android_clipboard_write),
+    "android_notifications": _make_handler(android_notifications),
+    "android_long_press": _make_handler(android_long_press),
+    "android_drag": _make_handler(android_drag),
+    "android_describe_node": _make_handler(android_describe_node),
+    "android_screen_hash": _make_handler(android_screen_hash, pass_args=False),
+    "android_macro": _make_handler(android_macro),
+    "android_location": _make_handler(android_location, pass_args=False),
+    "android_send_sms": _make_handler(android_send_sms),
+    "android_call": _make_handler(android_call),
+    "android_speak": _make_handler(android_speak),
+    "android_speak_stop": _make_handler(android_speak_stop, pass_args=False),
+    "android_events": _make_handler(android_events),
+    "android_event_stream": _make_handler(android_event_stream),
+    "android_screen_record": _make_handler(android_screen_record),
+    "android_read_widgets": _make_handler(android_read_widgets, pass_args=False),
+    "android_find_nodes": _make_handler(android_find_nodes),
+    "android_diff_screen": _make_handler(android_diff_screen),
+    "android_pinch": _make_handler(android_pinch),
+    "android_media": _make_handler(android_media),
+    "android_search_contacts": _make_handler(android_search_contacts),
+    "android_send_intent": _make_handler(android_send_intent),
+    "android_broadcast": _make_handler(android_broadcast),
 }
