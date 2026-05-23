@@ -104,28 +104,32 @@ object ActionExecutor {
 
         val focusedNode = service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
 
-        if (clearFirst) {
-            val bundle = Bundle()
-            bundle.putInt(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0
-            )
-            bundle.putInt(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
-                focusedNode?.text?.length ?: 0
-            )
-            focusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, bundle)
-            focusedNode?.performAction(AccessibilityNodeInfo.ACTION_CUT)
-        }
+        try {
+            if (clearFirst) {
+                val bundle = Bundle()
+                bundle.putInt(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0
+                )
+                bundle.putInt(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
+                    focusedNode?.text?.length ?: 0
+                )
+                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, bundle)
+                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_CUT)
+            }
 
-        val arguments = Bundle().apply {
-            putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text
-            )
+            val arguments = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text
+                )
+            }
+            val result = focusedNode?.performAction(
+                AccessibilityNodeInfo.ACTION_SET_TEXT, arguments
+            ) ?: false
+            ActionResult(result, if (result) "Typed text" else "No focused input found")
+        } finally {
+            focusedNode?.recycle()
         }
-        val result = focusedNode?.performAction(
-            AccessibilityNodeInfo.ACTION_SET_TEXT, arguments
-        ) ?: false
-        ActionResult(result, if (result) "Typed text" else "No focused input found")
     }
 
     suspend fun swipe(direction: String, distance: String = "medium"): ActionResult =
