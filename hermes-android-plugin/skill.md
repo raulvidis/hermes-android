@@ -48,11 +48,20 @@ After the user taps Connect on their phone, the phone connects to this server vi
 
 ## Available Tools
 
-You have these 38 tools. Use them by name — they are function calls.
+You have these 40 tools. Use them by name — they are function calls.
 
 ### Connectivity
 - `android_ping()` — check if phone is connected and responding
 - `android_setup(pairing_code)` — start relay and configure connection
+- `android_devices()` — list connected/configured devices, aliases, and current selected target
+- `android_select_device(device)` — select the target device for subsequent android_* calls
+
+### Multiple Devices
+- If more than one device is connected and the user's target is not explicit, call `android_devices()` first.
+- Use `android_select_device(device)` before a multi-step task so every following read/tap/type command goes to the same phone.
+- If the user explicitly names a device alias or token, pass `device="<alias>"` to the tool call or select it first.
+- After selecting a device, always call `android_read_screen()` before tapping or typing.
+- When reporting actions, include the selected device alias so the user can verify the target.
 
 ### Reading the Screen
 - `android_read_screen(include_bounds=False)` — get the full accessibility tree as JSON. Returns every visible UI element with text, className, nodeId, clickable, etc. **Always call this before interacting.**

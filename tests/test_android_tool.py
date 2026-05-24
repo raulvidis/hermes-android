@@ -6,6 +6,8 @@ import pytest
 # Import tool functions directly (not via registry)
 from tools.android_tool import (
     android_ping,
+    android_devices,
+    android_select_device,
     android_read_screen,
     android_tap,
     android_tap_text,
@@ -48,12 +50,21 @@ from tools.android_tool import (
 )
 
 
-class TestSchemas:
-    def test_all_38_tools_have_schemas(self):
-        assert len(_SCHEMAS) == 38
+@pytest.fixture(autouse=True)
+def reset_active_device():
+    import tools.android_tool as mod
 
-    def test_all_38_tools_have_handlers(self):
-        assert len(_HANDLERS) == 38
+    token = mod._ACTIVE_DEVICE.set(None)
+    yield
+    mod._ACTIVE_DEVICE.reset(token)
+
+
+class TestSchemas:
+    def test_all_40_tools_have_schemas(self):
+        assert len(_SCHEMAS) == 40
+
+    def test_all_40_tools_have_handlers(self):
+        assert len(_HANDLERS) == 40
 
     def test_schema_names_match_handler_names(self):
         assert set(_SCHEMAS.keys()) == set(_HANDLERS.keys())
@@ -63,6 +74,18 @@ class TestSchemas:
             assert "name" in schema, f"{name} missing 'name'"
             assert "description" in schema, f"{name} missing 'description'"
             assert "parameters" in schema, f"{name} missing 'parameters'"
+
+    def test_device_parameter_added_to_targetable_tools(self):
+        for name, schema in _SCHEMAS.items():
+            properties = schema["parameters"].get("properties", {})
+            if name in {"android_setup", "android_devices"}:
+                assert "device" not in properties
+            elif name == "android_select_device":
+                assert properties["device"]["description"].startswith(
+                    "Device alias from android_devices"
+                )
+            else:
+                assert "device" in properties
 
 
 class TestCodeQuality:
@@ -102,6 +125,134 @@ class TestPing:
         )
         result = json.loads(android_ping())
         assert result["status"] == "error"
+
+
+class TestDevices:
+    @responses.activate
+    def test_devices(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={"devices": [{"device": "phone-a", "connected": True}]},
+        )
+        result = json.loads(android_devices())
+        assert result["devices"][0]["device"] == "phone-a"
+        assert result["active_device"] is None
+        assert "android_select_device" in result["usage"]
+
+    @responses.activate
+    def test_select_device_sets_active_target(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={
+                "devices": [
+                    {
+                        "device": "phone-a",
+                        "aliases": ["old", "LRW2U7"],
+                        "connected": True,
+                    }
+                ]
+            },
+        )
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/ping?device=old",
+            json={"status": "ok", "accessibilityService": True},
+        )
+
+        selected = json.loads(android_select_device("old"))
+        assert selected["status"] == "ok"
+        assert selected["active_device"] == "old"
+        assert selected["matched_device"] == "phone-a"
+
+        result = json.loads(android_ping())
+        assert result["status"] == "ok"
+
+    @responses.activate
+    def test_select_device_rejects_disconnected_device(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={
+                "devices": [
+                    {
+                        "device": "phone-a",
+                        "aliases": ["old", "LRW2U7"],
+                        "connected": False,
+                    }
+                ]
+            },
+        )
+        result = json.loads(android_select_device("old"))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @responses.activate
+    def test_select_device_rejects_unknown_device(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={
+                "devices": [
+                    {
+                        "device": "phone-a",
+                        "aliases": ["old", "LRW2U7"],
+                        "connected": True,
+                    }
+                ]
+            },
+        )
+        result = json.loads(android_select_device("missing"))
+        assert "error" in result
+        assert "Unknown Android device" in result["error"]
+
+    @responses.activate
+    def test_handler_targets_device(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/ping?device=phone-a",
+            json={"status": "ok", "accessibilityService": True},
+        )
+        result = json.loads(_HANDLERS["android_ping"]({"device": "phone-a"}))
+        assert result["status"] == "ok"
+
+    @responses.activate
+    def test_handler_device_overrides_active_target(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/devices",
+            json={
+                "devices": [
+                    {
+                        "device": "phone-a",
+                        "aliases": ["old"],
+                        "connected": True,
+                    }
+                ]
+            },
+        )
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/ping?device=phone-b",
+            json={"status": "ok", "accessibilityService": True},
+        )
+
+        selected = json.loads(android_select_device("old"))
+        assert selected["active_device"] == "old"
+
+        result = json.loads(_HANDLERS["android_ping"]({"device": "phone-b"}))
+        assert result["status"] == "ok"
+
+    def test_active_device_is_context_local(self):
+        import contextvars
+        import tools.android_tool as mod
+
+        ctx = contextvars.copy_context()
+        ctx.run(mod._ACTIVE_DEVICE.set, "phone-a")
+
+        assert ctx.run(mod._selected_device) == "phone-a"
+        assert mod._selected_device() is None
 
 
 class TestReadScreen:
