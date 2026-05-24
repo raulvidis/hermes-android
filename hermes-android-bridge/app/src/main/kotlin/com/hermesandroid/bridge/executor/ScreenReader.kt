@@ -57,17 +57,22 @@ object ScreenReader {
         val service = BridgeAccessibilityService.instance ?: return null
         val roots = service.windows.mapNotNull { it.root }
         var found: AccessibilityNodeInfo? = null
-        for (root in roots) {
+        var foundIndex = -1
+        for ((i, root) in roots.withIndex()) {
             val result = findNodeByTextDfs(root, text, exact)
             if (result != null) {
                 found = result
+                foundIndex = i
                 // Don't recycle root if the found node IS the root
                 if (result !== root) root.recycle()
                 break
             }
             root.recycle()
         }
-        // Recycle remaining roots not yet processed
+        // Recycle remaining unprocessed roots after early break
+        for (i in (foundIndex + 1) until roots.size) {
+            roots[i].recycle()
+        }
         return found
     }
 
