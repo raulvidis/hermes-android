@@ -453,6 +453,29 @@ async def _handle_http(
     request: web.Request, state: _RelayState, path: str
 ) -> web.Response:
     """Forward an HTTP request from a tool to the phone over WebSocket."""
+    # ── Auth check ──────────────────────────────────────────────────────────
+    # Require Bearer token matching the pairing code.  The client already sends
+    # this (android_tool._auth_headers), so the only effect is blocking
+    # unauthenticated local processes from abusing the HTTP tool API.
+    remote_ip = request.remote or "unknown"
+    if _auth_is_blocked(remote_ip):
+        logger.warning("HTTP auth attempt from blocked IP %s — 429", remote_ip)
+        return web.json_response(
+            {"error": "Too many failed authentication attempts. Try again later."},
+            status=429,
+        )
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
+        _auth_record_failure(remote_ip)
+        logger.warning(
+            "HTTP %s %s rejected — bad auth from %s (header=%s)",
+            request.method, path, remote_ip, _mask_token(token),
+        )
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    # ── Phone connectivity check ────────────────────────────────────────────
     async with state.phone_ws_lock:
         ws = state.phone_ws
         if ws is None or ws.closed:
