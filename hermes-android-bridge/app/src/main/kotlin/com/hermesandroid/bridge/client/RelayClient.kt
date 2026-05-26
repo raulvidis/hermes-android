@@ -102,8 +102,8 @@ object RelayClient {
 
     private fun doConnect(serverUrl: String, pairingCode: String) {
         val wsUrl = buildWsUrl(serverUrl, pairingCode)
-        Log.i(TAG, "Connecting to $wsUrl")
-        notifyStatus(false, "Connecting to $wsUrl ...")
+        Log.i(TAG, "Connecting to ${buildWsUrl(serverUrl, "***")}")
+        notifyStatus(false, "Connecting to ${buildWsUrl(serverUrl, "***")} ...")
 
         val request = Request.Builder()
             .url(wsUrl)
@@ -112,7 +112,7 @@ object RelayClient {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WebSocket connected to $wsUrl")
+                Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl, "***")}")
                 isConnected = true
                 try {
                     BridgeAccessibilityService.instance?.startForeground()
