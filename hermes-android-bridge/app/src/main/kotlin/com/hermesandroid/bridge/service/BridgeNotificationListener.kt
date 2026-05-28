@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import com.hermesandroid.bridge.BuildConfig
 import com.hermesandroid.bridge.notification.NotificationStore
 
 class BridgeNotificationListener : NotificationListenerService() {
@@ -30,7 +31,7 @@ class BridgeNotificationListener : NotificationListenerService() {
         val entry = NotificationStore.parseNotification(sbn)
         if (entry != null) {
             NotificationStore.add(entry)
-            Log.d(TAG, "Notification from ${entry.packageName}: ${entry.text?.take(50)}")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Notification from ${entry.packageName}: ${entry.text?.take(50)}")
         }
     }
 
