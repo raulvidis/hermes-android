@@ -25,6 +25,15 @@ android {
         }
     }
 
+    // Name the built APK `hermes-android.apk` instead of the default `app-debug.apk`,
+    // for local builds, the CI artifact, and the Latest Build release asset alike.
+    applicationVariants.all {
+        outputs.all {
+            (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                .outputFileName = "hermes-android.apk"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
