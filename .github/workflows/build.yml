@@ -45,7 +45,7 @@ jobs:
 
       - name: Run unit tests
         working-directory: hermes-android-bridge
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew testDebugUnitTest --stacktrace -Pkotlin.compiler.execution.strategy=in-process
 
       - name: Build debug APK
         working-directory: hermes-android-bridge
