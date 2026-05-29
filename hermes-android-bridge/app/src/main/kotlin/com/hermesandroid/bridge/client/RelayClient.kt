@@ -15,7 +15,6 @@ import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import com.hermesandroid.bridge.service.BridgeNotificationListener
-import com.hermesandroid.bridge.BuildConfig
 import kotlinx.coroutines.*
 import okhttp3.*
 
