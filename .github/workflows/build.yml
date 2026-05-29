@@ -43,6 +43,10 @@ jobs:
         with:
           validate-wrappers: false
 
+      - name: Run unit tests
+        working-directory: hermes-android-bridge
+        run: ./gradlew testDebugUnitTest
+
       - name: Build debug APK
         working-directory: hermes-android-bridge
         run: ./gradlew assembleDebug

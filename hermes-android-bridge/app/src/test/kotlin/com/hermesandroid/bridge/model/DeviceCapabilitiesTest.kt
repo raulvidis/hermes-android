@@ -6,15 +6,12 @@ import io.mockk.every
 import io.mockk.mockk
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 
 class DeviceCapabilitiesTest {
 
-    @Before
-    fun setup() {
-        DeviceCapabilities.hasTelephony = false
-    }
+    // Each test establishes state via DeviceCapabilities.init(), so no shared
+    // reset is needed — and hasTelephony has a private setter by design.
 
     @Test
     fun `hasTelephony true when feature present`() {
