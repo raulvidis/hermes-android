@@ -42,15 +42,15 @@ Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0
 
 **Option A — Download the prebuilt APK (easiest).** Every push to `main` automatically
 publishes a fresh debug APK to the [**Latest Build**](https://github.com/raulvidis/hermes-android/releases/tag/latest-build)
-release. Download `hermes-android.apk` from there and install it — either by opening the file
-on the device (enable "Install unknown apps" for your browser/file manager when prompted)
-or via `adb install hermes-android.apk`.
+release. Download the `hermes-android-<version>.apk` asset from there and install it — either
+by opening the file on the device (enable "Install unknown apps" for your browser/file
+manager when prompted) or via `adb install hermes-android-*.apk`.
 
 **Option B — Build from source:**
 ```bash
 cd hermes-android-bridge
 ./gradlew assembleDebug
-adb install app/build/outputs/apk/debug/hermes-android.apk
+adb install app/build/outputs/apk/debug/hermes-android-*.apk
 ```
 
 > The APK is an unsigned **debug** build, which is why Android/Play Protect may warn on
@@ -87,8 +87,8 @@ The bridge app can run on Android Automotive OS (AAOS) car head units. Phone-spe
 
 ### Installation
 
-1. Get the APK: download `hermes-android.apk` from the [Latest Build release](https://github.com/raulvidis/hermes-android/releases/tag/latest-build), or build it with `cd hermes-android-bridge && ./gradlew assembleDebug`
-2. Sideload via ADB: `adb install hermes-android.apk`
+1. Get the APK: download `hermes-android-<version>.apk` from the [Latest Build release](https://github.com/raulvidis/hermes-android/releases/tag/latest-build), or build it with `cd hermes-android-bridge && ./gradlew assembleDebug`
+2. Sideload via ADB: `adb install hermes-android-*.apk`
    - USB: connect directly to the head unit's USB port
    - WiFi: `adb connect <head-unit-ip>:5555` then install
 3. Grant Accessibility Service: **Settings > Accessibility > Hermes Bridge > Enable**
