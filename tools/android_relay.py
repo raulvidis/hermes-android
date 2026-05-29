@@ -258,6 +258,13 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
 
     scheme = "https" if ssl_ctx else "http"
     logger.info("Relay listening on %s://0.0.0.0:%d", scheme, state.port)
+
+    if not ssl_ctx:
+        logger.warning(
+            "⚠️  TLS is NOT configured — all traffic (including pairing tokens) is "
+            "sent in cleartext. Set ANDROID_RELAY_CERT and ANDROID_RELAY_KEY env vars "
+            "to enable TLS. Binding to 0.0.0.0 without TLS is insecure for internet-facing use."
+        )
     ready.set()
 
     # Block until shutdown is signalled

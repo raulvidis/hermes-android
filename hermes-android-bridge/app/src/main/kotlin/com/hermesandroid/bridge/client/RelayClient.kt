@@ -3,6 +3,7 @@ package com.hermesandroid.bridge.client
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.hermesandroid.bridge.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -14,7 +15,6 @@ import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import com.hermesandroid.bridge.service.BridgeNotificationListener
-import com.hermesandroid.bridge.BuildConfig
 import kotlinx.coroutines.*
 import okhttp3.*
 
@@ -206,7 +206,7 @@ object RelayClient {
             val params = json.getAsJsonObject("params") ?: JsonObject()
             val body = json.getAsJsonObject("body") ?: JsonObject()
 
-            Log.d(TAG, "Received command: $method $path (id=$requestId)")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Received command: $method $path (id=$requestId)")
 
             val response = dispatchCommand(method, path, params, body)
 

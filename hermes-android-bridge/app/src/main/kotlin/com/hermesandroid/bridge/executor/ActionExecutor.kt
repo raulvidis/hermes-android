@@ -568,6 +568,7 @@ object ActionExecutor {
     }
 
     fun searchContacts(query: String, limit: Int = 20): ActionResult {
+        val safeLimit = limit.coerceAtMost(100).coerceAtLeast(1)
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
         if (!service.hasSelfPermission(android.Manifest.permission.READ_CONTACTS)) {
@@ -580,7 +581,7 @@ object ActionExecutor {
                 android.provider.ContactsContract.Contacts._ID,
                 android.provider.ContactsContract.Contacts.DISPLAY_NAME
             )
-            val cursor = service.contentResolver.query(uri, projection, null, null, "${android.provider.ContactsContract.Contacts.DISPLAY_NAME} ASC LIMIT $limit")
+            val cursor = service.contentResolver.query(uri, projection, null, null, "${android.provider.ContactsContract.Contacts.DISPLAY_NAME} ASC LIMIT $safeLimit")
             cursor?.use {
                 val idIdx = it.getColumnIndex(android.provider.ContactsContract.Contacts._ID)
                 val nameIdx = it.getColumnIndex(android.provider.ContactsContract.Contacts.DISPLAY_NAME)
