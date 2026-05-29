@@ -67,6 +67,10 @@ object PairingManager {
      */
     fun validateToken(authHeader: String?): Boolean {
         if (authHeader == null) return false
+        // Require the documented "Bearer <code>" format. A bare token without the
+        // prefix is rejected — matches the client (always sends "Bearer ...") and the
+        // Python relay, which also requires the prefix.
+        if (!authHeader.startsWith("Bearer ")) return false
         val token = authHeader.removePrefix("Bearer ").trim()
         val expected = getCode()
         if (expected.isEmpty()) return false
