@@ -767,20 +767,21 @@ object ActionExecutor {
     private var tts: android.speech.tts.TextToSpeech? = null
     private var ttsReady = false
 
-    private fun ensureTts(): Boolean {
+    private suspend fun ensureTts(): Boolean {
         val service = BridgeAccessibilityService.instance ?: return false
         if (tts == null || !ttsReady) {
-            val latch = java.util.concurrent.CountDownLatch(1)
-            tts = android.speech.tts.TextToSpeech(service.applicationContext, android.speech.tts.TextToSpeech.OnInitListener {
-                ttsReady = it == android.speech.tts.TextToSpeech.SUCCESS
-                latch.countDown()
-            })
-            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            ttsReady = suspendCancellableCoroutine { cont ->
+                tts = android.speech.tts.TextToSpeech(service.applicationContext, android.speech.tts.TextToSpeech.OnInitListener { status ->
+                    val ready = status == android.speech.tts.TextToSpeech.SUCCESS
+                    ttsReady = ready
+                    cont.resume(ready)
+                })
+            }
         }
         return ttsReady
     }
 
-    fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult {
+    suspend fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult {
         if (!ensureTts()) {
             return ActionResult(false, "TTS not available")
         }
