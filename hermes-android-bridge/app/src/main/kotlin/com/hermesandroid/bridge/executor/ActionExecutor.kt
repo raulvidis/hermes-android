@@ -681,7 +681,14 @@ object ActionExecutor {
         return found
     }
 
-    /** DFS search matching the stable ID format from ScreenReader.buildNode */
+    /**
+     * DFS search matching the stable ID format from ScreenReader.buildNode.
+     *
+     * Memory contract: the returned node(s) are intentionally NOT recycled — the caller
+     * owns them and must recycle when done. Unmatched child nodes traversed during the
+     * DFS are recycled in the else-branch. Siblings after the first match are skipped
+     * (early break) and left for the system to reclaim.
+     */
     private fun findNodeByIdInTree(
         info: AccessibilityNodeInfo, targetId: String, path: String
     ): List<AccessibilityNodeInfo> {
