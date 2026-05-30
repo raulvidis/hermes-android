@@ -523,7 +523,7 @@ object ActionExecutor {
                 SmsManager.getDefault()
             }
             smsManager.sendTextMessage(to, null, body, null, null)
-            ActionResult(true, "SMS sent to $to")
+            ActionResult(true, "SMS sent")
         } catch (e: SecurityException) {
             ActionResult(false, "SMS permission denied: ${e.message}")
         }
