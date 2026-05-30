@@ -793,6 +793,12 @@ object ActionExecutor {
         return ActionResult(true, "Stopped speaking")
     }
 
+    fun shutdownTts() {
+        tts?.shutdown()
+        tts = null
+        ttsReady = false
+    }
+
     private fun Context.hasSelfPermission(permission: String): Boolean {
         return android.content.pm.PackageManager.PERMISSION_GRANTED ==
             checkSelfPermission(permission)

@@ -112,6 +112,7 @@ class BridgeAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        com.hermesandroid.bridge.executor.ActionExecutor.shutdownTts()
         instance = null
         super.onDestroy()
     }
