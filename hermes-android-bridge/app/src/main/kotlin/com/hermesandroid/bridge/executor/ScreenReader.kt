@@ -11,9 +11,11 @@ object ScreenReader {
         val service = BridgeAccessibilityService.instance
             ?: return listOf()
 
-        val roots = service.windows.mapNotNull { it.root }
+        val windows = service.windows
+        val roots = windows.mapNotNull { it.root }
         val result = roots.mapIndexed { i, root -> buildNode(root, includeBounds, "$i") }
         roots.forEach { it.recycle() }
+        windows.forEach { it.recycle() }
         return result
     }
 
@@ -55,7 +57,8 @@ object ScreenReader {
         exact: Boolean = false
     ): AccessibilityNodeInfo? {
         val service = BridgeAccessibilityService.instance ?: return null
-        val roots = service.windows.mapNotNull { it.root }
+        val windows = service.windows
+        val roots = windows.mapNotNull { it.root }
         var found: AccessibilityNodeInfo? = null
         var foundIndex = -1
         for ((i, root) in roots.withIndex()) {
@@ -73,6 +76,7 @@ object ScreenReader {
         for (i in (foundIndex + 1) until roots.size) {
             roots[i].recycle()
         }
+        windows.forEach { it.recycle() }
         return found
     }
 
@@ -97,12 +101,14 @@ object ScreenReader {
     fun searchNodes(textFilter: String? = null, classNameFilter: String? = null, clickableFilter: Boolean? = null, limit: Int = 20): List<Map<String, Any?>> {
         val service = BridgeAccessibilityService.instance ?: return emptyList()
         val results = mutableListOf<Map<String, Any?>>()
-        val roots = service.windows.mapNotNull { it.root }
+        val windows = service.windows
+        val roots = windows.mapNotNull { it.root }
         for ((wi, root) in roots.withIndex()) {
             searchNodesDfs(root, textFilter, classNameFilter, clickableFilter, limit, results, "$wi")
             root.recycle()
             if (results.size >= limit) break
         }
+        windows.forEach { it.recycle() }
         return results
     }
 
