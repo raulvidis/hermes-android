@@ -667,7 +667,8 @@ object ActionExecutor {
 
     private fun findNodeById(nodeId: String): AccessibilityNodeInfo? {
         val service = BridgeAccessibilityService.instance ?: return null
-        val roots = service.windows.mapNotNull { it.root }
+        val windows = service.windows
+        val roots = windows.mapNotNull { it.root }
         var found: AccessibilityNodeInfo? = null
         for ((wi, root) in roots.withIndex()) {
             val matches = findNodeByIdInTree(root, nodeId, "$wi")
@@ -678,6 +679,7 @@ object ActionExecutor {
             }
             root.recycle()
         }
+        windows.forEach { it.recycle() }
         return found
     }
 
@@ -721,12 +723,14 @@ object ActionExecutor {
         service.startActivity(homeIntent)
         delay(1000)
 
-        val roots = service.windows.mapNotNull { it.root }
+        val windows = service.windows
+        val roots = windows.mapNotNull { it.root }
         val widgets = mutableListOf<Map<String, Any?>>()
         for (root in roots) {
             collectWidgetInfo(root, widgets, 0)
             root.recycle()
         }
+        windows.forEach { it.recycle() }
 
         return ActionResult(true, "Found ${widgets.size} widget elements", mapOf("widgets" to widgets, "count" to widgets.size))
     }
