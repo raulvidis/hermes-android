@@ -138,10 +138,12 @@ object CommandDispatcher {
             method == "GET" && path == "/current_app" -> {
                 val result = withContext(Dispatchers.Main) {
                     val service = BridgeAccessibilityService.instance
-                    val root = service?.windows?.firstOrNull()?.root
+                    val windows = service?.windows ?: emptyList()
+                    val root = windows.firstOrNull()?.root
                     val pkg = root?.packageName?.toString() ?: "unknown"
                     val cls = root?.className?.toString() ?: "unknown"
                     root?.recycle()
+                    windows.forEach { it.recycle() }
                     mapOf("package" to pkg, "className" to cls)
                 }
                 result to 200
