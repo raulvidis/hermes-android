@@ -329,7 +329,7 @@ object ActionExecutor {
         val cm = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText("hermes", text)
         cm.setPrimaryClip(clip)
-        return ActionResult(true, "Copied to clipboard", text)
+        return ActionResult(true, "Copied to clipboard")
     }
 
     suspend fun longPress(x: Int? = null, y: Int? = null, nodeId: String? = null, duration: Long = 500): ActionResult =
@@ -539,7 +539,7 @@ object ActionExecutor {
         }
         return try {
             service.startActivity(intent)
-            ActionResult(true, if (hasCallPermission) "Calling $number" else "Opened dialer for $number (grant CALL_PHONE permission to auto-dial)")
+            ActionResult(true, if (hasCallPermission) "Calling" else "Opened dialer (grant CALL_PHONE permission to auto-dial)")
         } catch (e: SecurityException) {
             ActionResult(false, "Call failed: ${e.message}")
         }
