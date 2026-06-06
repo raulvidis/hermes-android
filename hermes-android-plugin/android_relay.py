@@ -248,18 +248,20 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     await runner.setup()
 
     ssl_ctx = _ssl_context()
-    site = web.TCPSite(runner, "0.0.0.0", state.port, ssl_context=ssl_ctx)
+    host = os.getenv("ANDROID_RELAY_HOST", "localhost")
+    site = web.TCPSite(runner, host, state.port, ssl_context=ssl_ctx)
     state.site = site
     await site.start()
 
     scheme = "https" if ssl_ctx else "http"
-    logger.info("Relay listening on %s://0.0.0.0:%d", scheme, state.port)
+    logger.info("Relay listening on %s://%s:%d", scheme, host, state.port)
 
-    if not ssl_ctx:
+    if not ssl_ctx and host != "localhost":
         logger.warning(
             "⚠️  TLS is NOT configured — all traffic (including pairing tokens) is "
             "sent in cleartext. Set ANDROID_RELAY_CERT and ANDROID_RELAY_KEY env vars "
-            "to enable TLS. Binding to 0.0.0.0 without TLS is insecure for internet-facing use."
+            "to enable TLS. Binding to %s without TLS is insecure for internet-facing use.",
+            host,
         )
 
     ready.set()
