@@ -404,21 +404,24 @@ object ActionExecutor {
         if (currentHash == previousHash) {
             return ActionResult(true, "No changes detected", mapOf("changed" to false, "hash" to currentHash))
         }
-        val currentNodeIds = mutableSetOf<String>()
-        val currentTexts = mutableMapOf<String, String?>()
-        fun collectCurrent(ns: List<com.hermesandroid.bridge.model.ScreenNode>) {
-            for (n in ns) {
-                currentNodeIds.add(n.nodeId)
-                currentTexts[n.nodeId] = n.text
-                collectCurrent(n.children)
-            }
-        }
-        collectCurrent(nodes)
+        val nodeCount = countNodes(nodes)
         return ActionResult(true, "Screen changed", mapOf(
             "changed" to true,
             "hash" to currentHash,
-            "nodeCount" to currentNodeIds.size
+            "nodeCount" to nodeCount
         ))
+    }
+
+    private fun countNodes(nodes: List<com.hermesandroid.bridge.model.ScreenNode>): Int {
+        var count = 0
+        fun walk(ns: List<com.hermesandroid.bridge.model.ScreenNode>) {
+            for (n in ns) {
+                count++
+                walk(n.children)
+            }
+        }
+        walk(nodes)
+        return count
     }
 
     suspend fun pinch(x: Int, y: Int, scale: Float = 1.5f, duration: Long = 300): ActionResult =
