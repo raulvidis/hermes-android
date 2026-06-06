@@ -344,7 +344,7 @@ object CommandDispatcher {
             }
 
             method == "POST" && path == "/screen_record" -> {
-                val durationMs = body.get("durationMs")?.asLong ?: 5000L
+                val durationMs = body.get("durationMs")?.asLong?.coerceAtMost(30_000L) ?: 5000L
                 val result = withContext(Dispatchers.IO) {
                     ScreenRecorder.record(durationMs)
                 }

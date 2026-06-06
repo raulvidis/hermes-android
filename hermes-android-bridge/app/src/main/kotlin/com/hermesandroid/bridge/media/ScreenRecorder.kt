@@ -16,6 +16,7 @@ import java.io.File
 object ScreenRecorder {
     private const val NO_PERMISSION_MESSAGE =
         "No MediaProjection. Grant Screen Recording in the app before each capture on Android 16."
+    private const val MAX_DURATION_MS = 30_000L
 
     private var projectionResultCode: Int? = null
     private var projectionData: Intent? = null
@@ -43,6 +44,7 @@ object ScreenRecorder {
      * that created the VirtualDisplay callback handler — NOT on Dispatchers.IO.
      */
     fun record(durationMs: Long = 5000): Map<String, Any?> {
+        val safeDuration = durationMs.coerceAtMost(MAX_DURATION_MS)
         val service = BridgeAccessibilityService.instance
             ?: return mapOf("success" to false, "message" to "Accessibility service not running")
         val resultCode = projectionResultCode
@@ -97,7 +99,7 @@ object ScreenRecorder {
                 mr.start()
 
                 // Safe to block here — we're on the dedicated HandlerThread
-                Thread.sleep(durationMs)
+                Thread.sleep(safeDuration)
 
                 mr.stop()
                 mr.release()
@@ -111,12 +113,12 @@ object ScreenRecorder {
 
                 resultHolder[0] = mapOf(
                     "success" to true,
-                    "message" to "Recorded ${durationMs}ms",
+                    "message" to "Recorded ${safeDuration}ms",
                     "data" to mapOf(
                         "video" to base64Video,
                         "width" to width,
                         "height" to height,
-                        "durationMs" to durationMs,
+                        "durationMs" to safeDuration,
                         "sizeBytes" to bytes.size,
                         "mimeType" to "video/mp4"
                     )
@@ -139,7 +141,7 @@ object ScreenRecorder {
         }
 
         // Wait for the handler thread to finish (with generous timeout)
-        latch.await(durationMs + 10000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        latch.await(safeDuration + 10000, java.util.concurrent.TimeUnit.MILLISECONDS)
         return resultHolder[0] ?: mapOf("success" to false, "message" to "Recording timed out")
     }
 
