@@ -23,13 +23,16 @@ data class NotificationEntry(
 object NotificationStore {
 
     private val notifications = ConcurrentLinkedDeque<NotificationEntry>()
+    private val lock = Any()
     var maxCapacity: Int = 50
 
     fun add(entry: NotificationEntry) {
-        if (notifications.size >= maxCapacity) {
-            notifications.removeLast()
+        synchronized(lock) {
+            if (notifications.size >= maxCapacity) {
+                notifications.removeLast()
+            }
+            notifications.addFirst(entry)
         }
-        notifications.addFirst(entry)
     }
 
     fun getAll(limit: Int = 50): List<NotificationEntry> {
