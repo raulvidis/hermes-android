@@ -57,15 +57,21 @@ object EventStore {
     }
 
     fun getAll(limit: Int = 50): List<AccessibilityEventData> {
-        return events.take(limit)
+        synchronized(lock) {
+            return events.take(limit)
+        }
     }
 
     fun getSince(sinceTimestamp: Long, limit: Int = 50): List<AccessibilityEventData> {
-        return events.filter { it.timestamp > sinceTimestamp }.take(limit)
+        synchronized(lock) {
+            return events.filter { it.timestamp > sinceTimestamp }.take(limit)
+        }
     }
 
     fun clear() {
-        events.clear()
+        synchronized(lock) {
+            events.clear()
+        }
     }
 
     fun setStreaming(enabled: Boolean) {
