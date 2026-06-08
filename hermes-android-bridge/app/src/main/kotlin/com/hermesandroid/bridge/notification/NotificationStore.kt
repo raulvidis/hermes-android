@@ -48,7 +48,9 @@ object NotificationStore {
     }
 
     fun markRemoved(key: String) {
-        notifications.find { it.key == key }?.removed = true
+        synchronized(lock) {
+            notifications.find { it.key == key }?.removed = true
+        }
     }
 
     fun parseNotification(sbn: StatusBarNotification): NotificationEntry? {
