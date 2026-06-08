@@ -368,7 +368,9 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     token = request.query.get("token", "")
     # Constant-time comparison to mitigate timing side-channel attacks that
     # could otherwise leak the pairing code byte-by-byte.
-    if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
+    # PairingManager generates uppercase-only codes — compare exact-case to
+    # preserve full key-space entropy.
+    if not hmac.compare_digest(token, state.pairing_code):
         _auth_record_failure(remote_ip)
         logger.warning(
             "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
@@ -473,7 +475,7 @@ async def _handle_http(
 
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-    if not hmac.compare_digest(token.upper(), state.pairing_code.upper()):
+    if not hmac.compare_digest(token, state.pairing_code):
         _auth_record_failure(remote_ip)
         logger.warning(
             "HTTP %s %s rejected — bad auth from %s (header=%s)",
