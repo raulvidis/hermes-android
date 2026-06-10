@@ -36,15 +36,21 @@ object NotificationStore {
     }
 
     fun getAll(limit: Int = 50): List<NotificationEntry> {
-        return notifications.filter { !it.removed }.take(limit)
+        synchronized(lock) {
+            return notifications.filter { !it.removed }.take(limit)
+        }
     }
 
     fun getSince(sinceTimestamp: Long, limit: Int = 50): List<NotificationEntry> {
-        return notifications.filter { !it.removed && it.timestamp > sinceTimestamp }.take(limit)
+        synchronized(lock) {
+            return notifications.filter { !it.removed && it.timestamp > sinceTimestamp }.take(limit)
+        }
     }
 
     fun clear() {
-        notifications.clear()
+        synchronized(lock) {
+            notifications.clear()
+        }
     }
 
     fun markRemoved(key: String) {
