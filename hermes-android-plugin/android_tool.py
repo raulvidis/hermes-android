@@ -203,8 +203,8 @@ def android_open_app(package: str) -> str:
 def android_press_key(key: str) -> str:
     """
     Press a key. Supported keys:
-      back, home, recents, power, volume_up, volume_down,
-      enter, delete, tab, escape, search, notifications
+      back, home, recents, power, notifications,
+      quick_settings, lock_screen, take_screenshot
     """
     try:
         data = _post("/press_key", {"key": key})
@@ -944,14 +944,10 @@ _SCHEMAS = {
                         "home",
                         "recents",
                         "power",
-                        "volume_up",
-                        "volume_down",
-                        "enter",
-                        "delete",
-                        "tab",
-                        "escape",
-                        "search",
                         "notifications",
+                        "quick_settings",
+                        "lock_screen",
+                        "take_screenshot",
                     ],
                 }
             },
