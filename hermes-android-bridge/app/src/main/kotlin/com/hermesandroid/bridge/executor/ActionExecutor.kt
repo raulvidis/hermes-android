@@ -106,16 +106,12 @@ object ActionExecutor {
 
         try {
             if (clearFirst) {
-                val bundle = Bundle()
-                bundle.putInt(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0
-                )
-                bundle.putInt(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
-                    focusedNode?.text?.length ?: 0
-                )
-                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, bundle)
-                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_CUT)
+                val clearArgs = Bundle().apply {
+                    putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, ""
+                    )
+                }
+                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
             }
 
             val arguments = Bundle().apply {
