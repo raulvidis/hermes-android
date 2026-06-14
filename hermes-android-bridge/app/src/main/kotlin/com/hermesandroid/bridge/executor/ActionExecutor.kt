@@ -485,27 +485,35 @@ object ActionExecutor {
     fun location(): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
-        val lm = service.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-        val providers = lm.getProviders(true)
-        var best: android.location.Location? = null
-        for (provider in providers) {
-            @Suppress("DEPRECATION")
-            val loc = lm.getLastKnownLocation(provider) ?: continue
-            if (best == null || loc.accuracy < best.accuracy) {
-                best = loc
+        if (!service.hasSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) &&
+            !service.hasSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION)) {
+            return ActionResult(false, "Location permission not granted. Grant it in Settings > Apps > Hermes Bridge > Permissions.")
+        }
+        return try {
+            val lm = service.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+            val providers = lm.getProviders(true)
+            var best: android.location.Location? = null
+            for (provider in providers) {
+                @Suppress("DEPRECATION")
+                val loc = lm.getLastKnownLocation(provider) ?: continue
+                if (best == null || loc.accuracy < best.accuracy) {
+                    best = loc
+                }
             }
+            if (best == null) {
+                return ActionResult(false, "No location available. Enable GPS/Location.")
+            }
+            ActionResult(true, "Location", mapOf(
+                "latitude" to best.latitude,
+                "longitude" to best.longitude,
+                "accuracy" to best.accuracy,
+                "altitude" to best.altitude,
+                "provider" to (best.provider ?: "unknown"),
+                "timestamp" to best.time
+            ))
+        } catch (e: SecurityException) {
+            ActionResult(false, "Location permission denied: ${e.message}")
         }
-        if (best == null) {
-            return ActionResult(false, "No location available. Enable GPS/Location.")
-        }
-        return ActionResult(true, "Location", mapOf(
-            "latitude" to best.latitude,
-            "longitude" to best.longitude,
-            "accuracy" to best.accuracy,
-            "altitude" to best.altitude,
-            "provider" to (best.provider ?: "unknown"),
-            "timestamp" to best.time
-        ))
     }
 
     fun sendSms(to: String, body: String): ActionResult {
