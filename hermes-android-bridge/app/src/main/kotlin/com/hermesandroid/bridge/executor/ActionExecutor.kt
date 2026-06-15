@@ -242,6 +242,10 @@ object ActionExecutor {
                         val bitmap = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
                         hwBitmap.recycle()
                         result.hardwareBuffer.close()
+                        if (bitmap == null) {
+                            cont.resume(ActionResult(false, "Failed to copy screenshot bitmap"))
+                            return
+                        }
 
                         val w = bitmap.width
                         val h = bitmap.height
