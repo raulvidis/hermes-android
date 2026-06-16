@@ -13,6 +13,10 @@ import io.ktor.server.response.*
 object BridgeServer {
     private var server: ApplicationEngine? = null
 
+    // Per-IP auth throttle — defends the 0.0.0.0:8765 bind against
+    // brute-forcing the pairing code (see AuthRateLimiter).
+    private val authRateLimiter = AuthRateLimiter()
+
     fun start(port: Int = 8765) {
         if (server != null) return
         server = embeddedServer(Netty, port = port, host = "0.0.0.0") {
@@ -22,15 +26,25 @@ object BridgeServer {
                     serializeNulls()
                 }
             }
-            // Auth interceptor — every request must have valid Bearer token
+            // Auth interceptor — every request must have a valid Bearer token.
+            // /ping is allowed without auth so the agent can discover the
+            // bridge, but it does not return sensitive data.
             intercept(ApplicationCallPipeline.Plugins) {
                 val path = call.request.path()
-                // Allow /ping without auth so the agent can discover the bridge,
-                // but it won't return sensitive data without auth
                 if (path == "/ping") return@intercept
+
+                val ip = call.request.local.remoteHost
+                if (authRateLimiter.isBlocked(ip)) {
+                    call.respond(HttpStatusCode.TooManyRequests, mapOf(
+                        "error" to "Too many failed authentication attempts. Try again later."
+                    ))
+                    finish()
+                    return@intercept
+                }
 
                 val authHeader = call.request.header(HttpHeaders.Authorization)
                 if (!PairingManager.validateToken(authHeader)) {
+                    authRateLimiter.recordFailure(ip)
                     call.respond(HttpStatusCode.Unauthorized, mapOf(
                         "error" to "Invalid or missing pairing code",
                         "hint" to "Set ANDROID_BRIDGE_TOKEN to the code shown in the Hermes Bridge app"
