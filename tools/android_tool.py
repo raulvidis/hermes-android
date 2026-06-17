@@ -467,7 +467,13 @@ def android_macro(steps: list, name: str = "unnamed") -> str:
             )
             results.append({"step": i, "tool": tool_name, "result": result})
 
-            if isinstance(result, dict) and not result.get("success", True):
+            # A failure is either an explicit success=False (action ran but
+            # was rejected) or an "error"-keyed transport/exception result
+            # (no "success" key) — the latter previously defaulted to True and
+            # let the macro silently continue past a real network/JSON error.
+            if isinstance(result, dict) and (
+                result.get("success") is False or "error" in result
+            ):
                 return json.dumps(
                     {
                         "error": f"Step {i} ({tool_name}) failed",
