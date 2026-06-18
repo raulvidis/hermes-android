@@ -126,7 +126,9 @@ object CommandDispatcher {
                 val text = body.get("text")?.asString
                 val className = body.get("className")?.asString
                 val timeoutMs = body.get("timeoutMs")?.asInt ?: 5000
-                val result = ActionExecutor.waitForElement(text, className, timeoutMs)
+                val result = withContext(Dispatchers.Main) {
+                    ActionExecutor.waitForElement(text, className, timeoutMs)
+                }
                 result to 200
             }
 
