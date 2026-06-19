@@ -1,6 +1,6 @@
 ---
 name: android
-description: Control an Android phone remotely — navigate apps, tap, type, swipe, and automate Uber, WhatsApp, Spotify, Maps, Settings, Tinder
+description: When the user wants to control or automate an Android phone or device.
 version: 1.0.0
 metadata:
   hermes:
