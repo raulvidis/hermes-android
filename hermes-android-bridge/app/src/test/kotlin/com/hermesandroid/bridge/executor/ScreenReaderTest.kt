@@ -92,7 +92,7 @@ class ScreenReaderTest {
 
         assertEquals(1, result.size)
         assertEquals("com.example.app", result[0].packageName)
-        assertEquals(0, result[0].children.size, "systemui child must be filtered out")
+        assertTrue("systemui child must be filtered out", result[0].children.isEmpty())
     }
 
     @Test
