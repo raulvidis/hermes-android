@@ -126,6 +126,27 @@ class TestReadScreen:
         result = json.loads(android_read_screen(include_bounds=True))
         assert "tree" in result
 
+    @responses.activate
+    def test_read_screen_filters_system_ui_by_default(self, bridge_url):
+        # Issue #34: System UI must be excluded by default for token efficiency.
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/screen",
+            json={"tree": [], "count": 0},
+        )
+        json.loads(android_read_screen())
+        assert "system_ui=false" in responses.calls[0].request.url
+
+    @responses.activate
+    def test_read_screen_includes_system_ui_when_requested(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/screen",
+            json={"tree": [], "count": 0},
+        )
+        json.loads(android_read_screen(include_system_ui=True))
+        assert "system_ui=true" in responses.calls[0].request.url
+
 
 class TestTap:
     @responses.activate

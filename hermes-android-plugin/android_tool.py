@@ -110,14 +110,21 @@ def android_ping() -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-def android_read_screen(include_bounds: bool = False) -> str:
+def android_read_screen(include_bounds: bool = False, include_system_ui: bool = False) -> str:
     """
     Returns the accessibility tree of the current screen as JSON.
     Each node has: nodeId, text, contentDescription, className,
                    clickable, focusable, bounds (if include_bounds=True)
+
+    System UI (status bar, navigation bar) is excluded by default for token
+    efficiency. Set include_system_ui=True to include it. For navigation, prefer
+    android_press_key("back"|"home"|"recents") — it does not need nav-bar nodes.
     """
     try:
-        data = _get(f"/screen?bounds={str(include_bounds).lower()}")
+        data = _get(
+            f"/screen?bounds={str(include_bounds).lower()}"
+            f"&system_ui={str(include_system_ui).lower()}"
+        )
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -843,13 +850,18 @@ _SCHEMAS = {
     },
     "android_read_screen": {
         "name": "android_read_screen",
-        "description": "Get the accessibility tree of the current Android screen. Returns all visible UI nodes with text, class names, node IDs, and interactability. Use this to understand what's on screen before tapping.",
+        "description": "Get the accessibility tree of the current Android screen. Returns visible app UI nodes with text, class names, node IDs, and interactability. System UI (status bar, nav bar) is excluded by default; set include_system_ui=true to include it. Use this to understand what's on screen before tapping.",
         "parameters": {
             "type": "object",
             "properties": {
                 "include_bounds": {
                     "type": "boolean",
                     "description": "Include pixel coordinates for each node. Default false.",
+                    "default": False,
+                },
+                "include_system_ui": {
+                    "type": "boolean",
+                    "description": "Include System UI nodes (status bar, navigation bar). Default false (excluded) to save tokens. Use android_press_key for back/home/recents.",
                     "default": False,
                 }
             },

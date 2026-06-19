@@ -50,8 +50,9 @@ object CommandDispatcher {
 
             method == "GET" && path == "/screen" -> {
                 val bounds = params.get("bounds")?.asString == "true"
+                val systemUi = params.get("system_ui")?.asString == "true"
                 val tree = withContext(Dispatchers.Main) {
-                    ScreenReader.readCurrentScreen(bounds)
+                    ScreenReader.readCurrentScreen(bounds, systemUi)
                 }
                 mapOf("tree" to tree, "count" to countAllNodes(tree)) to 200
             }

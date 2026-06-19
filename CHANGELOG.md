@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Changed
+- `android_read_screen` now excludes System UI (status bar, nav bar) by default for token efficiency; pass `include_system_ui=true` to include it. Use `android_press_key` for back/home/recents (#34, @null-dev)
+- screen hashes/diffs no longer churn on clock/battery updates since System UI is filtered from the tree by default (#34)
+
 ## [0.3.0]
 
 ### Added

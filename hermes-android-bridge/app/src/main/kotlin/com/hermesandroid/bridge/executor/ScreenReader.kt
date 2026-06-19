@@ -7,19 +7,35 @@ import com.hermesandroid.bridge.service.BridgeAccessibilityService
 
 object ScreenReader {
 
-    fun readCurrentScreen(includeBounds: Boolean): List<ScreenNode> {
+    /** Android System UI package: status bar, navigation bar, etc. Filtered out of
+     *  screen dumps by default for token efficiency. Navigation (back/home/recents)
+     *  is available via android_press_key, so nav-bar nodes aren't needed. */
+    private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+
+    /**
+     * @param includeBounds include pixel bounds for each node
+     * @param includeSystemUi include System UI nodes (status bar, nav bar).
+     *  Defaults to false: these are non-app chrome that wastes tokens and churns
+     *  screen hashes (clock/battery update every minute).
+     */
+    fun readCurrentScreen(includeBounds: Boolean, includeSystemUi: Boolean = false): List<ScreenNode> {
         val service = BridgeAccessibilityService.instance
             ?: return listOf()
 
         val windows = service.windows
         val roots = windows.mapNotNull { it.root }
-        val result = roots.mapIndexed { i, root -> buildNode(root, includeBounds, "$i") }
+        val result = roots.mapIndexed { i, root -> buildNode(root, includeBounds, "$i", includeSystemUi) }
+            .filterNotNull()
         roots.forEach { it.recycle() }
         windows.forEach { it.recycle() }
         return result
     }
 
-    private fun buildNode(info: AccessibilityNodeInfo, includeBounds: Boolean, path: String = "0"): ScreenNode {
+    private fun buildNode(info: AccessibilityNodeInfo, includeBounds: Boolean, path: String = "0", includeSystemUi: Boolean = false): ScreenNode? {
+        // Filter System UI (status bar, nav bar) unless explicitly included.
+        // Returning null drops the whole subtree (status/nav bar live under systemui roots).
+        if (!includeSystemUi && info.packageName?.toString() == SYSTEM_UI_PACKAGE) return null
+
         // Always get bounds for stable ID generation
         val r = android.graphics.Rect()
         info.getBoundsInScreen(r)
@@ -31,7 +47,7 @@ object ScreenReader {
         val children = (0 until info.childCount)
             .mapNotNull { i ->
                 val child = info.getChild(i) ?: return@mapNotNull null
-                val node = buildNode(child, includeBounds, "${path}_$i")
+                val node = buildNode(child, includeBounds, "${path}_$i", includeSystemUi)
                 child.recycle()
                 node
             }

@@ -121,7 +121,7 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 |------|-------------|
 | `android_setup` | Start relay and configure pairing code |
 | `android_ping` | Check if phone is connected |
-| `android_read_screen` | Get accessibility tree of current screen |
+| `android_read_screen` | Get accessibility tree of current screen (System UI excluded by default; `include_system_ui=true` to include) |
 | `android_screenshot` | Capture screenshot and send to user |
 | `android_tap` | Tap by coordinates or node ID |
 | `android_tap_text` | Tap element by visible text |
