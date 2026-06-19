@@ -30,3 +30,6 @@ hermes-android-bridge/local.properties
 # Environment
 .env
 *.env.local
+
+# personal shared skills (symlink to ../agent-repo-standards/skills)
+.agents/skills

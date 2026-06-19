@@ -23,6 +23,7 @@ Work style: telegraph; noun-phrases ok; drop grammar; min tokens. Hard rules onl
 - Read docs/index.md + relevant docs before coding; update docs for visible changes.
 - New deps → quick health check first (pyproject.toml / Gradle).
 - PII: strip phone numbers, recipients, location from tool responses/logs (existing convention — keep it).
+- Session start + before coding: run $docs-list (`python3 .agents/skills/docs-list/scripts/docs-list.py`); read docs whose read_when matches.
 
 ## PR-CI
 - Workflow: fix → test → changelog → review → merge.
@@ -31,6 +32,10 @@ Work style: telegraph; noun-phrases ok; drop grammar; min tokens. Hard rules onl
 - After landing: recap what landed (2-5 sentences).
 - Contributor PRs: thank in CHANGELOG, preserve credit + `#PR`.
 - Every push to `main` auto-publishes a debug APK to the `latest-build` release.
+
+## Reviews
+- Pre-commit / pre-land: run $autoreview until no actionable findings remain.
+- $autoreview delegates to installed review skills (/code-review, superpowers) — don't hand-roll review.
 
 ## Git
 - Safe by default (status/diff/log). Push only when asked.
@@ -49,3 +54,4 @@ Work style: telegraph; noun-phrases ok; drop grammar; min tokens. Hard rules onl
 ## Workflows
 Procedures in `.agents/commands/`. To run one, read the file and follow it.
 - handoff · pickup · commit · fix · release
+Shared skills in .agents/skills/: $docs-list, $autoreview.
