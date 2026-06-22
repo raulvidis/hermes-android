@@ -16,8 +16,8 @@ data class AccessibilityEventData(
 object EventStore {
     private val events = ConcurrentLinkedDeque<AccessibilityEventData>()
     private val lock = Any()
-    var maxCapacity: Int = 200
-    var streamingEnabled: Boolean = false
+    @Volatile var maxCapacity: Int = 200
+    @Volatile var streamingEnabled: Boolean = false
 
     fun add(event: AccessibilityEvent) {
         val entry = AccessibilityEventData(
