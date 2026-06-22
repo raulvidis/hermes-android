@@ -30,7 +30,7 @@ def main():
     if os.path.isdir(tools_dir):
         sys.path.insert(0, parent_dir)
 
-    from tools.android_relay import start_relay
+    from tools.android_relay import start_relay, stop_relay
 
     start_relay(pairing_code=pairing_code, port=port)
     logger.info("Relay started on port %d with pairing code ****", port)
@@ -45,6 +45,7 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
 
     stop_event.wait()
+    stop_relay()
     logger.info("Daemon exiting")
 
 
