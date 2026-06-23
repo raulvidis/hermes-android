@@ -24,7 +24,7 @@ object NotificationStore {
 
     private val notifications = ConcurrentLinkedDeque<NotificationEntry>()
     private val lock = Any()
-    var maxCapacity: Int = 50
+    @Volatile var maxCapacity: Int = 50
 
     fun add(entry: NotificationEntry) {
         synchronized(lock) {
