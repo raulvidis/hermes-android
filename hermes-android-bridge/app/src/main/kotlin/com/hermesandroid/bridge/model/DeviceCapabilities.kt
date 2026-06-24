@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 
 object DeviceCapabilities {
 
+    @Volatile
     var hasTelephony: Boolean = false
         private set
 
