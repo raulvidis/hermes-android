@@ -16,8 +16,7 @@ data class NotificationEntry(
     val category: String?,
     val timestamp: Long,
     val isOngoing: Boolean,
-    val isClearable: Boolean,
-    var removed: Boolean = false
+    val isClearable: Boolean
 )
 
 object NotificationStore {
@@ -37,13 +36,13 @@ object NotificationStore {
 
     fun getAll(limit: Int = 50): List<NotificationEntry> {
         synchronized(lock) {
-            return notifications.filter { !it.removed }.take(limit)
+            return notifications.take(limit)
         }
     }
 
     fun getSince(sinceTimestamp: Long, limit: Int = 50): List<NotificationEntry> {
         synchronized(lock) {
-            return notifications.filter { !it.removed && it.timestamp > sinceTimestamp }.take(limit)
+            return notifications.filter { it.timestamp > sinceTimestamp }.take(limit)
         }
     }
 
@@ -55,7 +54,7 @@ object NotificationStore {
 
     fun markRemoved(key: String) {
         synchronized(lock) {
-            notifications.find { it.key == key }?.removed = true
+            notifications.removeIf { it.key == key }
         }
     }
 
