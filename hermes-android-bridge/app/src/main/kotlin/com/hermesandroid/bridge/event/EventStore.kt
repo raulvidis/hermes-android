@@ -1,7 +1,6 @@
 package com.hermesandroid.bridge.event
 
 import android.view.accessibility.AccessibilityEvent
-import java.util.concurrent.ConcurrentLinkedDeque
 
 data class AccessibilityEventData(
     val eventType: String,
@@ -14,7 +13,7 @@ data class AccessibilityEventData(
 )
 
 object EventStore {
-    private val events = ConcurrentLinkedDeque<AccessibilityEventData>()
+    private val events = ArrayDeque<AccessibilityEventData>()
     private val lock = Any()
     @Volatile var maxCapacity: Int = 200
     @Volatile var streamingEnabled: Boolean = false

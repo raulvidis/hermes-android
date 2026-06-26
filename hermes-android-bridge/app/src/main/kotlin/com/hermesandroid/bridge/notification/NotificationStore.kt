@@ -3,7 +3,6 @@ package com.hermesandroid.bridge.notification
 import android.app.Notification
 import android.os.Bundle
 import android.service.notification.StatusBarNotification
-import java.util.concurrent.ConcurrentLinkedDeque
 
 data class NotificationEntry(
     val key: String,
@@ -22,7 +21,7 @@ data class NotificationEntry(
 
 object NotificationStore {
 
-    private val notifications = ConcurrentLinkedDeque<NotificationEntry>()
+    private val notifications = ArrayDeque<NotificationEntry>()
     private val lock = Any()
     @Volatile var maxCapacity: Int = 50
 
