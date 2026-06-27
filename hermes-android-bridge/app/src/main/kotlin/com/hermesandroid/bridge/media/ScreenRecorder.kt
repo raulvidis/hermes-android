@@ -135,7 +135,6 @@ object ScreenRecorder {
                     if (projectionCallback != null) projection?.unregisterCallback(projectionCallback)
                 } catch (_: Exception) {}
                 try { projection?.stop() } catch (_: Exception) {}
-                if (projection != null) clearProjectionPermission()
                 latch.countDown()
             }
         }
