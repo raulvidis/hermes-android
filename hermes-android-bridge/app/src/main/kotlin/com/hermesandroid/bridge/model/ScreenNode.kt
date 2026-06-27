@@ -23,7 +23,8 @@ data class NodeBounds(val left: Int, val top: Int, val right: Int, val bottom: I
 fun ScreenNode.computeHash(): String {
     val childHashes = children.joinToString(",") { it.computeHash() }
     val raw = "$nodeId|$text|$contentDescription|$className|$clickable|$focusable|$scrollable|$editable|$checked|$childHashes"
-    return Integer.toHexString(raw.hashCode())
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+    return digest.copyOfRange(0, 4).joinToString("") { "%02x".format(it) }
 }
 
 data class ActionResult(
