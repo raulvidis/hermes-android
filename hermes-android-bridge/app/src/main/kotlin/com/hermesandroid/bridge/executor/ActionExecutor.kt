@@ -786,8 +786,8 @@ object ActionExecutor {
         return null
     }
 
-    private var tts: android.speech.tts.TextToSpeech? = null
-    private var ttsReady = false
+    @Volatile private var tts: android.speech.tts.TextToSpeech? = null
+    @Volatile private var ttsReady = false
 
     private suspend fun ensureTts(): Boolean {
         val service = BridgeAccessibilityService.instance ?: return false
