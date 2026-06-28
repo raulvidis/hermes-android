@@ -865,6 +865,11 @@ def _update_env_file(env_path, key: str, value: str):
             lines[-1] += "\n"
         lines.append(f"{key}={value}\n")
     env_path.write_text("".join(lines), encoding="utf-8")
+    # Restrict permissions: .env may contain the pairing token (full device access).
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
 
 
 # ── Schema definitions ─────────────────────────────────────────────────────────
