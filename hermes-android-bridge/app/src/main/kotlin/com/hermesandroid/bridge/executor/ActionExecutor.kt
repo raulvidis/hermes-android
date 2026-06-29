@@ -592,11 +592,11 @@ object ActionExecutor {
                 android.provider.ContactsContract.Contacts._ID,
                 android.provider.ContactsContract.Contacts.DISPLAY_NAME
             )
-            val cursor = service.contentResolver.query(uri, projection, null, null, "${android.provider.ContactsContract.Contacts.DISPLAY_NAME} ASC LIMIT $safeLimit")
+            val cursor = service.contentResolver.query(uri, projection, null, null, "${android.provider.ContactsContract.Contacts.DISPLAY_NAME} ASC")
             cursor?.use {
                 val idIdx = it.getColumnIndex(android.provider.ContactsContract.Contacts._ID)
                 val nameIdx = it.getColumnIndex(android.provider.ContactsContract.Contacts.DISPLAY_NAME)
-                while (it.moveToNext()) {
+                while (it.moveToNext() && results.size < safeLimit) {
                     val contactId = it.getString(idIdx) ?: continue
                     val name = it.getString(nameIdx) ?: continue
                     val phoneNumbers = mutableListOf<String>()
