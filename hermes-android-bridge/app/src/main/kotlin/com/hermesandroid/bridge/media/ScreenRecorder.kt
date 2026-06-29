@@ -18,8 +18,8 @@ object ScreenRecorder {
         "No MediaProjection. Grant Screen Recording in the app before each capture on Android 16."
     private const val MAX_DURATION_MS = 30_000L
 
-    private var projectionResultCode: Int? = null
-    private var projectionData: Intent? = null
+    @Volatile private var projectionResultCode: Int? = null
+    @Volatile private var projectionData: Intent? = null
     private var recorder: MediaRecorder? = null
     private var virtualDisplay: VirtualDisplay? = null
     private val handlerThread = HandlerThread("ScreenRecorder").apply { start() }
