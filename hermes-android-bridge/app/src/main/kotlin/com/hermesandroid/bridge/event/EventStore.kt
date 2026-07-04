@@ -48,6 +48,8 @@ object EventStore {
         )
 
         synchronized(lock) {
+            // ArrayDeque: head=newest (addFirst), tail=oldest (removeLast).
+            // removeLast drops the oldest entry to make room for the new one.
             if (events.size >= maxCapacity) {
                 events.removeLast()
             }
