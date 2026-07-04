@@ -89,8 +89,12 @@ object ScreenReader {
             root.recycle()
         }
         // Recycle remaining unprocessed roots after early break
-        for (i in (foundIndex + 1) until roots.size) {
-            roots[i].recycle()
+        // Guard: when no match is found (foundIndex == -1), all roots were already
+        // recycled in the loop above — the cleanup would re-recycle them.
+        if (foundIndex >= 0) {
+            for (i in (foundIndex + 1) until roots.size) {
+                roots[i].recycle()
+            }
         }
         windows.forEach { it.recycle() }
         return found
