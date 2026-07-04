@@ -20,8 +20,8 @@ object ScreenRecorder {
 
     @Volatile private var projectionResultCode: Int? = null
     @Volatile private var projectionData: Intent? = null
-    private var recorder: MediaRecorder? = null
-    private var virtualDisplay: VirtualDisplay? = null
+    @Volatile private var recorder: MediaRecorder? = null
+    @Volatile private var virtualDisplay: VirtualDisplay? = null
     private val handlerThread = HandlerThread("ScreenRecorder").apply { start() }
     private val handler = Handler(handlerThread.looper)
 
