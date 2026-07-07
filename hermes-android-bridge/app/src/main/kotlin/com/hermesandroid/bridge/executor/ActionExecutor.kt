@@ -685,6 +685,7 @@ object ActionExecutor {
             val matches = findNodeByIdInTree(root, nodeId, "$wi")
             if (matches.isNotEmpty()) {
                 found = matches.first()
+                if (found !== roots[wi]) roots[wi].recycle()
                 for (r in roots.subList(wi + 1, roots.size)) r.recycle()
                 break
             }
