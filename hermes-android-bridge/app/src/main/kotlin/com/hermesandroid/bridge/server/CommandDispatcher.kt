@@ -1,5 +1,3 @@
-@file:Suppress("unused")
-
 package com.hermesandroid.bridge.server
 
 import com.google.gson.JsonObject
@@ -18,15 +16,15 @@ import kotlinx.coroutines.withContext
 
 /**
  * Single source of truth for command handling, shared by both transports:
- *  - [RelayClient]  — outbound WebSocket relay (the path Hermes drives the device through)
- *  - [configureRouting] in BridgeRouter.kt — the local ktor HTTP server on :8765
+ * - [RelayClient] — outbound WebSocket relay (the path Hermes drives the device through)
+ * - [configureRouting] in BridgeRouter.kt — the local ktor HTTP server on :8765
  *
  * Both transports parse their request into (method, path, params, body) and call [dispatch],
  * so endpoint contracts, device-capability gating, and behaviour live in exactly one place.
  *
  * @param authenticated whether the caller is authenticated. The relay connection is
- *   authenticated at connect time (token in the WS URL), so it passes `true`; the HTTP
- *   server computes it from the request's Bearer token. Only `/ping` reports it back.
+ * authenticated at connect time (token in the WS URL), so it passes `true`; the HTTP
+ * server computes it from the request's Bearer token. Only `/ping` reports it back.
  */
 object CommandDispatcher {
 
@@ -96,7 +94,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/open_app" -> {
                 val pkg = body.get("package")?.asString
-                    ?: return mapOf("error" to "Missing package") to 400
+                    ?: return@when mapOf("error" to "Missing package") to 400
                 val result = ActionExecutor.openApp(pkg)
                 result to 200
             }
@@ -255,7 +253,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/send_sms" -> {
                 if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "SMS not available on this device") to 200
+                    return@when mapOf("success" to false, "error" to "SMS not available on this device") to 200
                 }
                 val to = body.get("to")?.asString ?: ""
                 val smsBody = body.get("body")?.asString ?: ""
@@ -265,7 +263,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/call" -> {
                 if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "Phone calls not available on this device") to 200
+                    return@when mapOf("success" to false, "error" to "Phone calls not available on this device") to 200
                 }
                 val number = body.get("number")?.asString ?: ""
                 val result = ActionExecutor.makeCall(number)
@@ -298,7 +296,7 @@ object CommandDispatcher {
 
             method == "GET" && path == "/contacts" -> {
                 if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "Contacts not available on this device") to 200
+                    return@when mapOf("success" to false, "error" to "Contacts not available on this device") to 200
                 }
                 val query = params.get("query")?.asString ?: ""
                 val limit = params.get("limit")?.asString?.toIntOrNull() ?: 20
@@ -359,6 +357,20 @@ object CommandDispatcher {
                     ActionExecutor.readWidgets()
                 }
                 result to 200
+            }
+
+            // ── Shell (root) command execution ──────────────────────────────
+
+            method == "POST" && path == "/shell" -> {
+                val command = body.get("command")?.asString ?: ""
+                if (command.isEmpty()) {
+                    mapOf("error" to "Missing 'command' field") to 400
+                } else {
+                    val result = withContext(Dispatchers.IO) {
+                        ActionExecutor.executeShell(command)
+                    }
+                    result to 200
+                }
             }
 
             else -> {
