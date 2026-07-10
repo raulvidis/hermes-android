@@ -138,8 +138,9 @@ class TestBodyLogRedaction:
 
 
 class TestWsAuthHeader:
-    """Regression: WS handshake auth accepts a Bearer header (preferred — query
-    strings leak into reverse-proxy access logs) with ?token= as legacy fallback."""
+    """Regression: WS handshake auth accepts a Bearer header only. The ?token=
+    query string fallback was removed because it leaked pairing codes into
+    reverse-proxy access logs."""
 
     PORT = 19881
     CODE = "WSCODE"
@@ -165,9 +166,9 @@ class TestWsAuthHeader:
         start_relay(pairing_code=self.CODE, port=self.PORT)
         assert self._try_connect(headers={"Authorization": f"Bearer {self.CODE}"})
 
-    def test_legacy_query_token_accepted(self):
+    def test_query_token_rejected(self):
         start_relay(pairing_code=self.CODE, port=self.PORT)
-        assert self._try_connect(query=f"?token={self.CODE}")
+        assert not self._try_connect(query=f"?token={self.CODE}")
 
     def test_bad_bearer_header_rejected(self):
         start_relay(pairing_code=self.CODE, port=self.PORT)
