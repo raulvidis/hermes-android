@@ -496,6 +496,7 @@ def android_send_sms(to: str, body: str) -> str:
     """
     Send an SMS message directly without navigating the UI.
     Requires SMS permission on the phone.
+    Destructive action — confirm recipient and message with the user first.
     """
     try:
         data = _post("/send_sms", {"to": to, "body": body})
@@ -508,6 +509,7 @@ def android_call(number: str) -> str:
     """
     Initiate a phone call directly. Requires CALL_PHONE permission.
     The call UI will open on the phone.
+    Destructive action — confirm the number with the user first.
     """
     try:
         data = _post("/call", {"number": number})

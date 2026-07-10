@@ -9,6 +9,7 @@ set -euo pipefail
 PLUGIN_DIR="$HOME/.hermes/plugins/hermes-android"
 REPO="https://github.com/raulvidis/hermes-android.git"
 TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Installing hermes-android plugin..."
 
@@ -25,9 +26,6 @@ if ! python3 -c "import aiohttp" 2>/dev/null; then
     echo "Installing aiohttp..."
     pip install aiohttp 2>/dev/null || pip3 install aiohttp 2>/dev/null || echo "Warning: could not install aiohttp — install it manually"
 fi
-
-# Cleanup
-rm -rf "$TMP_DIR"
 
 echo "✓ hermes-android plugin installed to $PLUGIN_DIR"
 echo "  Restart hermes-gateway, then run /plugins to verify."

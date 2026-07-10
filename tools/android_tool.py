@@ -31,6 +31,19 @@ Tools registered:
   - android_location         get GPS location
   - android_send_sms         send SMS directly
   - android_call             initiate phone call
+  - android_speak            speak text via TTS
+  - android_speak_stop       stop TTS playback
+  - android_events           read recent accessibility events
+  - android_event_stream     enable/disable event capture
+  - android_screen_record    record screen to video
+  - android_read_widgets     read home-screen widgets
+  - android_find_nodes       search UI nodes by text/class/clickable
+  - android_diff_screen      diff screen against a previous hash
+  - android_pinch            pinch zoom gesture
+  - android_media            media playback control
+  - android_search_contacts  search phone contacts
+  - android_send_intent      launch an Android intent
+  - android_broadcast        send a broadcast intent
 """
 
 import json
@@ -520,6 +533,7 @@ def android_send_sms(to: str, body: str) -> str:
     """
     Send an SMS message directly without navigating the UI.
     Requires SMS permission on the phone.
+    Destructive action — confirm recipient and message with the user first.
     """
     try:
         data = _post("/send_sms", {"to": to, "body": body})
@@ -532,6 +546,7 @@ def android_call(number: str) -> str:
     """
     Initiate a phone call directly. Requires CALL_PHONE permission.
     The call UI will open on the phone.
+    Destructive action — confirm the number with the user first.
     """
     try:
         data = _post("/call", {"number": number})
