@@ -430,14 +430,19 @@ object ActionExecutor {
             ?: return@wakeForAction ActionResult(false, "Accessibility service not running")
         val centerX = x.toFloat()
         val centerY = y.toFloat()
-        val offset = 100f * scale
+        // Perpendicular strokes on opposite sides of center along the X axis.
+        // Fingers start at ±startOff and end at ±endOff. For scale>1 (zoom in),
+        // endOff > startOff so fingers move apart; for scale<1 (zoom out),
+        // endOff < startOff so fingers move together.
+        val startOff = 50f
+        val endOff = 50f * scale
         val path1 = Path().apply {
-            moveTo(centerX - offset, centerY - offset)
-            lineTo(centerX + offset, centerY + offset)
+            moveTo(centerX - startOff, centerY)
+            lineTo(centerX - endOff, centerY)
         }
         val path2 = Path().apply {
-            moveTo(centerX + offset, centerY + offset)
-            lineTo(centerX - offset, centerY - offset)
+            moveTo(centerX + startOff, centerY)
+            lineTo(centerX + endOff, centerY)
         }
         val stroke1 = GestureDescription.StrokeDescription(path1, 0, duration)
         val stroke2 = GestureDescription.StrokeDescription(path2, 0, duration)
