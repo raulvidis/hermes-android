@@ -24,7 +24,7 @@ fun ScreenNode.computeHash(): String {
     val childHashes = children.joinToString(",") { it.computeHash() }
     val raw = "$nodeId|$text|$contentDescription|$className|$clickable|$focusable|$scrollable|$editable|$checked|$childHashes"
     val digest = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
-    return digest.copyOfRange(0, 4).joinToString("") { "%02x".format(it) }
+    return digest.copyOfRange(0, 8).joinToString("") { "%02x".format(it) }
 }
 
 data class ActionResult(
