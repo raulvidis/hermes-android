@@ -163,6 +163,11 @@ object RelayClient {
                 notifyStatus(false, "Reconnecting in ${backoff / 1000}s... (attempt $retries/$MAX_RETRIES)")
                 delay(backoff)
                 if (shouldReconnect && !isConnected) {
+                    // Cancel the previous WebSocket before opening a new one,
+                    // otherwise its listener stays active and can fire
+                    // out-of-order callbacks (onOpen/onFailure) that set
+                    // isConnected or push duplicate status notifications.
+                    webSocket?.cancel()
                     doConnect(url, code)
                     delay(3000)
                     if (!isConnected) {
