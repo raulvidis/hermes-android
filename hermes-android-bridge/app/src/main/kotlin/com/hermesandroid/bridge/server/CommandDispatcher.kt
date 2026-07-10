@@ -3,7 +3,6 @@
 package com.hermesandroid.bridge.server
 
 import com.google.gson.JsonObject
-import com.hermesandroid.bridge.BuildConfig
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.executor.ScreenReader
@@ -43,8 +42,10 @@ object CommandDispatcher {
                 mapOf(
                     "status" to "ok",
                     "accessibilityService" to serviceRunning,
-                    "authenticated" to authenticated,
-                    "version" to BuildConfig.VERSION_NAME
+                    "authenticated" to authenticated
+                    // Version omitted: /ping is unauthenticated and version info
+                    // helps attackers fingerprint the deployment and target known
+                    // vulnerabilities in specific versions.
                 ) to 200
             }
 
