@@ -154,6 +154,27 @@ For any task, follow this pattern and then STOP:
 
 **Pitfalls:** Message input is `android.widget.EditText`. Read screen after typing to verify before sending.
 
+### SMS / Messages — Read, draft, reply
+
+**Reading messages — use the accessibility tree, NOT screenshots.**
+Screenshot + vision loops are slow and burn tokens; the tree has the text already.
+
+1. Incoming messages arrive as notifications — `android_notifications()` returns sender + preview with no UI navigation at all. Poll it (or `android_events()`) instead of opening the app.
+2. For thread history: `android_open_app("com.google.android.apps.messaging")` → `android_tap_text("<contact>")` → `android_read_screen()`. Scroll with `android_scroll("up")` and re-read for older messages.
+3. To locate a specific message or conversation, `android_find_nodes(text="<keyword>")` is much cheaper than reading the whole screen.
+
+**Drafting without sending (review-first workflow):**
+```
+android_send_intent("android.intent.action.SENDTO",
+                    data_uri="smsto:<number>",
+                    extras={"sms_body": "<draft text>"})
+```
+This opens the compose screen pre-filled — the user reviews and hits send themselves. Prefer this over `android_send_sms` whenever the user wants to approve messages; `android_send_sms` sends immediately and must be confirmed with the user first.
+
+**Contact lookup:** `android_search_contacts("<name>")` returns numbers directly — don't navigate the Contacts app.
+
+**Pitfalls:** Default SMS app package varies (`com.google.android.apps.messaging` on Pixel, `com.samsung.android.messaging` on Samsung) — check `android_get_apps()` if open_app fails. Notification previews may be truncated; open the thread for full text.
+
 ### Spotify — Play music
 
 1. `android_open_app("com.spotify.music")`
