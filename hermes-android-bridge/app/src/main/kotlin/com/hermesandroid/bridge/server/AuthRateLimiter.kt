@@ -19,18 +19,22 @@ internal class AuthRateLimiter(
     private val maxAttempts: Int = 5,
     private val windowMs: Long = 60_000L,
     private val blockMs: Long = 300_000L,
+    private val cleanupIntervalMs: Long = 120_000L,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) {
     private val failures = ConcurrentHashMap<String, MutableList<Long>>()
     private val blocked = ConcurrentHashMap<String, Long>()
+    @Volatile
+    private var lastCleanup: Long = 0L
 
     /**
      * Returns `true` if [ip] is currently blocked. Clears the block once it
      * has expired.
      */
     fun isBlocked(ip: String): Boolean {
+        val t = now()
         val until = blocked[ip] ?: return false
-        if (now() < until) return true
+        if (t < until) return true
         blocked.remove(ip)
         return false
     }
@@ -39,6 +43,11 @@ internal class AuthRateLimiter(
      * Records a failed auth attempt for [ip]. Once [maxAttempts] failures
      * accumulate within [windowMs], the IP is blocked for [blockMs] and its
      * failure history is cleared.
+     *
+     * Periodically sweeps [failures] to remove IPs whose timestamps have all
+     * fallen outside the window, preventing unbounded growth when many
+     * distinct IPs each make a few attempts below the threshold. Mirrors the
+     * Python relay's `_auth_cleanup()` (runs every [cleanupIntervalMs]).
      */
     fun recordFailure(ip: String) {
         val t = now()
@@ -51,6 +60,26 @@ internal class AuthRateLimiter(
             if (attempts.size >= maxAttempts) {
                 blocked[ip] = t + blockMs
                 attempts.clear()
+            }
+        }
+        maybeSweep(t, cutoff)
+    }
+
+    /**
+     * Runs a cleanup sweep at most once per [cleanupIntervalMs]. Removes IPs
+     * whose all timestamps are older than [cutoff]. A snapshot of keys is
+     * iterated to avoid ConcurrentModificationException; each list is locked
+     * individually during inspection.
+     */
+    private fun maybeSweep(t: Long, cutoff: Long) {
+        if (t - lastCleanup < cleanupIntervalMs) return
+        lastCleanup = t
+        for (ip in failures.keys.toList()) {
+            val list = failures[ip] ?: continue
+            synchronized(list) {
+                if (list.none { it > cutoff }) {
+                    failures.remove(ip)
+                }
             }
         }
     }
