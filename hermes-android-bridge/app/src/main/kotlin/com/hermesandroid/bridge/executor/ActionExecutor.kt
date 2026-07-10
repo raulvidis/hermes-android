@@ -699,7 +699,8 @@ object ActionExecutor {
      *
      * Memory contract: the returned node(s) are intentionally NOT recycled — the caller
      * owns them and must recycle when done. Unmatched child nodes traversed during the
-     * DFS are recycled in the else-branch. Siblings after the first match are skipped
+     * DFS are recycled, including intermediate ancestors on the path to a match.
+     * Siblings after the first match are skipped
      * (early break) and left for the system to reclaim.
      */
     private fun findNodeByIdInTree(
@@ -715,6 +716,8 @@ object ActionExecutor {
             val found = findNodeByIdInTree(child, targetId, "${path}_$i")
             if (found.isNotEmpty()) {
                 results.addAll(found)
+                // Recycle the intermediate ancestor unless the child itself is a match
+                if (found.none { it === child }) child.recycle()
                 break
             } else {
                 child.recycle()

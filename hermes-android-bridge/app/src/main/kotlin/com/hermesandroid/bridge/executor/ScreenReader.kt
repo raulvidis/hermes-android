@@ -112,7 +112,11 @@ object ScreenReader {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findNodeByTextDfs(child, text, exact)
-            if (found != null) return found
+            if (found != null) {
+                // Recycle the intermediate ancestor unless the child itself is the match
+                if (found !== child) child.recycle()
+                return found
+            }
             child.recycle()
         }
         return null
