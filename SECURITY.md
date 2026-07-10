@@ -16,6 +16,14 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 - After 5 failed attempts in 60 seconds, the IP is blocked for 5 minutes
 - Blocked IPs receive HTTP 429
 
+### WebSocket Authentication Transport
+- The phone sends the pairing code as an `Authorization: Bearer` header on the
+  WebSocket handshake — never in the URL, so it does not land in reverse-proxy
+  access logs
+- The relay still accepts a legacy `?token=` query parameter from older APKs;
+  if you run a reverse proxy, configure it not to log query strings on `/ws`
+  until all devices are updated
+
 ### Connection Architecture
 - The phone connects **out** to the server (NAT-friendly)
 - The server relay only accepts one phone at a time

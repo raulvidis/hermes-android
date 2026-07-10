@@ -359,6 +359,24 @@ def _mask_token(token: str) -> str:
     return (token[:2] + "****") if len(token) >= 2 else "****"
 
 
+# Request-body fields that may carry PII or secrets (phone numbers, SMS text,
+# typed text incl. passwords/OTPs, clipboard content, intent extras).
+# AGENTS.md: strip phone numbers, recipients, location from tool logs.
+_SENSITIVE_BODY_KEYS = frozenset(
+    {"to", "number", "body", "text", "message", "extras", "data", "uri", "content"}
+)
+
+
+def _safe_body_repr(body: dict) -> str:
+    """JSON repr of a request body with PII-bearing fields redacted."""
+    if not body:
+        return "{}"
+    redacted = {
+        k: "<redacted>" if k in _SENSITIVE_BODY_KEYS else v for k, v in body.items()
+    }
+    return json.dumps(redacted)[:200]
+
+
 async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketResponse:
     # Rate limiting — check before token validation
     remote_ip = request.remote or "unknown"
@@ -368,7 +386,13 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
             text="Too many failed authentication attempts. Try again later."
         )
 
-    token = request.query.get("token", "")
+    # Prefer the Authorization header (query strings leak into reverse-proxy
+    # access logs); fall back to ?token= for older APKs.
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.removeprefix("Bearer ").strip()
+    else:
+        token = request.query.get("token", "")
     # Constant-time comparison to mitigate timing side-channel attacks that
     # could otherwise leak the pairing code byte-by-byte.
     # PairingManager generates uppercase-only codes — compare exact-case to
@@ -516,7 +540,7 @@ async def _handle_http(
         "params": params,
         "body": body,
     }
-    logger.debug(">>> %s %s body=%s", method, path, json.dumps(body)[:200] if body else "{}")
+    logger.debug(">>> %s %s body=%s", method, path, _safe_body_repr(body))
 
     # Register a future *before* sending so we never miss the reply
     future = state.loop.create_future()

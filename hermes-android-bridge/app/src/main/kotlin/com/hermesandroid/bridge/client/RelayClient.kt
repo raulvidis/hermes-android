@@ -95,18 +95,21 @@ object RelayClient {
     }
 
     private fun doConnect(serverUrl: String, pairingCode: String) {
-        val wsUrl = buildWsUrl(serverUrl, pairingCode)
-        Log.i(TAG, "Connecting to ${buildWsUrl(serverUrl, "***")}")
-        notifyStatus(false, "Connecting to ${buildWsUrl(serverUrl, "***")} ...")
+        val wsUrl = buildWsUrl(serverUrl)
+        Log.i(TAG, "Connecting to $wsUrl")
+        notifyStatus(false, "Connecting to $wsUrl ...")
 
+        // Token goes in the Authorization header, not the URL — query strings
+        // end up verbatim in reverse-proxy access logs.
         val request = Request.Builder()
             .url(wsUrl)
+            .header("Authorization", "Bearer $pairingCode")
             .build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl, "***")}")
+                Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
                 isConnected = true
                 try {
                     BridgeAccessibilityService.instance?.startForeground()
@@ -176,7 +179,7 @@ object RelayClient {
         }
     }
 
-    private fun buildWsUrl(serverUrl: String, pairingCode: String): String {
+    private fun buildWsUrl(serverUrl: String): String {
         val trimmed = serverUrl.trim().trimEnd('/')
         val useTls = trimmed.startsWith("https://") || trimmed.startsWith("wss://")
         var base = trimmed
@@ -186,8 +189,8 @@ object RelayClient {
             base = "$base:8766"
         }
         val scheme = if (useTls) "wss" else "ws"
-        if (BuildConfig.DEBUG) Log.d(TAG, "Built WebSocket URL: $scheme://$base/ws?token=***")
-        return "$scheme://$base/ws?token=$pairingCode"
+        if (BuildConfig.DEBUG) Log.d(TAG, "Built WebSocket URL: $scheme://$base/ws")
+        return "$scheme://$base/ws"
     }
 
     private suspend fun handleMessage(ws: WebSocket, text: String) {
@@ -201,7 +204,7 @@ object RelayClient {
 
             if (BuildConfig.DEBUG) Log.d(TAG, "Received command: $method $path (id=$requestId)")
 
-            // The relay connection is authenticated at connect time (token in the WS URL),
+            // The relay connection is authenticated at connect time (Bearer token on the WS handshake),
             // so commands arriving here are already authenticated.
             val response = CommandDispatcher.dispatch(method, path, params, body, authenticated = true)
 

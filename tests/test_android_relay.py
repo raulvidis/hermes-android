@@ -14,6 +14,7 @@ from tools.android_relay import (
     _auth_failures,
     _AUTH_MAX_ATTEMPTS,
     _mask_token,
+    _safe_body_repr,
 )
 
 
@@ -104,3 +105,74 @@ class TestTokenMasking:
 
     def test_empty_token_fully_masked(self):
         assert _mask_token("") == "****"
+
+
+class TestBodyLogRedaction:
+    """Regression: request-body debug logs must not contain PII (AGENTS.md rule:
+    strip phone numbers, recipients, location from tool responses/logs)."""
+
+    def test_sms_body_redacted(self):
+        repr_ = _safe_body_repr({"to": "+15551234567", "body": "secret message"})
+        assert "+15551234567" not in repr_
+        assert "secret message" not in repr_
+        assert "<redacted>" in repr_
+
+    def test_call_number_redacted(self):
+        repr_ = _safe_body_repr({"number": "+15551234567"})
+        assert "+15551234567" not in repr_
+
+    def test_typed_text_redacted(self):
+        repr_ = _safe_body_repr({"text": "hunter2-password"})
+        assert "hunter2-password" not in repr_
+
+    def test_non_sensitive_fields_kept(self):
+        repr_ = _safe_body_repr({"x": 100, "y": 200})
+        assert "100" in repr_ and "200" in repr_
+
+    def test_empty_body(self):
+        assert _safe_body_repr({}) == "{}"
+
+    def test_truncated_to_200_chars(self):
+        repr_ = _safe_body_repr({"key": "v" * 500})
+        assert len(repr_) <= 200
+
+
+class TestWsAuthHeader:
+    """Regression: WS handshake auth accepts a Bearer header (preferred — query
+    strings leak into reverse-proxy access logs) with ?token= as legacy fallback."""
+
+    PORT = 19881
+    CODE = "WSCODE"
+
+    def _try_connect(self, headers=None, query=""):
+        import asyncio
+        import aiohttp
+
+        async def attempt():
+            async with aiohttp.ClientSession() as session:
+                try:
+                    ws = await session.ws_connect(
+                        f"ws://127.0.0.1:{self.PORT}/ws{query}", headers=headers or {}
+                    )
+                    await ws.close()
+                    return True
+                except aiohttp.WSServerHandshakeError:
+                    return False
+
+        return asyncio.run(attempt())
+
+    def test_bearer_header_accepted(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        assert self._try_connect(headers={"Authorization": f"Bearer {self.CODE}"})
+
+    def test_legacy_query_token_accepted(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        assert self._try_connect(query=f"?token={self.CODE}")
+
+    def test_bad_bearer_header_rejected(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        assert not self._try_connect(headers={"Authorization": "Bearer WRONG1"})
+
+    def test_no_credentials_rejected(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        assert not self._try_connect()
