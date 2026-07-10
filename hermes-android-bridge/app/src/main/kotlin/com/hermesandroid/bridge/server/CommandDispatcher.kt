@@ -142,10 +142,11 @@ object CommandDispatcher {
                 val result = withContext(Dispatchers.Main) {
                     val service = BridgeAccessibilityService.instance
                     val windows = service?.windows ?: emptyList()
-                    val root = windows.firstOrNull()?.root
-                    val pkg = root?.packageName?.toString() ?: "unknown"
-                    val cls = root?.className?.toString() ?: "unknown"
-                    root?.recycle()
+                    val roots = windows.mapNotNull { it.root }
+                    val firstRoot = roots.firstOrNull()
+                    val pkg = firstRoot?.packageName?.toString() ?: "unknown"
+                    val cls = firstRoot?.className?.toString() ?: "unknown"
+                    roots.forEach { it.recycle() }
                     windows.forEach { it.recycle() }
                     mapOf("package" to pkg, "className" to cls)
                 }
