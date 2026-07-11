@@ -250,7 +250,7 @@ object ActionExecutor {
                         val w = bitmap.width
                         val h = bitmap.height
                         val stream = ByteArrayOutputStream()
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 50, stream)
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 80, stream)
                         val base64 = Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                         bitmap.recycle()
 
