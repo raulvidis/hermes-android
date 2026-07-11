@@ -18,7 +18,7 @@ This repo contains **two components**:
 | Component | Path | Language | Purpose |
 |-----------|------|----------|---------|
 | **Android bridge app** | `hermes-android-bridge/` | Kotlin | Runs on the phone. Connects to server via WebSocket, executes commands via AccessibilityService |
-| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 36 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
+| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 38 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
 
 > **Note:** The Python code exists here for standalone development and testing (`pip install -e .`, `pytest`). The production copy is in the hermes-agent repo. The Android app does not use or depend on the Python files.
 
@@ -77,6 +77,8 @@ Connect to my phone, code is <CODE>
 Where `<CODE>` is the 6-character pairing code shown in the app.
 
 Hermes will reply with the server address. Enter it in the app and tap **Connect**.
+
+> Full install detail (permission → tool mapping, AAOS, persistent systemd relay) lives in [docs/install.md](docs/install.md).
 
 ### 4. Done
 The agent can now control your phone. Try: "open Instagram", "take a screenshot", "what apps do I have?"
