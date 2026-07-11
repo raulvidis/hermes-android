@@ -75,8 +75,25 @@ class _RelayState:
 # ── Public API (called from sync code) ────────────────────────────────────────
 
 
+def clear_auth_blocks() -> None:
+    """Clear rate-limit failure counters and temporary IP bans.
+
+    Call when the operator rotates the pairing code so a previous wrong-code
+    reconnect storm does not keep rejecting the legitimate device.
+    """
+    with _auth_lock:
+        _auth_failures.clear()
+        _auth_blocked.clear()
+    logger.info("Auth rate-limit blocks cleared")
+
+
 def start_relay(pairing_code: str, port: int = 0) -> None:
-    """Start the relay in a background thread.  No-op if already running."""
+    """Start the relay in a background thread.
+
+    If the relay is already running, update the pairing code and clear auth
+    bans instead of silently no-op'ing (which left phones stuck on a stale
+    token / 429 loop).
+    """
     global _relay_instance
     if port == 0:
         port = int(os.getenv("ANDROID_RELAY_PORT", "8766"))
@@ -87,23 +104,31 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
             and _relay_instance.thread is not None
             and _relay_instance.thread.is_alive()
         ):
-            logger.info("Relay already running on port %d", _relay_instance.port)
+            _relay_instance.pairing_code = pairing_code
+            logger.info(
+                "Relay already running on port %d — pairing code updated",
+                _relay_instance.port,
+            )
+            # Clear outside the lock? clear_auth uses _auth_lock; OK to call after.
+        else:
+            state = _RelayState(pairing_code, port)
+            _relay_instance = state
+
+            ready = threading.Event()
+            t = threading.Thread(
+                target=_run_loop, args=(state, ready), daemon=True, name="android-relay"
+            )
+            state.thread = t
+            t.start()
+            # Wait until the server is actually listening (up to 10 s)
+            if not ready.wait(timeout=10):
+                logger.error("Relay failed to start within 10 seconds")
+                raise RuntimeError("Relay failed to start")
+            logger.info("Relay started on port %d", port)
             return
 
-        state = _RelayState(pairing_code, port)
-        _relay_instance = state
-
-        ready = threading.Event()
-        t = threading.Thread(
-            target=_run_loop, args=(state, ready), daemon=True, name="android-relay"
-        )
-        state.thread = t
-        t.start()
-        # Wait until the server is actually listening (up to 10 s)
-        if not ready.wait(timeout=10):
-            logger.error("Relay failed to start within 10 seconds")
-            raise RuntimeError("Relay failed to start")
-        logger.info("Relay started on port %d", port)
+    # Running path: drop bans after releasing _relay_lock
+    clear_auth_blocks()
 
 
 def stop_relay() -> None:
@@ -146,12 +171,17 @@ def get_relay_url() -> str:
 
 
 def set_pairing_code(code: str) -> None:
-    """Update the pairing code (e.g. when user reconnects with new code)."""
+    """Update the pairing code (e.g. when user reconnects with new code).
+
+    Also clears auth rate-limit bans so a new legitimate code is not blocked
+    by a prior failed-attempt window.
+    """
     with _relay_lock:
         s = _relay_instance
         if s is not None:
             s.pairing_code = code
             logger.info("Pairing code updated")
+    clear_auth_blocks()
 
 
 # ── Background event-loop entry point ─────────────────────────────────────────
@@ -225,7 +255,10 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
         "/broadcast",
         "/speak",
         "/stop_speaking",
+        "/play_remote_audio",
         "/screen_record",
+        "/mic_record",
+        "/camera_record",
         "/events/stream",
         "/clipboard",
     ):
@@ -277,9 +310,9 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
 
 # ── Rate limiting for WebSocket auth ─────────────────────────────────────────
 
-_AUTH_MAX_ATTEMPTS = 5  # max failed attempts before blocking
-_AUTH_WINDOW_SECONDS = 60  # sliding window for counting failures
-_AUTH_BLOCK_SECONDS = 300  # how long to block an IP (5 minutes)
+_AUTH_MAX_ATTEMPTS = int(__import__("os").environ.get("ANDROID_AUTH_MAX_ATTEMPTS", "20"))  # failed auths before temporary ban
+_AUTH_WINDOW_SECONDS = int(__import__("os").environ.get("ANDROID_AUTH_WINDOW_SECONDS", "120"))  # sliding window seconds
+_AUTH_BLOCK_SECONDS = int(__import__("os").environ.get("ANDROID_AUTH_BLOCK_SECONDS", "300"))  # ban duration seconds
 _AUTH_CLEANUP_INTERVAL = 120  # seconds between cleanup sweeps
 
 # {ip: [timestamp, timestamp, ...]} — tracks failed auth attempt times per IP
@@ -374,9 +407,22 @@ def _safe_body_repr(body: dict) -> str:
     return json.dumps(redacted)[:200]
 
 
+def _client_ip(request: web.Request) -> str:
+    """Best-effort client IP for auth rate limits.
+
+    Prefer the first hop of X-Forwarded-For when the relay sits behind a
+    reverse proxy (nginx, Caddy, etc.). Fall back to the direct peer address.
+    """
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        # "client, proxy1, proxy2" — leftmost is original client in standard proxy chains
+        return xff.split(",")[0].strip() or (request.remote or "unknown")
+    return request.remote or "unknown"
+
+
 async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketResponse:
     # Rate limiting — check before token validation
-    remote_ip = request.remote or "unknown"
+    remote_ip = _client_ip(request)
     if _auth_is_blocked(remote_ip):
         logger.warning("Auth attempt from blocked IP %s — returning 429", remote_ip)
         raise web.HTTPTooManyRequests(
@@ -489,7 +535,7 @@ async def _handle_http(
     # Require Bearer token matching the pairing code.  The client already sends
     # this (android_tool._auth_headers), so the only effect is blocking
     # unauthenticated local processes from abusing the HTTP tool API.
-    remote_ip = request.remote or "unknown"
+    remote_ip = _client_ip(request)
     if _auth_is_blocked(remote_ip):
         logger.warning("HTTP auth attempt from blocked IP %s — 429", remote_ip)
         return web.json_response(
