@@ -657,6 +657,30 @@ object ActionExecutor {
     fun sendBroadcast(action: String, extras: Map<String, String>? = null): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
+
+        // Block known-dangerous system broadcasts that can cause DoS or abuse
+        // device resources when fired from an unprivileged bridge context.
+        // Custom namespace actions (containing a dot) are allowed.
+        val blockedBroadcasts = setOf(
+            "android.intent.action.MEDIA_MOUNTED",
+            "android.intent.action.MEDIA_UNMOUNTED",
+            "android.intent.action.MEDIA_EJECT",
+            "android.intent.action.MEDIA_SCANNER_FINISHED",
+            "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+            "android.intent.action.PACKAGE_ADDED",
+            "android.intent.action.PACKAGE_REMOVED",
+            "android.intent.action.PACKAGE_REPLACED",
+            "android.intent.action.PACKAGE_DATA_CLEARED",
+            "android.intent.action.DEVICE_STORAGE_LOW",
+            "android.intent.action.DEVICE_STORAGE_OK"
+        )
+        if (action.isBlank()) {
+            return ActionResult(false, "Broadcast action is empty")
+        }
+        if (action in blockedBroadcasts) {
+            return ActionResult(false, "Broadcast action '$action' is blocked for safety")
+        }
+
         return try {
             val intent = Intent(action)
             extras?.forEach { (key, value) -> intent.putExtra(key, value) }
