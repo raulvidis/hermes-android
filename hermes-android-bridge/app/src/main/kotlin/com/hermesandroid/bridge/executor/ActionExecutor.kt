@@ -592,7 +592,8 @@ object ActionExecutor {
         }
         return try {
             val results = mutableListOf<Map<String, String?>>()
-            val uri = android.net.Uri.withAppendedPath(android.provider.ContactsContract.Contacts.CONTENT_FILTER_URI, query)
+            val safeQuery = android.net.Uri.encode(query)
+            val uri = android.net.Uri.withAppendedPath(android.provider.ContactsContract.Contacts.CONTENT_FILTER_URI, safeQuery)
             val projection = arrayOf(
                 android.provider.ContactsContract.Contacts._ID,
                 android.provider.ContactsContract.Contacts.DISPLAY_NAME
