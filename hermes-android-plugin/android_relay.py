@@ -383,13 +383,14 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
             text="Too many failed authentication attempts. Try again later."
         )
 
-    # Prefer the Authorization header (query strings leak into reverse-proxy
-    # access logs); fall back to ?token= for older APKs.
+    # Authorization header only — the ?token= query string fallback was removed
+    # because query strings are logged verbatim by reverse proxies (nginx,
+    # Cloudflare, Apache), leaking the pairing code into plaintext access logs.
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.removeprefix("Bearer ").strip()
     else:
-        token = request.query.get("token", "")
+        token = ""
     # Constant-time comparison to mitigate timing side-channel attacks that
     # could otherwise leak the pairing code byte-by-byte.
     # PairingManager generates uppercase-only codes — compare exact-case to
