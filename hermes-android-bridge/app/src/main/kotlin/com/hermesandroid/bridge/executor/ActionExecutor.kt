@@ -673,7 +673,10 @@ object ActionExecutor {
             "android.intent.action.PACKAGE_REPLACED",
             "android.intent.action.PACKAGE_DATA_CLEARED",
             "android.intent.action.DEVICE_STORAGE_LOW",
-            "android.intent.action.DEVICE_STORAGE_OK"
+            "android.intent.action.DEVICE_STORAGE_OK",
+            "android.intent.action.ACTION_SHUTDOWN",
+            "android.intent.action.MASTER_CLEAR",
+            "android.intent.action.FACTORY_RESET"
         )
         if (action.isBlank()) {
             return ActionResult(false, "Broadcast action is empty")
