@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 — public media fork line (2026-07-11)
+
+### Added
+- Background mic capture (`/mic_record`, `android_mic_record`)
+- Background camera capture (`/camera_record`, `android_camera_record`) with Camera2 dual-looper
+- Remote audio playback (`/play_remote_audio`) for server-generated TTS
+- Optional ElevenLabs helper tool gated on `ELEVENLABS_API_KEY` (voice/model via env)
+- Env-based APK signing (`HERMES_ANDROID_KEYSTORE*`)
+- Env-tunable relay auth rate limits (`ANDROID_AUTH_*`)
+- Docs: `docs/FORK_FEATURES.md`, `docs/DEPLOYMENT_WSS.md`, `docs/BUILDING_APK.md`
+
+### Fixed
+- Relay pairing code not applied when relay already running; auth ban clear on re-pair
+- Client IP for rate limits behind reverse proxies (`X-Forwarded-For`)
+- Samsung false camera open timeout when Camera2 callbacks shared blocked handler
+- Front camera portrait orientation hint (OEM-dependent)
+
+### Security
+- No keystores/passwords/API keys in repository
+- Documented wss-behind-proxy deployment; discourage public cleartext relay
+
+
 All notable changes to this project are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/); this project adheres to Conventional Commits.
 
 ## [Unreleased]

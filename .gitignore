@@ -34,3 +34,14 @@ hermes-android-bridge/local.properties
 # personal shared standards (symlinks to ../agent-repo-standards)
 .agents/skills
 .agents/AGENTS.base.md
+
+# Signing material (never commit)
+*.keystore
+*.jks
+*.p12
+signing/
+**/hermes-android-release.keystore
+
+# APK artifacts outside Android build dir
+*.apk
+!docs/**/*.apk

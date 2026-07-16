@@ -567,6 +567,39 @@ def android_speak(text: str, flush: bool = False) -> str:
         return json.dumps({"error": str(e)})
 
 
+def android_speak_default_tts(text: str) -> str:
+    """Speak via the Hermes default ElevenLabs voice (Jessica), then play it on Android."""
+    try:
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            return json.dumps({"error": "ELEVENLABS_API_KEY is not configured"})
+        # Optional: ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID (no secrets in repo)
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID", "cgSgspJ2msm6clMCkdW9")
+        model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"},
+            json={
+                "text": text,
+                "model_id": model_id,
+                "voice_settings": {
+                    "stability": float(os.getenv("ELEVENLABS_STABILITY", "0.35")),
+                    "similarity_boost": float(os.getenv("ELEVENLABS_SIMILARITY", "0.80")),
+                    "style": float(os.getenv("ELEVENLABS_STYLE", "0.45")),
+                    "use_speaker_boost": True,
+                },
+            },
+            timeout=60,
+        )
+        if not response.ok:
+            return json.dumps({"error": f"ElevenLabs HTTP {response.status_code}: {response.text[:300]}"})
+        audio_b64 = __import__("base64").b64encode(response.content).decode("ascii")
+        data = _post("/play_remote_audio", {"audio": audio_b64, "extension": "mp3"})
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 def android_speak_stop() -> str:
     """Stop any ongoing text-to-speech on the phone."""
     try:
@@ -639,6 +672,73 @@ def android_read_widgets() -> str:
     """
     try:
         data = _get("/widgets")
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_mic_record(duration_ms: int = 5000) -> str:
+    """
+    Record microphone audio in the background (default 5s, max 120s).
+    Requires RECORD_AUDIO permission on the phone. Returns MEDIA: path to .m4a.
+    Android shows a mic indicator while recording — cannot be hidden.
+    """
+    try:
+        import base64
+        import tempfile
+
+        data = _post("/mic_record", {"durationMs": duration_ms})
+        if isinstance(data, dict) and data.get("success") and "data" in data:
+            audio_data = data["data"]
+            b64 = audio_data.get("audio", "")
+            if b64:
+                raw = base64.b64decode(b64)
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".m4a", prefix="android_mic_", delete=False
+                )
+                tmp.write(raw)
+                tmp.close()
+                return f"Mic recorded ({duration_ms}ms)\nMEDIA:{tmp.name}"
+        return json.dumps(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_camera_record(
+    duration_ms: int = 5000, camera: str = "back", with_audio: bool = True
+) -> str:
+    """
+    Record camera video in the background (default 5s, max 60s).
+    camera: "back" or "front". with_audio includes microphone if permitted.
+    Requires CAMERA (+ RECORD_AUDIO for audio). Returns MEDIA: path to .mp4.
+    Android shows a green camera indicator — cannot be hidden on modern Android.
+    """
+    try:
+        import base64
+        import tempfile
+
+        data = _post(
+            "/camera_record",
+            {
+                "durationMs": duration_ms,
+                "camera": camera,
+                "withAudio": with_audio,
+            },
+        )
+        if isinstance(data, dict) and data.get("success") and "data" in data:
+            video_data = data["data"]
+            b64 = video_data.get("video", "")
+            if b64:
+                raw = base64.b64decode(b64)
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".mp4", prefix="android_camera_", delete=False
+                )
+                tmp.write(raw)
+                tmp.close()
+                w = video_data.get("width", "?")
+                h = video_data.get("height", "?")
+                cam = video_data.get("camera", camera)
+                return f"Camera recorded ({cam}, {w}x{h}, {duration_ms}ms)\nMEDIA:{tmp.name}"
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -818,15 +918,23 @@ def android_setup(pairing_code: str) -> str:
             from tools.android_relay import (
                 start_relay,
                 is_phone_connected,
+                set_pairing_code,
+                clear_auth_blocks,
             )
 
             start_relay(pairing_code=pairing_code, port=port)
+            set_pairing_code(pairing_code)
+            clear_auth_blocks()
 
             # Check if phone is already connected
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            server_address = f"{public_ip}:{port}"
+            public_url = (os.getenv("ANDROID_PUBLIC_URL") or "").strip().rstrip("/")
+            if public_url:
+                server_address = public_url
+            else:
+                server_address = f"{public_ip}:{port}"
 
             if phone_connected:
                 return json.dumps(
@@ -1264,6 +1372,11 @@ _SCHEMAS = {
             "required": ["text"],
         },
     },
+    "android_speak_default_tts": {
+        "name": "android_speak_default_tts",
+        "description": "Speak text on the phone using Hermes default ElevenLabs Jessica voice, not Android system TTS.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "Text to speak"}}, "required": ["text"]},
+    },
     "android_speak_stop": {
         "name": "android_speak_stop",
         "description": "Stop any ongoing text-to-speech playback on the phone.",
@@ -1314,6 +1427,46 @@ _SCHEMAS = {
                     "type": "integer",
                     "description": "Recording duration in milliseconds (default 5000)",
                     "default": 5000,
+                },
+            },
+            "required": [],
+        },
+    },
+    "android_mic_record": {
+        "name": "android_mic_record",
+        "description": "Record microphone audio in the background (default 5s, max 120s). Requires RECORD_AUDIO. Returns m4a via MEDIA:. Android shows mic indicator while recording.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "duration_ms": {
+                    "type": "integer",
+                    "description": "Recording duration in milliseconds (default 5000, max 120000)",
+                    "default": 5000,
+                },
+            },
+            "required": [],
+        },
+    },
+    "android_camera_record": {
+        "name": "android_camera_record",
+        "description": "Record camera video in the background (default 5s, max 60s). camera=back|front. Requires CAMERA (+ mic for audio). Returns mp4 via MEDIA:. Green camera indicator is shown by Android.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "duration_ms": {
+                    "type": "integer",
+                    "description": "Recording duration in milliseconds (default 5000, max 60000)",
+                    "default": 5000,
+                },
+                "camera": {
+                    "type": "string",
+                    "description": "Which camera: back or front (default back)",
+                    "default": "back",
+                },
+                "with_audio": {
+                    "type": "boolean",
+                    "description": "Include microphone audio if permitted (default true)",
+                    "default": True,
                 },
             },
             "required": [],
@@ -1497,6 +1650,12 @@ _HANDLERS = {
     "android_events": lambda args, **kw: android_events(**args),
     "android_event_stream": lambda args, **kw: android_event_stream(**args),
     "android_screen_record": lambda args, **kw: android_screen_record(**args),
+    "android_mic_record": lambda args, **kw: android_mic_record(**args),
+    "android_camera_record": lambda args, **kw: android_camera_record(
+        duration_ms=args.get("duration_ms", 5000),
+        camera=args.get("camera", "back"),
+        with_audio=args.get("with_audio", True),
+    ),
     "android_read_widgets": lambda args, **kw: android_read_widgets(),
     "android_find_nodes": lambda args, **kw: android_find_nodes(**args),
     "android_diff_screen": lambda args, **kw: android_diff_screen(**args),

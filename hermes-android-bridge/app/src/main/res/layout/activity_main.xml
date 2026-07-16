@@ -33,7 +33,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="v0.2.0"
+            android:text="v0.3.0-media"
             android:textSize="12sp"
             android:textColor="#666666"
             android:fontFamily="monospace" />

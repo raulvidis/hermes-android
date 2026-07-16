@@ -1,5 +1,7 @@
 package com.hermesandroid.bridge
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -49,6 +51,18 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Camera + mic for background capture tools
+        val needed = mutableListOf<String>()
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.CAMERA)
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (needed.isNotEmpty()) {
+            requestPermissions(needed.toTypedArray(), 2002)
+        }
 
         tvA11yStatus = findViewById(R.id.tvA11yStatus)
         tvServerStatus = findViewById(R.id.tvServerStatus)
