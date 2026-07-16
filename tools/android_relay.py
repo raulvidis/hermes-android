@@ -2,13 +2,13 @@
 android_relay — WebSocket relay that bridges HTTP tool calls to a phone over WS.
 
 The relay runs an aiohttp server exposing:
-  - /ws          WebSocket endpoint the phone connects to (?token=CODE for auth)
+  - /ws          WebSocket endpoint the phone connects to (Authorization: Bearer *** header for auth)
   - /ping, /screen, /tap, /tap_text, /type, /swipe, /open_app, /press_key,
     /screenshot, /scroll, /wait, /apps, /current_app   HTTP endpoints matching
     the bridge API consumed by android_tool.py
 
 Flow:
-  1. Phone connects via WebSocket with ?token=<pairing_code>
+  1. Phone connects via WebSocket with Bearer token in Authorization header
   2. Python tool makes an HTTP request to e.g. /screen
   3. Relay wraps request as JSON command, sends over WS to phone
   4. Phone executes command, sends JSON response back over WS
