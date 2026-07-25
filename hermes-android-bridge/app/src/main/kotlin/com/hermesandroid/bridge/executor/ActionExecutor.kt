@@ -635,6 +635,31 @@ object ActionExecutor {
     fun sendIntent(action: String, dataUri: String? = null, extras: Map<String, String>? = null, packageOverride: String? = null): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
+
+        // Reject activity-launch actions that could be used to install/uninstall
+        // packages, factory reset, or otherwise damage the device. These have no
+        // legitimate agent use case via a raw intent (the dedicated call/send_sms
+        // tools cover telephony, and settings can be navigated to via open_app).
+        // Custom namespace actions (containing a dot) are NOT exempt here, because
+        // package-manager actions like android.intent.action.DELETE are also dotted.
+        val blockedIntents = setOf(
+            // Package management — install/uninstall from arbitrary sources
+            "android.intent.action.INSTALL_PACKAGE",
+            "android.intent.action.DELETE",
+            "android.intent.action.UNINSTALL_PACKAGE",
+            "android.intent.action.PACKAGE_INSTALL",
+            // Device wipe / factory reset
+            "android.intent.action.MASTER_CLEAR",
+            "android.intent.action.FACTORY_RESET",
+            "android.intent.action.ACTION_SHUTDOWN"
+        )
+        if (action.isBlank()) {
+            return ActionResult(false, "Intent action is empty")
+        }
+        if (action in blockedIntents) {
+            return ActionResult(false, "Intent action '$action' is blocked for safety")
+        }
+
         val intent = Intent(action).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (dataUri != null) {
