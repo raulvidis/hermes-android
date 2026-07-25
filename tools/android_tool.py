@@ -567,6 +567,7 @@ def android_speak(text: str, flush: bool = False) -> str:
         return json.dumps({"error": str(e)})
 
 
+
 def android_speak_stop() -> str:
     """Stop any ongoing text-to-speech on the phone."""
     try:
@@ -642,6 +643,8 @@ def android_read_widgets() -> str:
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
 
 
 def android_find_nodes(
@@ -818,15 +821,23 @@ def android_setup(pairing_code: str) -> str:
             from tools.android_relay import (
                 start_relay,
                 is_phone_connected,
+                set_pairing_code,
+                clear_auth_blocks,
             )
 
             start_relay(pairing_code=pairing_code, port=port)
+            set_pairing_code(pairing_code)
+            clear_auth_blocks()
 
             # Check if phone is already connected
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            server_address = f"{public_ip}:{port}"
+            public_url = (os.getenv("ANDROID_PUBLIC_URL") or "").strip().rstrip("/")
+            if public_url:
+                server_address = public_url
+            else:
+                server_address = f"{public_ip}:{port}"
 
             if phone_connected:
                 return json.dumps(
