@@ -3,10 +3,14 @@
 package com.hermesandroid.bridge.server
 
 import com.google.gson.JsonObject
+import com.hermesandroid.bridge.BuildConfig
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.executor.ScreenReader
 import com.hermesandroid.bridge.media.ScreenRecorder
+import com.hermesandroid.bridge.media.MicRecorder
+import com.hermesandroid.bridge.media.CameraRecorder
+import com.hermesandroid.bridge.media.RemoteAudioPlayer
 import com.hermesandroid.bridge.model.DeviceCapabilities
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.notification.NotificationStore
@@ -42,10 +46,8 @@ object CommandDispatcher {
                 mapOf(
                     "status" to "ok",
                     "accessibilityService" to serviceRunning,
-                    "authenticated" to authenticated
-                    // Version omitted: /ping is unauthenticated and version info
-                    // helps attackers fingerprint the deployment and target known
-                    // vulnerabilities in specific versions.
+                    "authenticated" to authenticated,
+                    "version" to BuildConfig.VERSION_NAME
                 ) to 200
             }
 
@@ -143,11 +145,10 @@ object CommandDispatcher {
                 val result = withContext(Dispatchers.Main) {
                     val service = BridgeAccessibilityService.instance
                     val windows = service?.windows ?: emptyList()
-                    val roots = windows.mapNotNull { it.root }
-                    val firstRoot = roots.firstOrNull()
-                    val pkg = firstRoot?.packageName?.toString() ?: "unknown"
-                    val cls = firstRoot?.className?.toString() ?: "unknown"
-                    roots.forEach { it.recycle() }
+                    val root = windows.firstOrNull()?.root
+                    val pkg = root?.packageName?.toString() ?: "unknown"
+                    val cls = root?.className?.toString() ?: "unknown"
+                    root?.recycle()
                     windows.forEach { it.recycle() }
                     mapOf("package" to pkg, "className" to cls)
                 }
@@ -345,6 +346,14 @@ object CommandDispatcher {
 
             method == "POST" && path == "/stop_speaking" -> {
                 val result = ActionExecutor.stopSpeaking()
+                RemoteAudioPlayer.stop()
+                result to 200
+            }
+
+            method == "POST" && path == "/play_remote_audio" -> {
+                val audio = body.get("audio")?.asString ?: ""
+                val extension = body.get("extension")?.asString ?: "mp3"
+                val result = RemoteAudioPlayer.play(audio, extension)
                 result to 200
             }
 
@@ -352,6 +361,24 @@ object CommandDispatcher {
                 val durationMs = body.get("durationMs")?.asLong?.coerceAtMost(30_000L) ?: 5000L
                 val result = withContext(Dispatchers.IO) {
                     ScreenRecorder.record(durationMs)
+                }
+                result to 200
+            }
+
+            method == "POST" && path == "/mic_record" -> {
+                val durationMs = body.get("durationMs")?.asLong?.coerceAtMost(120_000L) ?: 5000L
+                val result = withContext(Dispatchers.IO) {
+                    MicRecorder.record(durationMs)
+                }
+                result to 200
+            }
+
+            method == "POST" && path == "/camera_record" -> {
+                val durationMs = body.get("durationMs")?.asLong?.coerceAtMost(60_000L) ?: 5000L
+                val camera = body.get("camera")?.asString ?: "back"
+                val withAudio = body.get("withAudio")?.asBoolean ?: true
+                val result = withContext(Dispatchers.IO) {
+                    CameraRecorder.record(durationMs, camera, withAudio)
                 }
                 result to 200
             }

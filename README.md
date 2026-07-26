@@ -2,6 +2,18 @@
 
 Give your AI agent hands. Remote Android device control for [hermes-agent](https://github.com/NousResearch/hermes-agent).
 
+
+## Optional media extensions (this PR / fork line)
+
+This tree may include optional **background mic/camera capture** and **remote audio playback** for server-side TTS. See:
+
+- [docs/FORK_FEATURES.md](docs/FORK_FEATURES.md)
+- [docs/BUILDING_APK.md](docs/BUILDING_APK.md)
+- [docs/DEPLOYMENT_WSS.md](docs/DEPLOYMENT_WSS.md)
+
+Android shows OS camera/microphone indicators during capture. No silent stealth recording on stock Android.
+
+
 ## How it works
 
 ```

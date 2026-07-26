@@ -43,14 +43,29 @@ class BridgeAccessibilityService : AccessibilityService() {
     private var isForeground = false
     private var foregroundTypes = 0
 
-    fun startForeground(includeMediaProjection: Boolean = false) {
+    fun startForeground(
+        includeMediaProjection: Boolean = false,
+        includeCamera: Boolean = false,
+        includeMicrophone: Boolean = false,
+    ) {
         val requestedTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                if (includeMediaProjection) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                } else {
-                    0
-                }
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (includeMediaProjection) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            if (includeCamera && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // FOREGROUND_SERVICE_TYPE_CAMERA = 0x40 (API 34+)
+                types = types or 0x40
+            } else if (includeCamera && Build.VERSION.SDK_INT >= 30) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
+            if (includeMicrophone && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // FOREGROUND_SERVICE_TYPE_MICROPHONE = 0x80 (API 34+)
+                types = types or 0x80
+            } else if (includeMicrophone && Build.VERSION.SDK_INT >= 30) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            types
         } else {
             0
         }
@@ -87,12 +102,17 @@ class BridgeAccessibilityService : AccessibilityService() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             Log.i(TAG, "Starting foreground service with types=$requestedTypes")
-            startForeground(1, notification, requestedTypes)
+            // Merge with existing types so we don't drop camera/mic mid-session
+            val merged = foregroundTypes or requestedTypes
+            startForeground(1, notification, merged)
+            foregroundTypes = merged
         } else {
             startForeground(1, notification)
         }
         isForeground = true
-        foregroundTypes = requestedTypes
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            foregroundTypes = requestedTypes
+        }
     }
 
     fun stopForeground() {

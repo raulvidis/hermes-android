@@ -11,17 +11,46 @@ android {
         applicationId = "com.hermesandroid.bridge"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 7
+        versionName = "0.3.0-media"
     }
 
     buildFeatures {
         buildConfig = true
     }
 
+    // Optional distribution signing via environment variables (never commit keystores/passwords):
+    //   HERMES_ANDROID_KEYSTORE=/path/to.keystore
+    //   HERMES_ANDROID_KEYSTORE_PASSWORD=...
+    //   HERMES_ANDROID_KEY_ALIAS=hermes-android
+    //   HERMES_ANDROID_KEY_PASSWORD=...   (defaults to keystore password)
+    signingConfigs {
+        create("envRelease") {
+            val ks = System.getenv("HERMES_ANDROID_KEYSTORE")
+            if (!ks.isNullOrBlank()) {
+                storeFile = file(ks)
+                storePassword = System.getenv("HERMES_ANDROID_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("HERMES_ANDROID_KEY_ALIAS") ?: "hermes-android"
+                keyPassword = System.getenv("HERMES_ANDROID_KEY_PASSWORD")
+                    ?: System.getenv("HERMES_ANDROID_KEYSTORE_PASSWORD")
+                    ?: ""
+            }
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            val ks = System.getenv("HERMES_ANDROID_KEYSTORE")
+            if (!ks.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("envRelease")
+            }
+        }
         release {
             isMinifyEnabled = false
+            val ks = System.getenv("HERMES_ANDROID_KEYSTORE")
+            if (!ks.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("envRelease")
+            }
         }
     }
 
