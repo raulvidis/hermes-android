@@ -110,4 +110,94 @@ class ActionExecutorSendIntentTest {
         assertTrue("expected success — got: ${result.message}", result.success)
         verify(exactly = 1) { mockService.startActivity(any()) }
     }
+
+    // ── URI scheme denylist tests ────────────────────────────────────────
+
+    @Test
+    fun `sendIntent blocks intent colon-slash-slash URI scheme`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "intent://example.com/#Intent;scheme=http;end"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks market URI scheme`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "market://details?id=com.example"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks tel single-colon URI scheme`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "tel:1234567890"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks smsto single-colon URI scheme`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "smsto:1234567890"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks mmsto single-colon URI scheme`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "mmsto:1234567890"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks content colon-slash-slash settings URI prefix`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "content://settings/system"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks content colon-slash-slash contacts URI prefix`() {
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "content://com.android.contacts/data/123"
+        )
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent allows benign http URI scheme`() {
+        every { mockService.startActivity(any()) } returns Unit
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "https://example.com"
+        )
+        assertTrue("expected success — got: ${result.message}", result.success)
+        verify(exactly = 1) { mockService.startActivity(any()) }
+    }
 }

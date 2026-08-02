@@ -663,6 +663,23 @@ object ActionExecutor {
         val intent = Intent(action).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (dataUri != null) {
+                // Denylist dangerous URI schemes that can bypass the action blocklist.
+                // An attacker can use a benign action like VIEW with a malicious URI
+                // (intent:// redirects, content:// providers, market:// deep links,
+                //  tel:, smsto:, mmsto:).
+                val blockedUriSchemes = setOf("intent", "market", "smsto", "mmsto", "tel")
+                val blockedUriPrefixes = listOf("content://settings", "content://com.android.contacts")
+                // Handle both standard schemes (http://, intent://) and single-colon
+                // schemes (tel:, smsto:, mmsto:). substringBefore("://") alone fails
+                // for single-colon URIs because "://" is absent, returning the full
+                // string (e.g. "tel:123456") instead of just "tel".
+                val scheme = dataUri.substringBefore("://").substringBefore(":").lowercase()
+                if (scheme in blockedUriSchemes) {
+                    return ActionResult(false, "URI scheme '$scheme://' is blocked for safety")
+                }
+                if (blockedUriPrefixes.any { dataUri.lowercase().startsWith(it) }) {
+                    return ActionResult(false, "Content provider URI is blocked for safety")
+                }
                 setData(android.net.Uri.parse(dataUri))
             }
             extras?.forEach { (key, value) ->
