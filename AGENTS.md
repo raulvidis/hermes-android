@@ -8,7 +8,7 @@ generic Project Defaults, Workflows) live in `AGENTS.base.md` — not duplicated
 ## Core
 - Repo: hermes-android. Two components: Kotlin bridge app (`hermes-android-bridge/`) + Python toolset (`tools/`, `tests/`, `hermes-android-plugin/`).
 - Python prod copy lives in hermes-agent repo; this repo = standalone dev/test. APK does NOT depend on Python.
-- Branch `main`. pyproject version 0.3.0.
+- Branch `main`. pyproject version 0.4.0.
 - Shipped = git tag (`latest-build` APK + version tag), not main merge.
 - Confidentiality: this is a remote-control bridge — security-sensitive. Full device access once paired. Never expose pairing codes, server IPs, tokens, screen content, screenshots, contacts/SMS/location data outside the task. See SECURITY.md.
 
