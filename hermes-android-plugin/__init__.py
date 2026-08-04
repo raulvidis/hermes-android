@@ -1,6 +1,6 @@
 """
-hermes-android plugin — registers 14 android_* tools into hermes-agent via the
-v0.3.0 plugin system.
+hermes-android plugin — registers 38 android_* tools into hermes-agent via the
+v0.4.0 plugin system.
 
 Drop this folder into ~/.hermes/plugins/hermes-android and restart hermes.
 """
