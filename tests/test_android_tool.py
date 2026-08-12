@@ -33,6 +33,10 @@ from tools.android_tool import (
     android_events,
     android_event_stream,
     android_screen_record,
+    android_mic_record,
+    android_mic_stop,
+    android_mic_status,
+    android_mic_fetch,
     android_read_widgets,
     android_media,
     android_search_contacts,
@@ -49,11 +53,11 @@ from tools.android_tool import (
 
 
 class TestSchemas:
-    def test_all_38_tools_have_schemas(self):
-        assert len(_SCHEMAS) == 38
+    def test_all_42_tools_have_schemas(self):
+        assert len(_SCHEMAS) == 42
 
-    def test_all_38_tools_have_handlers(self):
-        assert len(_HANDLERS) == 38
+    def test_all_42_tools_have_handlers(self):
+        assert len(_HANDLERS) == 42
 
     def test_schema_names_match_handler_names(self):
         assert set(_SCHEMAS.keys()) == set(_HANDLERS.keys())
@@ -79,6 +83,18 @@ class TestCodeQuality:
         # These should be present (used functions)
         assert "start_relay" in source
         assert "is_phone_connected" in source
+
+    def test_plugin_copy_registers_all_tools_without_device_specific_values(self):
+        import runpy
+        from pathlib import Path
+
+        plugin_path = Path(__file__).parents[1] / "hermes-android-plugin" / "android_tool.py"
+        plugin_source = plugin_path.read_text(encoding="utf-8")
+        plugin = runpy.run_path(str(plugin_path))
+
+        assert len(plugin["_SCHEMAS"]) == 42
+        assert set(plugin["_SCHEMAS"]) == set(plugin["_HANDLERS"])
+        assert ("scp " + "-P") not in plugin_source
 
 
 class TestPing:
@@ -856,6 +872,68 @@ class TestScreenRecord:
             body=ConnectionError("refused"),
         )
         result = json.loads(android_screen_record())
+        assert "error" in result
+
+
+class TestMicrophone:
+    @responses.activate
+    def test_start_recording(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/mic_start",
+            json={"status": "starting", "duration": 12},
+            status=202,
+        )
+        result = json.loads(android_mic_record(duration=12))
+        assert result == {"status": "starting", "duration": 12}
+        assert json.loads(responses.calls[0].request.body) == {"duration": 12}
+
+    def test_rejects_invalid_duration_without_network_call(self):
+        result = json.loads(android_mic_record(duration=1801))
+        assert "error" in result
+
+    @responses.activate
+    def test_stop_recording(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/mic_stop",
+            json={"status": "stopping"},
+            status=202,
+        )
+        assert json.loads(android_mic_stop())["status"] == "stopping"
+
+    @responses.activate
+    def test_recording_status(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/mic_status",
+            json={"phase": "ready", "recording": False, "latest": "recording_test.wav"},
+        )
+        assert json.loads(android_mic_status())["phase"] == "ready"
+
+    @responses.activate
+    def test_fetch_streams_wav_to_media_path(self, bridge_url):
+        from pathlib import Path
+
+        wav = b"RIFF" + (b"\x00" * 4) + b"WAVE" + (b"\x00" * 52)
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/mic_file",
+            body=wav,
+            status=200,
+            headers={"Content-Type": "audio/wav", "Content-Length": str(len(wav))},
+        )
+
+        result = android_mic_fetch("recording_test.wav")
+        media_path = Path(result.split("MEDIA:", 1)[1])
+        try:
+            assert media_path.read_bytes() == wav
+            assert "name=recording_test.wav" in responses.calls[0].request.url
+        finally:
+            media_path.unlink(missing_ok=True)
+
+    def test_fetch_rejects_device_paths(self):
+        result = json.loads(android_mic_fetch("../recording.wav"))
         assert "error" in result
 
 

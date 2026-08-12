@@ -36,6 +36,10 @@ Tools registered:
   - android_events           read recent accessibility events
   - android_event_stream     enable/disable event capture
   - android_screen_record    record screen to video
+  - android_mic_record       start microphone WAV recording
+  - android_mic_stop         stop and finalize microphone recording
+  - android_mic_status       inspect microphone recorder state
+  - android_mic_fetch        stream a WAV to a local MEDIA file
   - android_read_widgets     read home-screen widgets
   - android_find_nodes       search UI nodes by text/class/clickable
   - android_diff_screen      diff screen against a previous hash
@@ -629,6 +633,97 @@ def android_screen_record(duration_ms: int = 5000) -> str:
                 return f"Screen recorded ({w}x{h}, {duration_ms}ms)\nMEDIA:{tmp.name}"
         return json.dumps(data)
     except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_mic_record(duration: int = 0) -> str:
+    """Start PCM16/WAV recording; duration=0 records until stopped (30-minute cap)."""
+    if isinstance(duration, bool) or not isinstance(duration, int) or duration < 0 or duration > 1800:
+        return json.dumps({"error": "duration must be between 0 and 1800 seconds"})
+    try:
+        return json.dumps(_post("/mic_start", {"duration": duration}))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_mic_stop() -> str:
+    """Stop the active microphone recording and finalize its WAV file."""
+    try:
+        return json.dumps(_post("/mic_stop", {}))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_mic_status() -> str:
+    """Return recorder phase plus metadata for the latest completed WAV."""
+    try:
+        return json.dumps(_get("/mic_status"))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_mic_fetch(remote_path: str = "") -> str:
+    """Stream the latest (or named) WAV to a temporary local MEDIA path."""
+    if not isinstance(remote_path, str):
+        return json.dumps({"error": "remote_path must be a WAV filename"})
+    if remote_path and (
+        os.path.basename(remote_path) != remote_path
+        or not remote_path.lower().endswith(".wav")
+    ):
+        return json.dumps({"error": "remote_path must be a WAV filename, not a path"})
+
+    import tempfile
+
+    temp_path = None
+    try:
+        params = {"name": remote_path} if remote_path else None
+        with requests.get(
+            f"{_bridge_url()}/mic_file",
+            params=params,
+            headers=_auth_headers(),
+            timeout=_timeout(),
+            stream=True,
+        ) as response:
+            if response.status_code >= 400:
+                try:
+                    return json.dumps(response.json())
+                except ValueError:
+                    return json.dumps({"error": f"Microphone download failed (HTTP {response.status_code})"})
+
+            expected = response.headers.get("Content-Length")
+            expected_size = int(expected) if expected and expected.isdigit() else None
+            if expected_size is not None and expected_size > 256 * 1024 * 1024:
+                return json.dumps({"error": "Microphone recording exceeds the download limit"})
+
+            written = 0
+            prefix = bytearray()
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav",
+                prefix="android_mic_",
+                delete=False,
+            ) as output:
+                temp_path = output.name
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > 256 * 1024 * 1024:
+                        raise ValueError("Microphone recording exceeds the download limit")
+                    if len(prefix) < 12:
+                        prefix.extend(chunk[: 12 - len(prefix)])
+                    output.write(chunk)
+
+        if expected_size is not None and written != expected_size:
+            raise IOError("Microphone recording download was incomplete")
+        if len(prefix) < 12 or prefix[:4] != b"RIFF" or prefix[8:12] != b"WAVE":
+            raise IOError("Downloaded microphone recording is not a WAV file")
+        return f"Microphone recording fetched ({written} bytes)\nMEDIA:{temp_path}"
+    except Exception as e:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
         return json.dumps({"error": str(e)})
 
 
@@ -1319,6 +1414,49 @@ _SCHEMAS = {
             "required": [],
         },
     },
+    "android_mic_record": {
+        "name": "android_mic_record",
+        "description": "Start a 16 kHz mono WAV microphone recording on the Android device.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "integer",
+                    "description": "Seconds to record (0 records until android_mic_stop, capped at 1800; maximum 1800)",
+                    "minimum": 0,
+                    "maximum": 1800,
+                    "default": 0,
+                },
+            },
+            "required": [],
+        },
+    },
+    "android_mic_stop": {
+        "name": "android_mic_stop",
+        "description": "Stop the active microphone recording and finalize its WAV file.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_mic_status": {
+        "name": "android_mic_status",
+        "description": "Get microphone recorder state and latest completed WAV metadata.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_mic_fetch": {
+        "name": "android_mic_fetch",
+        "description": "Download the latest or named microphone WAV as a local MEDIA file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "remote_path": {
+                    "type": "string",
+                    "description": "Optional WAV filename returned by android_mic_status; paths are rejected",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+    },
+
     "android_read_widgets": {
         "name": "android_read_widgets",
         "description": "Read home screen widgets (weather, calendar, tasks, etc.). Goes to home screen and reads widget content without opening apps.",
@@ -1497,6 +1635,10 @@ _HANDLERS = {
     "android_events": lambda args, **kw: android_events(**args),
     "android_event_stream": lambda args, **kw: android_event_stream(**args),
     "android_screen_record": lambda args, **kw: android_screen_record(**args),
+    "android_mic_record": lambda args, **kw: android_mic_record(**args),
+    "android_mic_stop": lambda args, **kw: android_mic_stop(),
+    "android_mic_status": lambda args, **kw: android_mic_status(),
+    "android_mic_fetch": lambda args, **kw: android_mic_fetch(**args),
     "android_read_widgets": lambda args, **kw: android_read_widgets(),
     "android_find_nodes": lambda args, **kw: android_find_nodes(**args),
     "android_diff_screen": lambda args, **kw: android_diff_screen(**args),

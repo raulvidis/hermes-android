@@ -15,6 +15,9 @@ from tools.android_relay import (
     _AUTH_MAX_ATTEMPTS,
     _mask_token,
     _safe_body_repr,
+    _decode_stream_frame,
+    _cleanup_phone,
+    _RelayState,
 )
 
 
@@ -96,12 +99,12 @@ class TestTokenMasking:
     def test_normal_token_masked(self):
         token = "SECRET123"
         masked = _mask_token(token)
-        assert masked == "SE****"
+        assert masked == "****"
         assert token not in masked
 
     def test_short_token_fully_masked(self):
         assert _mask_token("X") == "****"
-        assert _mask_token("AB") == "AB****"
+        assert _mask_token("AB") == "****"
 
     def test_empty_token_fully_masked(self):
         assert _mask_token("") == "****"
@@ -177,3 +180,152 @@ class TestWsAuthHeader:
     def test_no_credentials_rejected(self):
         start_relay(pairing_code=self.CODE, port=self.PORT)
         assert not self._try_connect()
+
+
+class TestMicrophoneBinaryStream:
+    PORT = 19882
+    CODE = "MICODE"
+
+    @staticmethod
+    def _frame(request_id: str, payload: bytes) -> bytes:
+        request_id_bytes = request_id.encode("utf-8")
+        return len(request_id_bytes).to_bytes(2, "big") + request_id_bytes + payload
+
+    def test_binary_frame_decoder(self):
+        raw = self._frame("request-1", b"audio")
+        assert _decode_stream_frame(raw) == ("request-1", b"audio")
+
+    @pytest.mark.parametrize("raw", [b"", b"\x00\x00x", b"\x00\x05abc"])
+    def test_binary_frame_decoder_rejects_malformed_frames(self, raw):
+        with pytest.raises(ValueError):
+            _decode_stream_frame(raw)
+
+    def test_replaced_socket_cannot_clean_up_new_phone(self):
+        import asyncio
+
+        async def scenario():
+            state = _RelayState(pairing_code=self.CODE, port=self.PORT)
+            state.phone_ws_lock = asyncio.Lock()
+            old_socket = object()
+            new_socket = object()
+            state.phone_ws = new_socket
+
+            await _cleanup_phone(
+                state,
+                reason="old socket disconnected",
+                expected_ws=old_socket,
+            )
+
+            assert state.phone_ws is new_socket
+
+        asyncio.run(scenario())
+
+    def test_wav_is_streamed_from_phone_to_http_client(self):
+        import asyncio
+        import hashlib
+        import aiohttp
+
+        wav = b"RIFF" + (b"\x01\x02" * 64)
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+
+        async def scenario():
+            headers = {"Authorization": f"Bearer {self.CODE}"}
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers=headers,
+                )
+                download = asyncio.create_task(
+                    session.get(
+                        f"http://127.0.0.1:{self.PORT}/mic_file",
+                        headers=headers,
+                    )
+                )
+
+                command = await ws.receive_json(timeout=2)
+                request_id = command["request_id"]
+                assert command["path"] == "/mic_file"
+
+                await ws.send_json(
+                    {
+                        "request_id": request_id,
+                        "status": 200,
+                        "stream": {
+                            "event": "start",
+                            "filename": "recording_test.wav",
+                            "mimeType": "audio/wav",
+                            "size": len(wav),
+                        },
+                    }
+                )
+                await ws.send_bytes(self._frame(request_id, wav[:48]))
+                await ws.send_bytes(self._frame(request_id, wav[48:]))
+                await ws.send_json(
+                    {
+                        "request_id": request_id,
+                        "status": 200,
+                        "stream": {
+                            "event": "end",
+                            "bytes": len(wav),
+                            "sha256": hashlib.sha256(wav).hexdigest(),
+                        },
+                    }
+                )
+
+                response = await asyncio.wait_for(download, timeout=2)
+                assert response.status == 200
+                assert response.headers["Content-Type"] == "audio/wav"
+                assert await response.read() == wav
+                await ws.close()
+
+        asyncio.run(scenario())
+
+
+class TestPhoneReplacement:
+    PORT = 19883
+    CODE = "REPLCE"
+
+    def test_new_phone_remains_usable_after_replacing_old_socket(self):
+        import asyncio
+        import aiohttp
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+
+        async def scenario():
+            headers = {"Authorization": f"Bearer {self.CODE}"}
+            async with aiohttp.ClientSession() as session:
+                old_ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers=headers,
+                )
+                old_close = asyncio.create_task(old_ws.receive())
+                new_ws = await asyncio.wait_for(
+                    session.ws_connect(
+                        f"ws://127.0.0.1:{self.PORT}/ws",
+                        headers=headers,
+                    ),
+                    timeout=2,
+                )
+                await asyncio.wait_for(old_close, timeout=2)
+
+                request = asyncio.create_task(
+                    session.get(
+                        f"http://127.0.0.1:{self.PORT}/ping",
+                        headers=headers,
+                    )
+                )
+                command = await new_ws.receive_json(timeout=2)
+                await new_ws.send_json(
+                    {
+                        "request_id": command["request_id"],
+                        "status": 200,
+                        "result": {"status": "ok"},
+                    }
+                )
+
+                response = await asyncio.wait_for(request, timeout=2)
+                assert response.status == 200
+                assert await response.json() == {"status": "ok"}
+                await new_ws.close()
+
+        asyncio.run(scenario())

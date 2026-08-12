@@ -48,7 +48,7 @@ After the user taps Connect on their phone, the phone connects to this server vi
 
 ## Available Tools
 
-You have these 38 tools. Use them by name — they are function calls.
+You have these 42 tools. Use them by name — they are function calls.
 
 ### Connectivity
 - `android_ping()` — check if phone is connected and responding
@@ -79,6 +79,12 @@ You have these 38 tools. Use them by name — they are function calls.
 
 ### Waiting
 - `android_wait(text, class_name, timeout_ms=5000)` — poll until an element appears. Use after navigation or loading.
+
+### Microphone
+- `android_mic_record(duration=0)` — start a visible 16 kHz mono recording; `0` records until stopped, with a 30-minute safety cap.
+- `android_mic_stop()` — stop and finalize the WAV.
+- `android_mic_status()` — inspect recorder phase and completed-file metadata.
+- `android_mic_fetch(remote_path="")` — stream the latest or named WAV to a temporary `MEDIA:` file.
 
 ## Rules
 

@@ -11,7 +11,7 @@ Each doc carries YAML frontmatter (`summary` + `read_when`). Read the one whose 
 
 | Doc | Summary | Read when |
 |-----|---------|-----------|
-| [architecture.md](architecture.md) | Kotlin bridge ↔ Python toolset ↔ WebSocket relay; 36 `android_*` tools. | Changing relay/bridge/tool wiring; understanding data flow |
+| [architecture.md](architecture.md) | Kotlin bridge ↔ Python toolset ↔ WebSocket relay; 42 `android_*` tools. | Changing relay/bridge/tool wiring; understanding data flow |
 | [quickstart.md](quickstart.md) | Get a phone controlled in ~5 minutes. | First-time setup; demoing the system |
 | [install.md](install.md) | Full install of plugin + bridge APK. | Installing from scratch; debugging install |
 | [configuration.md](configuration.md) | All env vars and config options. | Changing ports, URLs, tokens, timeouts |

@@ -24,10 +24,12 @@ Command JSON format:
 # to enable wss:// connections. Without these, the relay uses plaintext http.
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -67,6 +69,11 @@ class _RelayState:
         # Pending requests: request_id -> asyncio.Future
         self.pending: dict[str, asyncio.Future] = {}
         self.pending_lock: Optional[asyncio.Lock] = None  # created lazily
+
+        # Binary HTTP responses (currently microphone WAV downloads):
+        # request_id -> bounded queue of ("message"|"chunk"|"error", payload).
+        self.streams: dict[str, asyncio.Queue] = {}
+        self.streams_lock: Optional[asyncio.Lock] = None
 
         # Shutdown event
         self.shutdown_event: Optional[asyncio.Event] = None
@@ -164,6 +171,7 @@ def _run_loop(state: _RelayState, ready: threading.Event) -> None:
     state.loop = loop
     state.phone_ws_lock = asyncio.Lock()
     state.pending_lock = asyncio.Lock()
+    state.streams_lock = asyncio.Lock()
     state.shutdown_event = asyncio.Event()
 
     try:
@@ -196,7 +204,10 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     state.app = app
 
     # WebSocket endpoint
-    app.router.add_get("/ws", lambda req: _handle_ws(req, state))
+    async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+        return await _handle_ws(request, state)
+
+    app.router.add_get("/ws", websocket_handler)
 
     # HTTP bridge endpoints — method per path
     ROUTES = {
@@ -212,6 +223,8 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
         "/screen_hash":   "GET",
         "/location":      "GET",
         "/widgets":       "GET",
+        "/mic_status":    "GET",
+        "/mic_file":      "GET",
         # POST-only
         "/tap":           "POST",
         "/tap_text":      "POST",
@@ -236,12 +249,16 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
         "/stop_speaking": "POST",
         "/screen_record": "POST",
         "/events/stream": "POST",
+        "/mic_start":     "POST",
+        "/mic_stop":      "POST",
         # READ + WRITE
         "/clipboard":     "BOTH",
     }
 
     for path, method in ROUTES.items():
-        handler = lambda req, p=path: _handle_http(req, state, p)
+        async def handler(request: web.Request, route_path: str = path) -> web.StreamResponse:
+            return await _handle_http(request, state, route_path)
+
         if method in ("GET", "BOTH"):
             app.router.add_get(path, handler)
         if method in ("POST", "BOTH"):
@@ -356,7 +373,8 @@ def _auth_record_failure(ip: str) -> None:
 
 
 def _mask_token(token: str) -> str:
-    return (token[:2] + "****") if len(token) >= 2 else "****"
+    # Never emit even a prefix: the pairing token grants full device control.
+    return "****"
 
 
 # Request-body fields that may carry PII or secrets (phone numbers, SMS text,
@@ -412,6 +430,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     async with state.phone_ws_lock:
         if state.phone_ws is not None and not state.phone_ws.closed:
             logger.info("Replacing previous phone connection")
+            await _fail_inflight(state, reason="phone connection replaced")
             await state.phone_ws.close(
                 code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced"
             )
@@ -423,11 +442,13 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 await _on_phone_message(state, msg.data)
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                await _on_phone_binary(state, msg.data)
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 logger.error("Phone WS error: %s", ws.exception())
                 break
     finally:
-        await _cleanup_phone(state, reason="phone disconnected")
+        await _cleanup_phone(state, reason="phone disconnected", expected_ws=ws)
 
     return ws
 
@@ -445,6 +466,12 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
         logger.warning("Phone message missing request_id: %s", raw[:200])
         return
 
+    async with state.streams_lock:
+        stream_queue = state.streams.get(request_id)
+    if stream_queue is not None:
+        await stream_queue.put(("message", data))
+        return
+
     async with state.pending_lock:
         future = state.pending.pop(request_id, None)
 
@@ -458,15 +485,57 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
         future.set_result(data)
 
 
-async def _cleanup_phone(state: _RelayState, reason: str = "") -> None:
+def _decode_stream_frame(raw: bytes) -> tuple[str, bytes]:
+    """Decode a binary phone frame: uint16 request-id length, UTF-8 id, payload."""
+    if len(raw) < 3:
+        raise ValueError("Binary stream frame is too short")
+    request_id_length = int.from_bytes(raw[:2], byteorder="big", signed=False)
+    if request_id_length < 1 or request_id_length > 128:
+        raise ValueError("Binary stream frame has an invalid request-id length")
+    payload_offset = 2 + request_id_length
+    if payload_offset > len(raw):
+        raise ValueError("Binary stream frame is truncated")
+    request_id = raw[2:payload_offset].decode("utf-8")
+    return request_id, raw[payload_offset:]
+
+
+async def _on_phone_binary(state: _RelayState, raw: bytes) -> None:
+    try:
+        request_id, payload = _decode_stream_frame(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        logger.warning("Invalid binary stream frame from phone: %s", exc)
+        return
+
+    async with state.streams_lock:
+        stream_queue = state.streams.get(request_id)
+    if stream_queue is None:
+        logger.debug("No active stream for request_id=%s", request_id)
+        return
+    await stream_queue.put(("chunk", payload))
+
+
+async def _cleanup_phone(
+    state: _RelayState,
+    reason: str = "",
+    expected_ws: Optional[web.WebSocketResponse] = None,
+) -> None:
     """Clean up phone connection and cancel all pending requests."""
     async with state.phone_ws_lock:
+        # A newly connected phone may already have replaced this socket. The
+        # old handler must not tear down the replacement or its active requests.
+        if expected_ws is not None and state.phone_ws is not expected_ws:
+            return
         ws = state.phone_ws
         state.phone_ws = None
 
     if ws is not None and not ws.closed:
         await ws.close()
 
+    await _fail_inflight(state, reason)
+
+
+async def _fail_inflight(state: _RelayState, reason: str) -> None:
+    """Fail requests that were assigned to a phone connection that is gone."""
     # Fail all pending futures
     async with state.pending_lock:
         pending = dict(state.pending)
@@ -475,6 +544,17 @@ async def _cleanup_phone(state: _RelayState, reason: str = "") -> None:
     for rid, fut in pending.items():
         if not fut.done():
             fut.set_exception(ConnectionError(f"Phone disconnected ({reason})"))
+
+    async with state.streams_lock:
+        stream_queues = list(state.streams.values())
+        state.streams.clear()
+    for queue in stream_queues:
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        queue.put_nowait(("error", f"Phone disconnected ({reason})"))
 
     if pending:
         logger.info("Cancelled %d pending requests (%s)", len(pending), reason)
@@ -487,7 +567,7 @@ _RESPONSE_TIMEOUT = 30  # seconds
 
 async def _handle_http(
     request: web.Request, state: _RelayState, path: str
-) -> web.Response:
+) -> web.StreamResponse:
     """Forward an HTTP request from a tool to the phone over WebSocket."""
     # ── Auth check ──────────────────────────────────────────────────────────
     # Require Bearer token matching the pairing code.  The client already sends
@@ -543,21 +623,36 @@ async def _handle_http(
     }
     logger.debug(">>> %s %s body=%s", method, path, _safe_body_repr(body))
 
-    # Register a future *before* sending so we never miss the reply
-    future = state.loop.create_future()
-    async with state.pending_lock:
-        state.pending[request_id] = future
+    # Register the response target *before* sending so we never miss a reply.
+    is_binary_stream = path == "/mic_file"
+    future = None
+    stream_queue = None
+    if is_binary_stream:
+        stream_queue = asyncio.Queue(maxsize=8)
+        async with state.streams_lock:
+            state.streams[request_id] = stream_queue
+    else:
+        future = state.loop.create_future()
+        async with state.pending_lock:
+            state.pending[request_id] = future
 
     try:
         await ws.send_json(command)
     except Exception as exc:
-        async with state.pending_lock:
-            state.pending.pop(request_id, None)
+        if is_binary_stream:
+            async with state.streams_lock:
+                state.streams.pop(request_id, None)
+        else:
+            async with state.pending_lock:
+                state.pending.pop(request_id, None)
         logger.error("Failed to send command to phone: %s", exc)
         return web.json_response(
             {"error": f"Failed to send command to phone: {exc}"},
             status=502,
         )
+
+    if is_binary_stream:
+        return await _relay_binary_stream(request, state, request_id, stream_queue)
 
     # Wait for the phone's response
     try:
@@ -582,3 +677,106 @@ async def _handle_http(
     status = response_data.get("status", 200)
     result = response_data.get("result", {})
     return web.json_response(result, status=status)
+
+
+_MAX_STREAM_BYTES = 256 * 1024 * 1024
+
+
+async def _relay_binary_stream(
+    request: web.Request,
+    state: _RelayState,
+    request_id: str,
+    queue: asyncio.Queue,
+) -> web.StreamResponse:
+    """Stream binary phone frames to the authenticated HTTP caller with backpressure."""
+    response = None
+    try:
+        kind, first = await asyncio.wait_for(queue.get(), timeout=_RESPONSE_TIMEOUT)
+        if kind == "error":
+            return web.json_response({"error": first}, status=502)
+        if kind != "message":
+            return web.json_response({"error": "Phone sent stream data before metadata"}, status=502)
+
+        stream = first.get("stream") if isinstance(first, dict) else None
+        if not isinstance(stream, dict) or stream.get("event") != "start":
+            status = first.get("status", 502) if isinstance(first, dict) else 502
+            result = first.get("result", {"error": "Invalid stream response"}) if isinstance(first, dict) else {"error": "Invalid stream response"}
+            return web.json_response(result, status=status)
+
+        expected_size = int(stream.get("size", -1))
+        if expected_size < 0 or expected_size > _MAX_STREAM_BYTES:
+            return web.json_response({"error": "Recording size is invalid"}, status=413)
+
+        raw_filename = os.path.basename(str(stream.get("filename", "recording.wav")))
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", raw_filename)
+        if not filename.lower().endswith(".wav"):
+            filename = "recording.wav"
+        mime_type = str(stream.get("mimeType", "audio/wav"))
+        if mime_type != "audio/wav":
+            mime_type = "application/octet-stream"
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Type": mime_type,
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(expected_size),
+            },
+        )
+        await response.prepare(request)
+
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            kind, payload = await asyncio.wait_for(queue.get(), timeout=_RESPONSE_TIMEOUT)
+            if kind == "error":
+                raise ConnectionError(str(payload))
+            if kind == "chunk":
+                total += len(payload)
+                if total > expected_size or total > _MAX_STREAM_BYTES:
+                    raise ValueError("Phone sent more recording data than declared")
+                digest.update(payload)
+                await response.write(payload)
+                continue
+            if kind != "message":
+                raise ValueError("Unknown stream event")
+
+            stream_event = payload.get("stream") if isinstance(payload, dict) else None
+            event_name = stream_event.get("event") if isinstance(stream_event, dict) else None
+            if event_name == "error":
+                raise IOError(str(stream_event.get("message", "Phone stream failed")))
+            if event_name != "end":
+                raise ValueError("Invalid stream completion event")
+            if total != expected_size or int(stream_event.get("bytes", -1)) != total:
+                raise IOError("Recording stream length does not match metadata")
+            expected_sha = str(stream_event.get("sha256", ""))
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_sha) or not hmac.compare_digest(
+                digest.hexdigest(), expected_sha
+            ):
+                raise IOError("Recording stream checksum mismatch")
+            await response.write_eof()
+            return response
+    except asyncio.TimeoutError:
+        logger.warning("Timed out receiving microphone stream request_id=%s", request_id)
+        if response is None:
+            return web.json_response({"error": "Phone stream timed out"}, status=504)
+        response.force_close()
+        return response
+    except Exception as exc:
+        logger.warning("Microphone stream failed request_id=%s: %s", request_id, exc)
+        if response is None:
+            return web.json_response({"error": "Phone stream failed"}, status=502)
+        response.force_close()
+        return response
+    finally:
+        async with state.streams_lock:
+            if state.streams.get(request_id) is queue:
+                state.streams.pop(request_id, None)
+        # If the HTTP consumer disappeared while the bounded queue was full,
+        # free any waiting WebSocket producer immediately.
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break

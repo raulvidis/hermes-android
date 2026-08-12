@@ -18,11 +18,11 @@ This repo contains **two components**:
 | Component | Path | Language | Purpose |
 |-----------|------|----------|---------|
 | **Android bridge app** | `hermes-android-bridge/` | Kotlin | Runs on the phone. Connects to server via WebSocket, executes commands via AccessibilityService |
-| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 38 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
+| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 42 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
 
 > **Note:** The Python code exists here for standalone development and testing (`pip install -e .`, `pytest`). The production copy is in the hermes-agent repo. The Android app does not use or depend on the Python files.
 
-## Install as hermes-agent plugin (v0.3.0+)
+## Install as hermes-agent plugin (hermes-agent v0.3.0+)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raulvidis/hermes-android/main/install.sh | bash
@@ -34,7 +34,7 @@ mkdir -p ~/.hermes/plugins
 cp -r hermes-android-plugin ~/.hermes/plugins/hermes-android
 ```
 
-Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.3.0 (38 tools)`
+Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.4.1 (42 tools)`
 
 ## Quick Start
 
@@ -62,6 +62,7 @@ adb install app/build/outputs/apk/debug/hermes-android-*.apk
 - Tap **Enable Status Overlay** → grant permission
 - Tap **Grant Screen Recording** → approve the system dialog (needed for `android_screen_record`)
 - Grant additional runtime permissions in **Settings > Apps > Hermes Bridge > Permissions**:
+  - **Microphone** — for `android_mic_record`
   - **Location** — for `android_location`
   - **Contacts** — for `android_search_contacts`
   - **SMS** — for `android_send_sms`
@@ -117,7 +118,7 @@ The car head unit needs network access to reach the relay server:
 All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) work normally.
 
 
-## Tools (38)
+## Tools (42)
 
 | Tool | Description |
 |------|-------------|
@@ -155,9 +156,17 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 | `android_events` | Read recent accessibility events |
 | `android_event_stream` | Stream accessibility events in real-time |
 | `android_screen_record` | Record screen video for a duration |
+| `android_mic_record` | Start a 16 kHz mono WAV recording (30-minute safety cap) |
+| `android_mic_stop` | Stop and finalize the active recording |
+| `android_mic_status` | Read recorder state and latest-file metadata |
+| `android_mic_fetch` | Stream a completed WAV to a local `MEDIA:` file |
 | `android_read_widgets` | Read home screen widgets |
 | `android_speak` | Text-to-speech output |
 | `android_speak_stop` | Stop text-to-speech |
+
+Microphone recordings use the speech-oriented Android audio source with bounded
+PCM gain. The bridge retains the 10 newest completed WAV files and removes older
+ones after successful finalization.
 
 ## Permissions
 
@@ -166,6 +175,7 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 | Accessibility Service | App button → Settings > Accessibility | All tools (core requirement) |
 | System Alert Window (Overlay) | App button → Settings > Draw over apps | Status overlay display |
 | Screen Recording (MediaProjection) | App button → approve system dialog | `android_screen_record` |
+| Microphone | Settings > Apps > Permissions > Microphone | `android_mic_record` |
 | Location | Settings > Apps > Permissions > Location | `android_location` |
 | Read Contacts | Settings > Apps > Permissions > Contacts | `android_search_contacts` |
 | Send SMS | Settings > Apps > Permissions > SMS | `android_send_sms` |

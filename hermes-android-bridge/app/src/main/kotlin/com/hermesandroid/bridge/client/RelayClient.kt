@@ -3,14 +3,19 @@ package com.hermesandroid.bridge.client
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
 import com.hermesandroid.bridge.server.CommandDispatcher
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.*
 import okhttp3.*
+import okio.ByteString.Companion.toByteString
+import java.io.FileInputStream
+import java.security.MessageDigest
 
 /**
  * WebSocket client that connects OUT to the Hermes relay server.
@@ -294,6 +299,18 @@ object RelayClient {
 
             if (BuildConfig.DEBUG) Log.d(TAG, "Received command: $method $path (id=$requestId)")
 
+            if (requestId.isBlank()) {
+                throw IllegalArgumentException("Command is missing request_id")
+            }
+            if (method == "GET" && path == "/mic_file") {
+                streamMicrophoneRecording(
+                    ws,
+                    requestId,
+                    params.get("name")?.asString,
+                )
+                return
+            }
+
             // The relay connection is authenticated at connect time (Bearer token on the WS handshake),
             // so commands arriving here are already authenticated.
             val response = CommandDispatcher.dispatch(method, path, params, body, authenticated = true)
@@ -317,6 +334,123 @@ object RelayClient {
                 ws.send(errorResponse.toString())
             } catch (_: Exception) {}
         }
+    }
+
+    private suspend fun streamMicrophoneRecording(
+        ws: WebSocket,
+        requestId: String,
+        requestedName: String?,
+    ) {
+        val file = MicrophoneRecordingFiles.resolve(
+            BridgeApplication.instance,
+            requestedName,
+        )
+        if (file == null) {
+            sendCommandResult(
+                ws,
+                requestId,
+                mapOf("error" to "Recording not found"),
+                status = 404,
+            )
+            return
+        }
+
+        val startMessage = JsonObject().apply {
+            addProperty("request_id", requestId)
+            addProperty("status", 200)
+            add("stream", JsonObject().apply {
+                addProperty("event", "start")
+                addProperty("filename", file.name)
+                addProperty("mimeType", "audio/wav")
+                addProperty("size", file.length())
+            })
+        }
+        if (!ws.send(startMessage.toString())) return
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        var bytesSent = 0L
+        try {
+            FileInputStream(file).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (read == 0) continue
+
+                    while (ws.queueSize() > 1024L * 1024L) {
+                        delay(10L)
+                    }
+                    digest.update(buffer, 0, read)
+                    if (!ws.send(buildStreamFrame(requestId, buffer, read))) {
+                        throw IllegalStateException("WebSocket rejected microphone stream data")
+                    }
+                    bytesSent += read
+                }
+            }
+
+            val endMessage = JsonObject().apply {
+                addProperty("request_id", requestId)
+                addProperty("status", 200)
+                add("stream", JsonObject().apply {
+                    addProperty("event", "end")
+                    addProperty("bytes", bytesSent)
+                    addProperty(
+                        "sha256",
+                        digest.digest().joinToString("") { byte ->
+                            "%02x".format(byte.toInt() and 0xff)
+                        },
+                    )
+                })
+            }
+            ws.send(endMessage.toString())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val errorMessage = JsonObject().apply {
+                addProperty("request_id", requestId)
+                addProperty("status", 500)
+                add("stream", JsonObject().apply {
+                    addProperty("event", "error")
+                    addProperty("message", "Microphone stream failed (${error.javaClass.simpleName})")
+                })
+            }
+            ws.send(errorMessage.toString())
+        }
+    }
+
+    private fun buildStreamFrame(
+        requestId: String,
+        payload: ByteArray,
+        payloadLength: Int,
+    ): okio.ByteString {
+        val requestIdBytes = requestId.toByteArray(Charsets.UTF_8)
+        require(requestIdBytes.size in 1..128) { "request_id is too long" }
+        require(payloadLength in 0..payload.size) { "Invalid payload length" }
+
+        val frame = ByteArray(2 + requestIdBytes.size + payloadLength)
+        frame[0] = ((requestIdBytes.size ushr 8) and 0xff).toByte()
+        frame[1] = (requestIdBytes.size and 0xff).toByte()
+        requestIdBytes.copyInto(frame, destinationOffset = 2)
+        payload.copyInto(
+            frame,
+            destinationOffset = 2 + requestIdBytes.size,
+            endIndex = payloadLength,
+        )
+        return frame.toByteString()
+    }
+
+    private fun sendCommandResult(
+        ws: WebSocket,
+        requestId: String,
+        result: Any,
+        status: Int,
+    ) {
+        val response = JsonObject().apply {
+            addProperty("request_id", requestId)
+            add("result", gson.toJsonTree(result))
+            addProperty("status", status)
+        }
+        ws.send(response.toString())
     }
 
     private fun notifyStatus(connected: Boolean, message: String) {

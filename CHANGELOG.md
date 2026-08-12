@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Added
+- four microphone tools (`android_mic_record`, `android_mic_stop`, `android_mic_status`, `android_mic_fetch`) with relay-routed binary WAV streaming and `MEDIA:` delivery
+- recorder state reporting and atomic `.part` → `.wav` finalization so interrupted recordings are never advertised as complete
+- keep-last-10 retention for completed WAV recordings
+
+### Security
+- remove device-specific connection details and legacy SCP instructions from microphone tooling
+- stop logging notification content and pairing-token prefixes, including in debug builds
+
+### Fixed
+- use one canonical microphone directory for recording, status, and download
+- use the on-device-tested `VOICE_RECOGNITION` source with saturating 2.5x PCM gain and stop the recorder service after a STOP command
+- register microphone routes, schemas, and handlers in both the standalone toolset and installable plugin
+- replace deprecated aiohttp bare route handlers and add end-to-end binary-stream regression coverage
+
 ## [0.4.1] - 2026-08-09
 
 ### Fixed

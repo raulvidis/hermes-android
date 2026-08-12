@@ -2,7 +2,13 @@
 
 package com.hermesandroid.bridge.server
 
+import android.Manifest
+import android.content.pm.PackageManager
 import com.google.gson.JsonObject
+import com.hermesandroid.bridge.BridgeApplication
+import com.hermesandroid.bridge.audio.MicrophoneRecorderService
+import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
+import com.hermesandroid.bridge.audio.MicrophoneRecordingState
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.executor.ScreenReader
@@ -24,7 +30,7 @@ import kotlinx.coroutines.withContext
  * so endpoint contracts, device-capability gating, and behaviour live in exactly one place.
  *
  * @param authenticated whether the caller is authenticated. The relay connection is
- *   authenticated at connect time (token in the WS URL), so it passes `true`; the HTTP
+ *   authenticated at connect time (Bearer token in the WS handshake), so it passes `true`; the HTTP
  *   server computes it from the request's Bearer token. Only `/ping` reports it back.
  */
 object CommandDispatcher {
@@ -346,6 +352,78 @@ object CommandDispatcher {
             method == "POST" && path == "/stop_speaking" -> {
                 val result = ActionExecutor.stopSpeaking()
                 result to 200
+            }
+
+            method == "POST" && path == "/mic_start" -> {
+                val durationValue = body.get("duration")
+                val durationSec = when {
+                    durationValue == null -> 0
+                    !durationValue.isJsonPrimitive || !durationValue.asJsonPrimitive.isNumber -> {
+                        return mapOf("error" to "duration must be an integer number of seconds") to 400
+                    }
+                    else -> durationValue.asJsonPrimitive.asString.toIntOrNull()
+                        ?: return mapOf("error" to "duration must be an integer number of seconds") to 400
+                }
+                val app = BridgeApplication.instance
+                if (durationSec !in 0..MicrophoneRecorderService.MAX_DURATION_SECONDS) {
+                    return mapOf(
+                        "error" to "duration must be between 0 and ${MicrophoneRecorderService.MAX_DURATION_SECONDS} seconds"
+                    ) to 400
+                }
+                if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    return mapOf("error" to "Microphone permission is not granted") to 403
+                }
+                if (!MicrophoneRecordingState.tryReserveStart()) {
+                    return mapOf("error" to "A microphone recording is already active") to 409
+                }
+
+                runCatching {
+                    MicrophoneRecorderService.start(app, durationSec)
+                    mapOf(
+                        "status" to "starting",
+                        "duration" to durationSec,
+                    ) to 202
+                }.getOrElse { error ->
+                    MicrophoneRecordingState.markError(
+                        "Could not start microphone service (${error.javaClass.simpleName})",
+                    )
+                    mapOf(
+                        "error" to "Could not start microphone service (${error.javaClass.simpleName})"
+                    ) to 500
+                }
+            }
+
+            method == "POST" && path == "/mic_stop" -> {
+                val snapshot = MicrophoneRecordingState.snapshot()
+                if (!snapshot.isActive) {
+                    return mapOf("status" to "idle") to 200
+                }
+                runCatching {
+                    MicrophoneRecorderService.stop(BridgeApplication.instance)
+                    mapOf("status" to "stopping") to 202
+                }.getOrElse { error ->
+                    mapOf(
+                        "error" to "Could not stop microphone service (${error.javaClass.simpleName})"
+                    ) to 500
+                }
+            }
+
+            method == "GET" && path == "/mic_status" -> {
+                val app = BridgeApplication.instance
+                val snapshot = MicrophoneRecordingState.snapshot()
+                val files = MicrophoneRecordingFiles.listCompleted(app)
+                val latest = files.firstOrNull()
+                mapOf(
+                    "phase" to snapshot.phase.name.lowercase(),
+                    "recording" to snapshot.isActive,
+                    "count" to files.size,
+                    "retentionLimit" to MicrophoneRecordingFiles.MAX_COMPLETED_RECORDINGS,
+                    "latest" to latest?.name,
+                    "latestSize" to latest?.length(),
+                    "bytesWritten" to snapshot.bytesWritten,
+                    "startedAt" to snapshot.startedAtMs,
+                    "error" to snapshot.error,
+                ) to 200
             }
 
             method == "POST" && path == "/screen_record" -> {

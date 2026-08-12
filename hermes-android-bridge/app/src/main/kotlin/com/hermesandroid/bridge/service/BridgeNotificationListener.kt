@@ -31,7 +31,7 @@ class BridgeNotificationListener : NotificationListenerService() {
         val entry = NotificationStore.parseNotification(sbn)
         if (entry != null) {
             NotificationStore.add(entry)
-            if (BuildConfig.DEBUG) Log.d(TAG, "Notification from ${entry.packageName}: ${entry.text?.take(50)}")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Notification received and stored")
         }
     }
 

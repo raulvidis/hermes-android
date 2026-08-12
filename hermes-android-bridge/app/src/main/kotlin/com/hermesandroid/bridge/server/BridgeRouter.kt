@@ -2,7 +2,9 @@ package com.hermesandroid.bridge.server
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.auth.PairingManager
+import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -19,6 +21,26 @@ import io.ktor.server.routing.*
  */
 fun Application.configureRouting() {
     routing {
+        get("/mic_file") {
+            val requestedName = call.request.queryParameters["name"]
+            val file = MicrophoneRecordingFiles.resolve(
+                BridgeApplication.instance,
+                requestedName,
+            )
+            if (file == null) {
+                call.respond(HttpStatusCode.NotFound, mapOf("error" to "Recording not found"))
+                return@get
+            }
+
+            call.response.header(HttpHeaders.CacheControl, "no-store")
+            call.response.header(HttpHeaders.ContentType, "audio/wav")
+            call.response.header(
+                HttpHeaders.ContentDisposition,
+                "attachment; filename=\"${file.name}\"",
+            )
+            call.respondFile(file)
+        }
+
         route("{path...}") {
             handle {
                 val method = call.request.httpMethod.value.uppercase()
