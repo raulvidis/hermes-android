@@ -686,6 +686,116 @@ def android_mic_fetch(remote_path: str = "") -> str:
         return json.dumps({"error": str(e)})
 
 
+def android_noise_watch_start(
+    threshold_rms: float = 1800.0,
+    clip_seconds: int = 10,
+    cooldown_seconds: int = 60,
+) -> str:
+    """Enable the visible noise watcher; each loud event records a short rear-camera clip."""
+    if isinstance(threshold_rms, bool) or not isinstance(threshold_rms, (int, float)):
+        return json.dumps({"error": "threshold_rms must be a number"})
+    if not 300 <= float(threshold_rms) <= 30_000:
+        return json.dumps({"error": "threshold_rms must be between 300 and 30000"})
+    if isinstance(clip_seconds, bool) or not isinstance(clip_seconds, int) or not 1 <= clip_seconds <= 30:
+        return json.dumps({"error": "clip_seconds must be between 1 and 30"})
+    if isinstance(cooldown_seconds, bool) or not isinstance(cooldown_seconds, int) or not 0 <= cooldown_seconds <= 3600:
+        return json.dumps({"error": "cooldown_seconds must be between 0 and 3600"})
+    try:
+        return json.dumps(
+            _post(
+                "/noise_watch_start",
+                {
+                    "thresholdRms": float(threshold_rms),
+                    "clipSeconds": clip_seconds,
+                    "cooldownSeconds": cooldown_seconds,
+                },
+            ),
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_noise_watch_stop() -> str:
+    """Stop the visible loud-noise camera watcher."""
+    try:
+        return json.dumps(_post("/noise_watch_stop", {}))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_noise_watch_status() -> str:
+    """Return loud-noise watcher state plus bounded local video metadata."""
+    try:
+        return json.dumps(_get("/noise_watch_status"))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def android_noise_video_fetch(remote_path: str = "") -> str:
+    """Download the latest (or named) noise-triggered MP4 to a temporary MEDIA path."""
+    if not isinstance(remote_path, str):
+        return json.dumps({"error": "remote_path must be an MP4 filename"})
+    if remote_path and (
+        os.path.basename(remote_path) != remote_path
+        or not remote_path.lower().endswith(".mp4")
+    ):
+        return json.dumps({"error": "remote_path must be an MP4 filename, not a path"})
+
+    import tempfile
+
+    temp_path = None
+    try:
+        params = {"name": remote_path} if remote_path else None
+        with requests.get(
+            f"{_bridge_url()}/noise_video_file",
+            params=params,
+            headers=_auth_headers(),
+            timeout=_timeout(),
+            stream=True,
+        ) as response:
+            if response.status_code >= 400:
+                try:
+                    return json.dumps(response.json())
+                except ValueError:
+                    return json.dumps({"error": f"Noise video download failed (HTTP {response.status_code})"})
+
+            expected = response.headers.get("Content-Length")
+            expected_size = int(expected) if expected and expected.isdigit() else None
+            if expected_size is not None and expected_size > 256 * 1024 * 1024:
+                return json.dumps({"error": "Noise video exceeds the download limit"})
+
+            written = 0
+            prefix = bytearray()
+            with tempfile.NamedTemporaryFile(
+                suffix=".mp4",
+                prefix="android_noise_video_",
+                delete=False,
+            ) as output:
+                temp_path = output.name
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > 256 * 1024 * 1024:
+                        raise ValueError("Noise video exceeds the download limit")
+                    if len(prefix) < 12:
+                        prefix.extend(chunk[: 12 - len(prefix)])
+                    output.write(chunk)
+
+        if expected_size is not None and written != expected_size:
+            raise IOError("Noise video download was incomplete")
+        if len(prefix) < 8 or prefix[4:8] != b"ftyp":
+            raise IOError("Downloaded noise video is not an MP4 file")
+        return f"Noise-triggered video fetched ({written} bytes)\nMEDIA:{temp_path}"
+    except Exception as e:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        return json.dumps({"error": str(e)})
+
+
 def android_read_widgets() -> str:
     """
     Read home screen widgets (weather, calendar, tasks, etc.) without
@@ -1413,6 +1523,62 @@ _SCHEMAS = {
         },
     },
 
+    "android_noise_watch_start": {
+        "name": "android_noise_watch_start",
+        "description": "Enable the visible loud-noise watcher. Each detected loud sound records one bounded rear-camera MP4 clip.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "threshold_rms": {
+                    "type": "number",
+                    "description": "Loudness threshold (default 1800; higher means less sensitive)",
+                    "minimum": 300,
+                    "maximum": 30000,
+                    "default": 1800,
+                },
+                "clip_seconds": {
+                    "type": "integer",
+                    "description": "Length of each rear-camera video clip",
+                    "minimum": 1,
+                    "maximum": 30,
+                    "default": 10,
+                },
+                "cooldown_seconds": {
+                    "type": "integer",
+                    "description": "Minimum time between recorded clips",
+                    "minimum": 0,
+                    "maximum": 3600,
+                    "default": 60,
+                },
+            },
+            "required": [],
+        },
+    },
+    "android_noise_watch_stop": {
+        "name": "android_noise_watch_stop",
+        "description": "Stop the visible loud-noise camera watcher.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_noise_watch_status": {
+        "name": "android_noise_watch_status",
+        "description": "Inspect loud-noise watcher state and local video retention metadata.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    "android_noise_video_fetch": {
+        "name": "android_noise_video_fetch",
+        "description": "Download the latest or a named noise-triggered MP4 as a temporary local MEDIA file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "remote_path": {
+                    "type": "string",
+                    "description": "Optional MP4 filename returned by android_noise_watch_status; paths are rejected",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+    },
     "android_read_widgets": {
         "name": "android_read_widgets",
         "description": "Read home screen widgets (weather, calendar, tasks, etc.). Goes to home screen and reads widget content without opening apps.",
@@ -1595,6 +1761,10 @@ _HANDLERS = {
     "android_mic_stop": lambda args, **kw: android_mic_stop(),
     "android_mic_status": lambda args, **kw: android_mic_status(),
     "android_mic_fetch": lambda args, **kw: android_mic_fetch(**args),
+    "android_noise_watch_start": lambda args, **kw: android_noise_watch_start(**args),
+    "android_noise_watch_stop": lambda args, **kw: android_noise_watch_stop(),
+    "android_noise_watch_status": lambda args, **kw: android_noise_watch_status(),
+    "android_noise_video_fetch": lambda args, **kw: android_noise_video_fetch(**args),
     "android_read_widgets": lambda args, **kw: android_read_widgets(),
     "android_find_nodes": lambda args, **kw: android_find_nodes(**args),
     "android_diff_screen": lambda args, **kw: android_diff_screen(**args),

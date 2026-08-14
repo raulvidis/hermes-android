@@ -2,4 +2,19 @@
 <resources>
     <string name="app_name">Hermes Bridge</string>
     <string name="accessibility_description">Hermes Bridge accessibility service — allows hermes-agent to read and interact with the Android screen.</string>
+    <string name="robot_title">CRADATA</string>
+    <string name="robot_face_content_description">Cradata Roboter-Gesicht</string>
+    <string name="robot_default_caption">Hallo! Ich bin Cradata. Tippe auf den Knopf und sprich mit mir.</string>
+    <string name="robot_talk">Jetzt sprechen</string>
+    <string name="robot_end">Gespräch beenden</string>
+    <string name="robot_backend_gpt_live">GPT Live</string>
+    <string name="robot_backend_hermes_local">Hermes Lokal</string>
+    <string name="robot_backend_hermes_standard">Hermes Standard</string>
+    <string name="robot_backend_switching_gpt_live">GPT Live Voice ist ausgewählt. Tippe unten zum Starten.</string>
+    <string name="robot_backend_switching_hermes_local">Ich verbinde mich mit Hermes Lokal …</string>
+    <string name="robot_backend_switching_hermes_standard">Ich verbinde mich mit Hermes Standard …</string>
+    <string name="robot_backend_unavailable">Der Roboter ist gerade nicht mit seinem Gehirn verbunden.</string>
+    <string name="robot_gpt_model_mini">Sparsam</string>
+    <string name="robot_gpt_model_standard">Stark</string>
+    <string name="robot_gpt_model_top">Top</string>
 </resources>

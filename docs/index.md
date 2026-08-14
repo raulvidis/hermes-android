@@ -15,6 +15,7 @@ Each doc carries YAML frontmatter (`summary` + `read_when`). Read the one whose 
 | [quickstart.md](quickstart.md) | Get a phone controlled in ~5 minutes. | First-time setup; demoing the system |
 | [install.md](install.md) | Full install of plugin + bridge APK. | Installing from scratch; debugging install |
 | [configuration.md](configuration.md) | All env vars and config options. | Changing ports, URLs, tokens, timeouts |
+| [robot-dialog.md](robot-dialog.md) | Robot face + push-to-talk conversation through local AI or OpenAI. | Building or operating the robot conversation mode |
 | [RELEASING.md](RELEASING.md) | Release checklist: pyproject version + APK `latest-build` tag flow. | Cutting a release |
 | [manual-tests.md](manual-tests.md) | On-device manual test procedures. | Before a release; after bridge changes |
 | [troubleshooting.md](troubleshooting.md) | Known issues + workarounds. | Connection/permission/tool failures |

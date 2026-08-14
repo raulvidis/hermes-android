@@ -22,7 +22,7 @@ What it does:
 3. Installs `aiohttp` if missing (`pip`/`pip3`).
 4. Cleans up the temp dir.
 
-Then restart hermes-gateway and run `/plugins` to verify — should show `✓ hermes-android v0.4.1 (42 tools)`.
+Then restart hermes-gateway and run `/plugins` to verify — should show `✓ hermes-android v0.4.1 (46 tools)`.
 
 Manual alternative:
 ```bash

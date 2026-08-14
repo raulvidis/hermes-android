@@ -11,5 +11,8 @@ setup(
     package_data={
         "": ["skills/android/*.md"],
     },
+    entry_points={
+        "console_scripts": ["hermes-robot-dialog=tools.robot_dialog:main"],
+    },
     python_requires=">=3.11",
 )

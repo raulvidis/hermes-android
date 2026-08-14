@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
+import com.hermesandroid.bridge.media.NoiseVideoFiles
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -34,6 +35,23 @@ fun Application.configureRouting() {
 
             call.response.header(HttpHeaders.CacheControl, "no-store")
             call.response.header(HttpHeaders.ContentType, "audio/wav")
+            call.response.header(
+                HttpHeaders.ContentDisposition,
+                "attachment; filename=\"${file.name}\"",
+            )
+            call.respondFile(file)
+        }
+
+        get("/noise_video_file") {
+            val requestedName = call.request.queryParameters["name"]
+            val file = NoiseVideoFiles.resolve(BridgeApplication.instance, requestedName)
+            if (file == null) {
+                call.respond(HttpStatusCode.NotFound, mapOf("error" to "Noise video not found"))
+                return@get
+            }
+
+            call.response.header(HttpHeaders.CacheControl, "no-store")
+            call.response.header(HttpHeaders.ContentType, "video/mp4")
             call.response.header(
                 HttpHeaders.ContentDisposition,
                 "attachment; filename=\"${file.name}\"",

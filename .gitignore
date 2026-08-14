@@ -21,6 +21,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Local device media / PII backups
+/backups/
+
 # Android build outputs
 hermes-android-bridge/app/build/
 hermes-android-bridge/build/

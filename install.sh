@@ -20,6 +20,10 @@ git clone --depth 1 --single-branch "$REPO" "$TMP_DIR" 2>/dev/null
 mkdir -p "$HOME/.hermes/plugins"
 rm -rf "$PLUGIN_DIR"
 cp -r "$TMP_DIR/hermes-android-plugin" "$PLUGIN_DIR"
+# Optional privacy-first robot dialog companion (run explicitly; not autostarted).
+cp "$TMP_DIR/tools/robot_dialog.py" "$PLUGIN_DIR/robot_dialog.py"
+cp "$TMP_DIR/tools/hermes_dialog_worker.py" "$PLUGIN_DIR/hermes_dialog_worker.py"
+cp "$TMP_DIR/tools/whisper_worker.py" "$PLUGIN_DIR/whisper_worker.py"
 
 # Install Python dependency (aiohttp) if missing
 if ! python3 -c "import aiohttp" 2>/dev/null; then
