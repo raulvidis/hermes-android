@@ -175,6 +175,15 @@ object ActionExecutor {
     fun pressKey(key: String): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
+
+        // "wake" turns the screen on (short press) — NOT the power dialog.
+        // GLOBAL_ACTION_POWER_DIALOG is the long-press menu (reboot/emergency),
+        // which is almost never what a caller wants when waking the device.
+        if (key == "wake") {
+            val woke = WakeLockManager.wake()
+            return ActionResult(woke, if (woke) "Woke screen" else "Wake failed (PowerManager unavailable)")
+        }
+
         val action = when (key) {
             "back" -> AccessibilityService.GLOBAL_ACTION_BACK
             "home" -> AccessibilityService.GLOBAL_ACTION_HOME

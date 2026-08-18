@@ -14,6 +14,14 @@ object WakeLockManager {
         powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     }
 
+    /** Turn the screen on (short "wake" press). Returns true on success. */
+    fun wake(): Boolean {
+        val pm = powerManager ?: return false
+        if (pm.isInteractive) return true
+        acquireWakeLock()
+        return true
+    }
+
     suspend fun <T> wakeForAction(block: suspend () -> T): T {
         val pm = powerManager
         val alreadyAwake = pm?.isInteractive ?: true
