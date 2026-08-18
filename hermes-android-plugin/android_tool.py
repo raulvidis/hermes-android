@@ -27,13 +27,52 @@ from urllib.parse import quote
 # by setting ANDROID_BRIDGE_URL to the phone's IP.
 
 
+_ENV_FILE_CACHE: Optional[dict] = None
+
+
+def _env_file_vars() -> dict:
+    """Parse ~/.hermes/.env once, cached.
+
+    The gateway process does not always export every .env var into os.environ
+    (it loads .env for its own config but the plugin runs in a context where
+    ANDROID_BRIDGE_TOKEN may be missing).  Fall back to reading the file
+    directly so auth works regardless of how the process was started.
+    """
+    global _ENV_FILE_CACHE
+    if _ENV_FILE_CACHE is not None:
+        return _ENV_FILE_CACHE
+    _ENV_FILE_CACHE = {}
+    env_path = os.path.join(
+        os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env"
+    )
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                _ENV_FILE_CACHE[key.strip()] = value.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return _ENV_FILE_CACHE
+
+
+def _env(key: str) -> Optional[str]:
+    """os.environ first, then ~/.hermes/.env as a fallback."""
+    val = os.getenv(key)
+    if val:
+        return val
+    return _env_file_vars().get(key)
+
+
 def _bridge_url() -> str:
     """URL of the relay (default) or direct phone connection."""
-    return os.getenv("ANDROID_BRIDGE_URL", "http://localhost:8766")
+    return _env("ANDROID_BRIDGE_URL") or "http://localhost:8766"
 
 
 def _bridge_token() -> Optional[str]:
-    return os.getenv("ANDROID_BRIDGE_TOKEN")
+    return _env("ANDROID_BRIDGE_TOKEN")
 
 
 def _relay_port() -> int:
@@ -211,7 +250,8 @@ def android_press_key(key: str) -> str:
     """
     Press a key. Supported keys:
       back, home, recents, power, notifications,
-      quick_settings, lock_screen, take_screenshot
+      quick_settings, lock_screen, take_screenshot, wake
+    (wake = turn the screen on; power = long-press power menu)
     """
     try:
         data = _post("/press_key", {"key": key})
@@ -1064,6 +1104,7 @@ _SCHEMAS = {
                         "quick_settings",
                         "lock_screen",
                         "take_screenshot",
+                        "wake",
                     ],
                 }
             },

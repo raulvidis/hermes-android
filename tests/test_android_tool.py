@@ -379,6 +379,47 @@ class TestSetup:
         assert "localhost" in os.environ.get("ANDROID_BRIDGE_URL", "")
 
 
+class TestEnvFileFallback:
+    """The gateway process may lack ANDROID_* vars in os.environ even though
+    they exist in ~/.hermes/.env.  _bridge_token/_bridge_url must fall back to
+    reading the .env file so the relay still authenticates."""
+
+    def test_token_from_env_file_when_os_environ_empty(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_BRIDGE_TOKEN", raising=False)
+        monkeypatch.delenv("ANDROID_BRIDGE_URL", raising=False)
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("ANDROID_BRIDGE_TOKEN=SECRET123\nANDROID_BRIDGE_URL=http://1.2.3.4:8766\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert android_tool._bridge_token() == "SECRET123"
+        assert android_tool._bridge_url() == "http://1.2.3.4:8766"
+
+    def test_os_environ_wins_over_env_file(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "FROM_ENV")
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        env_file = tmp_path / ".env"
+        env_file.write_text("ANDROID_BRIDGE_TOKEN=FROM_FILE\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert android_tool._bridge_token() == "FROM_ENV"
+
+    def test_missing_env_file_returns_none(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_BRIDGE_TOKEN", raising=False)
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "nonexistent"))
+
+        assert android_tool._bridge_token() is None
+        assert android_tool._bridge_url() == "http://localhost:8766"
+
+
 class TestClipboardRead:
     @responses.activate
     def test_clipboard_read(self, bridge_url):
