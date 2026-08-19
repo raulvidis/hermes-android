@@ -37,6 +37,10 @@ from tools.android_tool import (
     android_mic_stop,
     android_mic_status,
     android_mic_fetch,
+    android_noise_watch_start,
+    android_noise_watch_stop,
+    android_noise_watch_status,
+    android_noise_video_fetch,
     android_read_widgets,
     android_media,
     android_search_contacts,
@@ -53,11 +57,11 @@ from tools.android_tool import (
 
 
 class TestSchemas:
-    def test_all_42_tools_have_schemas(self):
-        assert len(_SCHEMAS) == 42
+    def test_all_46_tools_have_schemas(self):
+        assert len(_SCHEMAS) == 46
 
-    def test_all_42_tools_have_handlers(self):
-        assert len(_HANDLERS) == 42
+    def test_all_46_tools_have_handlers(self):
+        assert len(_HANDLERS) == 46
 
     def test_schema_names_match_handler_names(self):
         assert set(_SCHEMAS.keys()) == set(_HANDLERS.keys())
@@ -92,7 +96,7 @@ class TestCodeQuality:
         plugin_source = plugin_path.read_text(encoding="utf-8")
         plugin = runpy.run_path(str(plugin_path))
 
-        assert len(plugin["_SCHEMAS"]) == 42
+        assert len(plugin["_SCHEMAS"]) == 46
         assert set(plugin["_SCHEMAS"]) == set(plugin["_HANDLERS"])
         assert ("scp " + "-P") not in plugin_source
 
@@ -934,6 +938,72 @@ class TestMicrophone:
 
     def test_fetch_rejects_device_paths(self):
         result = json.loads(android_mic_fetch("../recording.wav"))
+        assert "error" in result
+
+
+class TestNoiseTriggeredVideo:
+    @responses.activate
+    def test_start_watcher_with_bounded_settings(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/noise_watch_start",
+            json={"status": "starting", "clipSeconds": 10, "cooldownSeconds": 60},
+            status=202,
+        )
+        result = json.loads(android_noise_watch_start())
+        assert result["status"] == "starting"
+        assert json.loads(responses.calls[0].request.body) == {
+            "thresholdRms": 1800.0,
+            "clipSeconds": 10,
+            "cooldownSeconds": 60,
+        }
+
+    def test_rejects_unsafe_watcher_settings_without_network_call(self):
+        assert "error" in json.loads(android_noise_watch_start(clip_seconds=31))
+        assert "error" in json.loads(android_noise_watch_start(cooldown_seconds=3601))
+        assert "error" in json.loads(android_noise_watch_start(threshold_rms=299))
+
+    @responses.activate
+    def test_stop_and_status(self, bridge_url):
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/noise_watch_stop",
+            json={"status": "stopping"},
+            status=202,
+        )
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/noise_watch_status",
+            json={"active": True, "recording": False, "count": 1, "retentionLimit": 10},
+        )
+        assert json.loads(android_noise_watch_stop())["status"] == "stopping"
+        status = json.loads(android_noise_watch_status())
+        assert status["active"] is True
+        assert status["retentionLimit"] == 10
+
+    @responses.activate
+    def test_fetch_streams_mp4_to_media_path(self, bridge_url):
+        from pathlib import Path
+
+        mp4 = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 64)
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/noise_video_file",
+            body=mp4,
+            status=200,
+            headers={"Content-Type": "video/mp4", "Content-Length": str(len(mp4))},
+        )
+
+        result = android_noise_video_fetch("noise_test.mp4")
+        media_path = Path(result.split("MEDIA:", 1)[1])
+        try:
+            assert media_path.read_bytes() == mp4
+            assert "name=noise_test.mp4" in responses.calls[0].request.url
+        finally:
+            media_path.unlink(missing_ok=True)
+
+    def test_fetch_rejects_device_paths(self):
+        result = json.loads(android_noise_video_fetch("../noise.mp4"))
         assert "error" in result
 
 

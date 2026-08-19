@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_robot_cinematic"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingLeft="16dp"
+    android:paddingTop="12dp"
+    android:paddingRight="16dp"
+    android:paddingBottom="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:fontFamily="sans-serif-medium"
+        android:letterSpacing="0.22"
+        android:text="@string/robot_title"
+        android:textColor="#D8FFFA"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="10dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnRobotBackendGptLive"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_primary"
+            android:fontFamily="sans-serif-medium"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_backend_gpt_live"
+            android:textAllCaps="false"
+            android:textColor="#031B1C"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            tools:ignore="ButtonStyle" />
+
+        <Button
+            android:id="@+id/btnRobotBackendHermesLocal"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="3dp"
+            android:layout_marginEnd="3dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_secondary"
+            android:fontFamily="sans-serif-medium"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_backend_hermes_local"
+            android:textAllCaps="false"
+            android:textColor="#C9D9E4"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            tools:ignore="ButtonStyle" />
+
+        <Button
+            android:id="@+id/btnRobotBackendHermesStandard"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_secondary"
+            android:fontFamily="sans-serif-medium"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_backend_hermes_standard"
+            android:textAllCaps="false"
+            android:textColor="#C9D9E4"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            tools:ignore="ButtonStyle" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/robotGptModelRow"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:layout_marginTop="6dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/btnRobotGptMini"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_secondary"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_gpt_model_mini"
+            android:textAllCaps="false"
+            android:textColor="#C9D9E4"
+            android:textSize="11sp"
+            tools:ignore="ButtonStyle" />
+
+        <Button
+            android:id="@+id/btnRobotGptStandard"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_secondary"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_gpt_model_standard"
+            android:textAllCaps="false"
+            android:textColor="#C9D9E4"
+            android:textSize="11sp"
+            tools:ignore="ButtonStyle" />
+
+        <Button
+            android:id="@+id/btnRobotGptTop"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_button_robot_primary"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:padding="0dp"
+            android:text="@string/robot_gpt_model_top"
+            android:textAllCaps="false"
+            android:textColor="#031B1C"
+            android:textSize="11sp"
+            tools:ignore="ButtonStyle" />
+
+    </LinearLayout>
+
+    <com.hermesandroid.bridge.robot.RobotFaceView
+        android:id="@+id/robotFace"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:contentDescription="@string/robot_face_content_description" />
+
+    <WebView
+        android:id="@+id/robotRealtimeWebView"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
+        android:alpha="0.01"
+        android:importantForAccessibility="no" />
+
+    <TextView
+        android:id="@+id/tvRobotCaption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="4dp"
+        android:layout_marginRight="4dp"
+        android:layout_marginBottom="14dp"
+        android:background="@drawable/bg_robot_caption_glass"
+        android:fontFamily="sans-serif"
+        android:gravity="center"
+        android:maxLines="6"
+        android:minHeight="72dp"
+        android:paddingLeft="14dp"
+        android:paddingTop="10dp"
+        android:paddingRight="14dp"
+        android:paddingBottom="10dp"
+        android:text="@string/robot_default_caption"
+        android:textColor="#F8FAFC"
+        android:textSize="18sp" />
+
+    <Button
+        android:id="@+id/btnRobotTalk"
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:background="@drawable/bg_button_robot_primary"
+        android:fontFamily="sans-serif-medium"
+        android:text="@string/robot_talk"
+        android:textAllCaps="false"
+        android:textColor="#031B1C"
+        android:textSize="19sp"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/btnRobotEnd"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_button_robot_secondary"
+        android:fontFamily="sans-serif-medium"
+        android:text="@string/robot_end"
+        android:textAllCaps="false"
+        android:textColor="#C9D9E4"
+        android:textSize="15sp" />
+
+</LinearLayout>

@@ -922,7 +922,8 @@ object ActionExecutor {
             return ActionResult(false, "TTS not available")
         }
         tts?.speak(text, queue, null, "hermes_speak_${System.currentTimeMillis()}")
-        return ActionResult(true, "Speaking: ${text.take(50)}")
+        // Do not echo spoken content into command responses or relay logs.
+        return ActionResult(true, "Speaking")
     }
 
     fun stopSpeaking(): ActionResult {

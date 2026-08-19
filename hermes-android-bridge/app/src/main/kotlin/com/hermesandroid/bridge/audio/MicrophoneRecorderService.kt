@@ -34,22 +34,48 @@ class MicrophoneRecorderService : Service() {
         private const val ACTION_START = "start"
         private const val ACTION_STOP = "stop"
         private const val EXTRA_DURATION = "duration"
+        private const val EXTRA_STOP_ON_SILENCE = "stop_on_silence"
+        private const val EXTRA_SILENCE_MS = "silence_ms"
 
-        fun start(context: Context, durationSec: Int = 0) {
+        fun start(
+            context: Context,
+            durationSec: Int = 0,
+            stopOnSilence: Boolean = false,
+            silenceMs: Int = PcmVoiceActivityDetector.DEFAULT_TRAILING_SILENCE_MS,
+        ) {
             require(durationSec in 0..MAX_DURATION_SECONDS) {
                 "duration must be between 0 and $MAX_DURATION_SECONDS seconds"
             }
-            startServiceCommand(context, ACTION_START, durationSec)
+            require(silenceMs in PcmVoiceActivityDetector.MIN_TRAILING_SILENCE_MS..
+                PcmVoiceActivityDetector.MAX_TRAILING_SILENCE_MS
+            ) {
+                "silenceMs is outside the supported range"
+            }
+            startServiceCommand(context, ACTION_START, durationSec, stopOnSilence, silenceMs)
         }
 
         fun stop(context: Context) {
-            startServiceCommand(context, ACTION_STOP, 0)
+            startServiceCommand(
+                context,
+                ACTION_STOP,
+                0,
+                false,
+                PcmVoiceActivityDetector.DEFAULT_TRAILING_SILENCE_MS,
+            )
         }
 
-        private fun startServiceCommand(context: Context, actionName: String, durationSec: Int) {
+        private fun startServiceCommand(
+            context: Context,
+            actionName: String,
+            durationSec: Int,
+            stopOnSilence: Boolean,
+            silenceMs: Int,
+        ) {
             val intent = Intent(context, MicrophoneRecorderService::class.java).apply {
                 action = actionName
                 putExtra(EXTRA_DURATION, durationSec)
+                putExtra(EXTRA_STOP_ON_SILENCE, stopOnSilence)
+                putExtra(EXTRA_SILENCE_MS, silenceMs)
             }
             context.startForegroundService(intent)
         }
@@ -74,12 +100,19 @@ class MicrophoneRecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action ?: ACTION_START) {
             ACTION_STOP -> requestStop()
-            else -> startRecording(intent?.getIntExtra(EXTRA_DURATION, 0) ?: 0)
+            else -> startRecording(
+                intent?.getIntExtra(EXTRA_DURATION, 0) ?: 0,
+                intent?.getBooleanExtra(EXTRA_STOP_ON_SILENCE, false) ?: false,
+                intent?.getIntExtra(
+                    EXTRA_SILENCE_MS,
+                    PcmVoiceActivityDetector.DEFAULT_TRAILING_SILENCE_MS,
+                ) ?: PcmVoiceActivityDetector.DEFAULT_TRAILING_SILENCE_MS,
+            )
         }
         return START_NOT_STICKY
     }
 
-    private fun startRecording(durationSec: Int) {
+    private fun startRecording(durationSec: Int, stopOnSilence: Boolean, silenceMs: Int) {
         if (!isRecording.compareAndSet(false, true)) return
         stopRequested.set(false)
 
@@ -89,6 +122,12 @@ class MicrophoneRecorderService : Service() {
         }
         if (durationSec !in 0..MAX_DURATION_SECONDS) {
             failBeforeRecording("Requested duration is outside the supported range")
+            return
+        }
+        if (silenceMs !in PcmVoiceActivityDetector.MIN_TRAILING_SILENCE_MS..
+            PcmVoiceActivityDetector.MAX_TRAILING_SILENCE_MS
+        ) {
+            failBeforeRecording("Requested silence window is outside the supported range")
             return
         }
 
@@ -149,6 +188,14 @@ class MicrophoneRecorderService : Service() {
                 // to the same documented Phase-1 safety ceiling.
                 val effectiveDuration = if (durationSec == 0) MAX_DURATION_SECONDS else durationSec
                 val sampleLimit = SAMPLE_RATE.toLong() * effectiveDuration.toLong()
+                val voiceActivityDetector = if (stopOnSilence) {
+                    PcmVoiceActivityDetector(
+                        sampleRate = SAMPLE_RATE,
+                        trailingSilenceMs = silenceMs,
+                    )
+                } else {
+                    null
+                }
 
                 while (isActive && isRecording.get() && writer.totalSamples < sampleLimit) {
                     val requested = minOf(samples.size.toLong(), sampleLimit - writer.totalSamples).toInt()
@@ -162,6 +209,9 @@ class MicrophoneRecorderService : Service() {
                         PcmSampleProcessor.applyRecordingGain(samples, read)
                         writer.write(samples, read)
                         MicrophoneRecordingState.markRecording(writer.totalSamples * 2L)
+                        if (voiceActivityDetector?.shouldStop(samples, read) == true) {
+                            break
+                        }
                     } else if (!stopRequested.get()) {
                         throw IOException("AudioRecord read failed with code $read")
                     }

@@ -9,10 +9,13 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
+import com.hermesandroid.bridge.media.NoiseVideoFiles
 import com.hermesandroid.bridge.server.CommandDispatcher
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.*
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.ByteString.Companion.toByteString
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -25,6 +28,15 @@ import java.security.MessageDigest
  * Auto-reconnects on disconnect with exponential backoff (1s, 2s, 4s, 8s, max 30s).
  */
 object RelayClient {
+
+    const val ROBOT_EVENT_TALK_REQUESTED = "robot.talk_requested"
+    const val ROBOT_EVENT_SESSION_STOP = "robot.session_stop"
+    const val ROBOT_EVENT_BACKEND_LOCAL = "robot.backend_local"
+    const val ROBOT_EVENT_BACKEND_OPENAI = "robot.backend_openai"
+    const val ROBOT_EVENT_BACKEND_GPT_LIVE = "robot.backend_gpt_live"
+    const val ROBOT_EVENT_BACKEND_HERMES_LOCAL = "robot.backend_hermes_local"
+    const val ROBOT_EVENT_BACKEND_HERMES_STANDARD = "robot.backend_hermes_standard"
+    private const val ROBOT_EVENT_REALTIME_TRANSCRIPT = "robot.realtime_transcript"
 
     private const val TAG = "RelayClient"
     private const val PREFS_NAME = "hermes_bridge_prefs"
@@ -123,6 +135,125 @@ object RelayClient {
             connect(url, code)
         }
     }
+
+    /**
+     * Send a strictly allow-listed, content-free event from the robot UI to the Mac.
+     * Speech and screen text never travel in this event channel.
+     */
+    fun sendRobotEvent(event: String): Boolean {
+        if (event !in ROBOT_EVENTS) {
+            return false
+        }
+        if (!isConnected) return false
+        val message = JsonObject().apply {
+            addProperty("event", event)
+            addProperty("protocol", 1)
+        }
+        return webSocket?.send(message.toString()) == true
+    }
+
+    /** Send one bounded transcript event from the local Realtime WebView.
+     *  Raw audio and OpenAI credentials never enter this relay message. */
+    fun sendRealtimeTranscript(role: String, text: String, itemId: String): Boolean {
+        val cleaned = text.trim()
+        if (role !in setOf("user", "assistant")) return false
+        if (cleaned.isBlank() || cleaned.length > 4_000 || '\u0000' in cleaned) return false
+        if (!itemId.matches(Regex("[A-Za-z0-9_.:-]{1,160}"))) return false
+        if (!isConnected) return false
+        val message = JsonObject().apply {
+            addProperty("event", ROBOT_EVENT_REALTIME_TRANSCRIPT)
+            addProperty("protocol", 1)
+            addProperty("role", role)
+            addProperty("text", cleaned)
+            addProperty("itemId", itemId)
+        }
+        return webSocket?.send(message.toString()) == true
+    }
+
+    /** Exchange an SDP offer through the trusted Mac relay.
+     *  The relay authenticates with OpenAI; the standard API key never reaches Android. */
+    fun exchangeRealtimeSdp(
+        offer: String,
+        modelTier: String,
+        callback: (Result<String>) -> Unit,
+    ) {
+        val configuredUrl = serverUrl
+        val token = pairingCode
+        if (configuredUrl.isNullOrBlank() || token.isNullOrBlank()) {
+            callback(Result.failure(IllegalStateException("Relay is not configured")))
+            return
+        }
+        if (!isConnected) {
+            callback(Result.failure(IllegalStateException("Relay is not connected")))
+            return
+        }
+        if (!offer.startsWith("v=0") || offer.length > 64 * 1024 || '\u0000' in offer) {
+            callback(Result.failure(IllegalArgumentException("Invalid SDP offer")))
+            return
+        }
+        if (modelTier !in REALTIME_MODEL_TIERS) {
+            callback(Result.failure(IllegalArgumentException("Invalid GPT Live model tier")))
+            return
+        }
+        val request = Request.Builder()
+            .url("${buildHttpBaseUrl(configuredUrl)}/robot/realtime/session")
+            .header("Authorization", "Bearer $token")
+            .header("Cache-Control", "no-store")
+            .header(REALTIME_MODEL_TIER_HEADER, modelTier)
+            .post(offer.toRequestBody("application/sdp".toMediaType()))
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                postResult(
+                    callback,
+                    Result.failure(IllegalStateException("Der GPT-Live-Relay ist nicht erreichbar.")),
+                )
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (!response.isSuccessful) {
+                        val message = when (response.code) {
+                            400 -> "Die gewählte GPT-Live-Stufe wurde abgelehnt."
+                            401, 403 -> "Die GPT-Live-Anmeldung auf dem Mac ist fehlgeschlagen."
+                            429 -> "GPT Live ist gerade ausgelastet oder das Kontingent ist erreicht."
+                            503 -> "GPT Live ist auf dem Mac nicht eingerichtet."
+                            else -> "OpenAI konnte die GPT-Live-Sitzung nicht starten."
+                        }
+                        postResult(
+                            callback,
+                            Result.failure(IllegalStateException(message)),
+                        )
+                        return
+                    }
+                    val answer = response.body?.string().orEmpty().trim()
+                    if (!answer.startsWith("v=0") || answer.length > 64 * 1024) {
+                        postResult(
+                            callback,
+                            Result.failure(
+                                IllegalStateException("GPT Live hat eine ungültige Verbindung geliefert."),
+                            ),
+                        )
+                        return
+                    }
+                    postResult(callback, Result.success(answer))
+                }
+            }
+        })
+    }
+
+    private val ROBOT_EVENTS = setOf(
+        ROBOT_EVENT_TALK_REQUESTED,
+        ROBOT_EVENT_SESSION_STOP,
+        ROBOT_EVENT_BACKEND_LOCAL,
+        ROBOT_EVENT_BACKEND_OPENAI,
+        ROBOT_EVENT_BACKEND_GPT_LIVE,
+        ROBOT_EVENT_BACKEND_HERMES_LOCAL,
+        ROBOT_EVENT_BACKEND_HERMES_STANDARD,
+    )
+
+    private const val REALTIME_MODEL_TIER_HEADER = "X-Cradata-Realtime-Tier"
+    private val REALTIME_MODEL_TIERS = setOf("mini", "standard", "top")
 
     private fun doConnect(serverUrl: String, pairingCode: String) {
         val myGeneration = ++generation
@@ -288,6 +419,24 @@ object RelayClient {
         return "$scheme://$base/ws"
     }
 
+    private fun buildHttpBaseUrl(serverUrl: String): String {
+        val trimmed = serverUrl.trim().trimEnd('/')
+        val useTls = trimmed.startsWith("https://") || trimmed.startsWith("wss://")
+        var base = trimmed
+            .removePrefix("http://").removePrefix("https://")
+            .removePrefix("ws://").removePrefix("wss://")
+        if (!base.contains(":")) {
+            base = "$base:8766"
+        }
+        return "${if (useTls) "https" else "http"}://$base"
+    }
+
+    private fun <T> postResult(callback: (Result<T>) -> Unit, result: Result<T>) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            callback(result)
+        }
+    }
+
     private suspend fun handleMessage(ws: WebSocket, text: String) {
         try {
             val json = JsonParser.parseString(text).asJsonObject
@@ -302,10 +451,11 @@ object RelayClient {
             if (requestId.isBlank()) {
                 throw IllegalArgumentException("Command is missing request_id")
             }
-            if (method == "GET" && path == "/mic_file") {
-                streamMicrophoneRecording(
+            if (method == "GET" && path in setOf("/mic_file", "/noise_video_file")) {
+                streamRecording(
                     ws,
                     requestId,
+                    path,
                     params.get("name")?.asString,
                 )
                 return
@@ -336,20 +486,23 @@ object RelayClient {
         }
     }
 
-    private suspend fun streamMicrophoneRecording(
+    private suspend fun streamRecording(
         ws: WebSocket,
         requestId: String,
+        path: String,
         requestedName: String?,
     ) {
-        val file = MicrophoneRecordingFiles.resolve(
-            BridgeApplication.instance,
-            requestedName,
-        )
+        val isVideo = path == "/noise_video_file"
+        val file = if (isVideo) {
+            NoiseVideoFiles.resolve(BridgeApplication.instance, requestedName)
+        } else {
+            MicrophoneRecordingFiles.resolve(BridgeApplication.instance, requestedName)
+        }
         if (file == null) {
             sendCommandResult(
                 ws,
                 requestId,
-                mapOf("error" to "Recording not found"),
+                mapOf("error" to if (isVideo) "Noise video not found" else "Recording not found"),
                 status = 404,
             )
             return
@@ -361,7 +514,7 @@ object RelayClient {
             add("stream", JsonObject().apply {
                 addProperty("event", "start")
                 addProperty("filename", file.name)
-                addProperty("mimeType", "audio/wav")
+                addProperty("mimeType", if (isVideo) "video/mp4" else "audio/wav")
                 addProperty("size", file.length())
             })
         }
@@ -382,7 +535,7 @@ object RelayClient {
                     }
                     digest.update(buffer, 0, read)
                     if (!ws.send(buildStreamFrame(requestId, buffer, read))) {
-                        throw IllegalStateException("WebSocket rejected microphone stream data")
+                        throw IllegalStateException("WebSocket rejected recording stream data")
                     }
                     bytesSent += read
                 }
@@ -411,7 +564,7 @@ object RelayClient {
                 addProperty("status", 500)
                 add("stream", JsonObject().apply {
                     addProperty("event", "error")
-                    addProperty("message", "Microphone stream failed (${error.javaClass.simpleName})")
+                    addProperty("message", "Recording stream failed (${error.javaClass.simpleName})")
                 })
             }
             ws.send(errorMessage.toString())

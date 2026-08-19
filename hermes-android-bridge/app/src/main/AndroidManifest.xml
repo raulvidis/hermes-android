@@ -13,7 +13,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- Microphone for ambient sound / voice capture (Phase 1 Ohren) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Opt-in loud-noise camera watcher -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- WebRTC audio routing for GPT Live Voice -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Auto-start bridge after device reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <!-- Screenshots via MediaProjection (Phase 2 enhancement) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <!-- Query all installed apps (Android 11+) -->
@@ -45,6 +52,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".robot.RobotActivity"
+            android:exported="false"
+            android:label="Cradata" />
+
         <!-- Accessibility service declaration -->
         <service
             android:name=".service.BridgeAccessibilityService"
@@ -74,6 +86,24 @@
             android:name=".audio.MicrophoneRecorderService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Explicitly enabled loud-noise camera watcher -->
+        <service
+            android:name=".media.NoiseTriggeredVideoService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone" />
+
+        <!-- Auto-start bridge after device reboot (no manual Connect needed) -->
+        <receiver
+            android:name=".boot.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline'; media-src blob:">
+  <title>Cradata Realtime Audio</title>
+</head>
+<body>
+  <audio id="remote-audio" autoplay></audio>
+  <script>
+    (() => {
+      "use strict";
+      let peer = null;
+      let channel = null;
+      let microphone = null;
+      let active = false;
+      const sentTranscriptIds = new Set();
+      const transcribedResponseIds = new Set();
+      let lastAssistantTranscript = "";
+      const remoteAudio = document.getElementById("remote-audio");
+
+      function status(phase, caption) {
+        AndroidRealtime.onStatus(phase, caption);
+      }
+
+      function transcript(role, text, id) {
+        const cleaned = String(text || "").trim();
+        const safeId = String(id || "").replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 160);
+        const key = role + ":" + safeId;
+        if (!cleaned || !safeId || sentTranscriptIds.has(key)) return;
+        sentTranscriptIds.add(key);
+        AndroidRealtime.onTranscript(role, cleaned.slice(0, 4000), safeId);
+      }
+
+      function assistantTextFromResponse(response) {
+        const parts = [];
+        for (const item of (response && response.output) || []) {
+          for (const content of item.content || []) {
+            const value = content.transcript || content.text;
+            if (typeof value === "string" && value.trim()) parts.push(value.trim());
+          }
+        }
+        return parts.join(" ").trim();
+      }
+
+      function handleServerEvent(raw) {
+        let event;
+        try { event = JSON.parse(raw); } catch (_) { return; }
+        switch (event.type) {
+          case "input_audio_buffer.speech_started":
+            status("listening", "Ich höre dir live zu …");
+            break;
+          case "input_audio_buffer.speech_stopped":
+          case "response.created":
+            status("thinking", "GPT Live denkt nach …");
+            break;
+          case "response.output_audio.delta":
+          case "response.audio.delta":
+            status("speaking", "GPT Live spricht …");
+            break;
+          case "conversation.item.input_audio_transcription.completed":
+            transcript("user", event.transcript, event.item_id || event.event_id);
+            break;
+          case "response.output_audio_transcript.done":
+          case "response.audio_transcript.done":
+            if (event.response_id) transcribedResponseIds.add(event.response_id);
+            lastAssistantTranscript = String(event.transcript || "").trim();
+            transcript(
+              "assistant",
+              event.transcript,
+              event.item_id || event.response_id || event.event_id
+            );
+            break;
+          case "response.done": {
+            const response = event.response || {};
+            const fallbackText = assistantTextFromResponse(response);
+            // output_audio_transcript.done normally arrives first. response.done
+            // is only the fallback, otherwise one answer would be archived twice.
+            if (
+              fallbackText &&
+              fallbackText !== lastAssistantTranscript &&
+              (!response.id || !transcribedResponseIds.has(response.id))
+            ) {
+              transcript(
+                "assistant",
+                fallbackText,
+                response.id || event.event_id
+              );
+            }
+            status("listening", "GPT Live ist bereit und hört zu …");
+            break;
+          }
+          case "error":
+            status("error", "GPT Live hat die Verbindung verloren.");
+            break;
+        }
+      }
+
+      async function start() {
+        if (active) return;
+        active = true;
+        sentTranscriptIds.clear();
+        transcribedResponseIds.clear();
+        lastAssistantTranscript = "";
+        try {
+          status("thinking", "GPT Live wird verbunden …");
+          peer = new RTCPeerConnection();
+          peer.ontrack = event => {
+            remoteAudio.srcObject = event.streams[0];
+            remoteAudio.play().catch(() => {});
+          };
+          peer.onconnectionstatechange = () => {
+            if (!peer) return;
+            if (peer.connectionState === "connected") {
+              status("listening", "GPT Live ist bereit und hört zu …");
+            } else if (["failed", "disconnected", "closed"].includes(peer.connectionState)) {
+              if (active) status("error", "GPT Live ist nicht mehr verbunden.");
+            }
+          };
+
+          microphone = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+          microphone.getAudioTracks().forEach(track => peer.addTrack(track, microphone));
+
+          channel = peer.createDataChannel("oai-events");
+          channel.addEventListener("message", event => handleServerEvent(event.data));
+          channel.addEventListener("open", () => {
+            status("listening", "GPT Live ist bereit und hört zu …");
+          });
+
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          AndroidRealtime.exchangeSdp(peer.localDescription.sdp);
+        } catch (_) {
+          stop(false);
+          status("error", "Mikrofon oder GPT Live konnte nicht gestartet werden.");
+        }
+      }
+
+      async function onSdpAnswer(answer) {
+        try {
+          if (!peer || !active) return;
+          await peer.setRemoteDescription({ type: "answer", sdp: answer });
+        } catch (_) {
+          stop(false);
+          status("error", "Die GPT-Live-Verbindung konnte nicht aufgebaut werden.");
+        }
+      }
+
+      function onSdpError(message) {
+        stop(false);
+        const safeMessage = typeof message === "string" && message.trim().length > 0
+          ? message.trim().slice(0, 240)
+          : "GPT Live ist auf dem Mac nicht verfügbar.";
+        status("error", safeMessage);
+      }
+
+      function stop(notify = true) {
+        active = false;
+        if (channel) {
+          try { channel.close(); } catch (_) {}
+          channel = null;
+        }
+        if (peer) {
+          try { peer.close(); } catch (_) {}
+          peer = null;
+        }
+        if (microphone) {
+          microphone.getTracks().forEach(track => track.stop());
+          microphone = null;
+        }
+        remoteAudio.pause();
+        remoteAudio.srcObject = null;
+        if (notify) status("ready", "GPT Live ist beendet.");
+      }
+
+      window.CradataRealtime = { start, stop, onSdpAnswer, onSdpError };
+      AndroidRealtime.onReady();
+    })();
+  </script>
+</body>
+</html>

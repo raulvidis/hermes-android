@@ -18,7 +18,10 @@ import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.BuildConfig
 import com.hermesandroid.bridge.client.RelayClient
 import com.hermesandroid.bridge.media.ScreenRecorder
+import com.hermesandroid.bridge.media.NoiseTriggeredVideoService
+import com.hermesandroid.bridge.media.NoiseTriggerState
 import com.hermesandroid.bridge.overlay.StatusOverlay
+import com.hermesandroid.bridge.robot.RobotActivity
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import java.net.NetworkInterface
 
@@ -26,6 +29,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE_SCREEN_RECORD = 1001
+        private const val REQUEST_CODE_NOISE_WATCH_PERMISSIONS = 1002
     }
 
     private lateinit var tvA11yStatus: TextView
@@ -39,12 +43,14 @@ class MainActivity : Activity() {
     private lateinit var switchAccessibility: Switch
     private lateinit var switchOverlay: Switch
     private lateinit var switchScreenRecord: Switch
+    private lateinit var switchNoiseWatch: Switch
     private lateinit var tvPairingCode: TextView
     private lateinit var btnRegenerate: Button
     private lateinit var etServerUrl: EditText
     private lateinit var tvRelayStatus: TextView
     private lateinit var btnConnect: Button
     private lateinit var btnDisconnect: Button
+    private lateinit var btnRobotMode: Button
     private lateinit var tvAddress: TextView
     private lateinit var tvVersion: TextView
 
@@ -63,12 +69,14 @@ class MainActivity : Activity() {
         switchAccessibility = findViewById(R.id.switchAccessibility)
         switchOverlay = findViewById(R.id.switchOverlay)
         switchScreenRecord = findViewById(R.id.switchScreenRecord)
+        switchNoiseWatch = findViewById(R.id.switchNoiseWatch)
         tvPairingCode = findViewById(R.id.tvPairingCode)
         btnRegenerate = findViewById(R.id.btnRegenerate)
         etServerUrl = findViewById(R.id.etServerUrl)
         tvRelayStatus = findViewById(R.id.tvRelayStatus)
         btnConnect = findViewById(R.id.btnConnect)
         btnDisconnect = findViewById(R.id.btnDisconnect)
+        btnRobotMode = findViewById(R.id.btnRobotMode)
         tvAddress = findViewById(R.id.tvAddress)
         tvVersion = findViewById(R.id.tvVersion)
         tvVersion.text = "v${BuildConfig.VERSION_NAME}"
@@ -76,6 +84,9 @@ class MainActivity : Activity() {
         setupPairingCode()
         setupPermissions()
         setupRelayConnection()
+        btnRobotMode.setOnClickListener {
+            startActivity(Intent(this, RobotActivity::class.java))
+        }
 
         updateConnectionInfo()
         updateStatus()
@@ -105,6 +116,28 @@ class MainActivity : Activity() {
             }
             updatePermissionSwitches()
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_CODE_NOISE_WATCH_PERMISSIONS) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
+        if (granted) {
+            NoiseTriggeredVideoService.start(this)
+            Toast.makeText(this, "Loud-noise video watcher enabled", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(
+                this,
+                "Camera and microphone permission are required for the noise watcher",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+        updatePermissionSwitches()
     }
 
     private fun setupPairingCode() {
@@ -158,16 +191,43 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        switchNoiseWatch.setOnCheckedChangeListener { _, isChecked ->
+            if (!isChecked) {
+                NoiseTriggeredVideoService.stop(this)
+                return@setOnCheckedChangeListener
+            }
+            val missing = buildList {
+                if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    add(android.Manifest.permission.RECORD_AUDIO)
+                }
+                if (checkSelfPermission(android.Manifest.permission.CAMERA) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    add(android.Manifest.permission.CAMERA)
+                }
+            }
+            if (missing.isEmpty()) {
+                NoiseTriggeredVideoService.start(this)
+                Toast.makeText(this, "Loud-noise video watcher enabled", Toast.LENGTH_SHORT).show()
+            } else {
+                requestPermissions(missing.toTypedArray(), REQUEST_CODE_NOISE_WATCH_PERMISSIONS)
+            }
+        }
     }
 
     private fun updatePermissionSwitches() {
         switchAccessibility.setOnCheckedChangeListener(null)
         switchOverlay.setOnCheckedChangeListener(null)
         switchScreenRecord.setOnCheckedChangeListener(null)
+        switchNoiseWatch.setOnCheckedChangeListener(null)
 
         switchAccessibility.isChecked = BridgeAccessibilityService.instance != null
         switchOverlay.isChecked = Settings.canDrawOverlays(this)
         switchScreenRecord.isChecked = ScreenRecorder.hasPermission()
+        switchNoiseWatch.isChecked = NoiseTriggerState.snapshot().active
 
         setupPermissions()
     }

@@ -18,7 +18,7 @@ This repo contains **two components**:
 | Component | Path | Language | Purpose |
 |-----------|------|----------|---------|
 | **Android bridge app** | `hermes-android-bridge/` | Kotlin | Runs on the phone. Connects to server via WebSocket, executes commands via AccessibilityService |
-| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 42 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
+| **Python toolset** | `tools/`, `tests/` | Python | Runs on the server. 46 `android_*` tools + WebSocket relay. Also lives in [hermes-agent](https://github.com/NousResearch/hermes-agent) as the production copy |
 
 > **Note:** The Python code exists here for standalone development and testing (`pip install -e .`, `pytest`). The production copy is in the hermes-agent repo. The Android app does not use or depend on the Python files.
 
@@ -34,7 +34,7 @@ mkdir -p ~/.hermes/plugins
 cp -r hermes-android-plugin ~/.hermes/plugins/hermes-android
 ```
 
-Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.4.1 (42 tools)`
+Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.4.1 (46 tools)`
 
 ## Quick Start
 
@@ -245,8 +245,26 @@ This is a working prototype. The vision: **give Hermes its own phone** — a ful
 
 ### v0.5 — Hermes Gets a Voice
 - [ ] **Phone call capability** — agent can answer and speak in phone calls using TTS/STT
-- [ ] **Voice assistant mode** — always-listening on the phone, responds via speaker
+- [x] **Three-mode robot dialog** — cinematic animated Pixel face, GPT Live WebRTC, Hermes local/DeepSeek modes, private transcripts, and shared long-term memory
+- [ ] **Voice assistant mode** — local wake word on the phone, responds via speaker
 - [ ] **Call handling** — "answer my phone, take a message, tell them I'll call back"
+
+The robot dialog mode is documented in
+[`docs/robot-dialog.md`](docs/robot-dialog.md). The Pixel explicitly selects
+one of three backends:
+
+- **GPT Live** — direct WebRTC voice through OpenAI Realtime, with visible
+  **Sparsam**, **Stark**, and **Top** tiers; the standard API key and concrete
+  model mapping stay on the Mac, never in the APK.
+- **Hermes Lokal** — push-to-talk through the locally selected Hermes model.
+- **Hermes Standard** — push-to-talk through the configured fast Hermes model
+  (currently DeepSeek V4 Flash in the operator setup).
+
+The default GPT mappings are `gpt-realtime-2.1-mini` (Sparsam),
+`gpt-realtime-2` (Stark), and `gpt-realtime-2.1` (Top). Every mode feeds the
+same private transcript archive and restricted Hermes memory observer. If the
+loud-noise video watcher is active, the robot screen pauses its microphone loop
+for the conversation and restores it when the screen closes.
 
 ### v0.6 — On-Device Intelligence
 - [ ] **Local model execution** — run small models (Qwen 0.5B, Gemma 2B) directly on the phone

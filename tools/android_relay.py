@@ -24,6 +24,7 @@ Command JSON format:
 # to enable wss:// connections. Without these, the relay uses plaintext http.
 
 import asyncio
+from collections import deque
 import hashlib
 import hmac
 import json
@@ -33,7 +34,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from aiohttp import web
@@ -74,6 +75,13 @@ class _RelayState:
         # request_id -> bounded queue of ("message"|"chunk"|"error", payload).
         self.streams: dict[str, asyncio.Queue] = {}
         self.streams_lock: Optional[asyncio.Lock] = None
+
+        # Robot UI events. Most are content-free; Realtime transcript events
+        # use a separately validated, bounded payload for the local memory
+        # companion. The relay assigns every sequence number.
+        self.phone_events: deque[dict[str, Any]] = deque(maxlen=64)
+        self.phone_event_sequence: int = 0
+        self.phone_events_condition: Optional[asyncio.Condition] = None
 
         # Shutdown event
         self.shutdown_event: Optional[asyncio.Event] = None
@@ -172,6 +180,7 @@ def _run_loop(state: _RelayState, ready: threading.Event) -> None:
     state.phone_ws_lock = asyncio.Lock()
     state.pending_lock = asyncio.Lock()
     state.streams_lock = asyncio.Lock()
+    state.phone_events_condition = asyncio.Condition()
     state.shutdown_event = asyncio.Event()
 
     try:
@@ -209,54 +218,76 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
 
     app.router.add_get("/ws", websocket_handler)
 
+    # Local long-poll endpoint consumed by the optional Mac dialog service.
+    async def robot_events_handler(request: web.Request) -> web.StreamResponse:
+        return await _handle_robot_events(request, state)
+
+    app.router.add_get("/robot/events", robot_events_handler)
+
+    # Authenticated WebRTC SDP exchange. The standard OpenAI key stays on the
+    # Mac; the Pixel never receives it or stores it in the APK.
+    async def realtime_session_handler(request: web.Request) -> web.StreamResponse:
+        return await _handle_realtime_session(request, state)
+
+    app.router.add_post("/robot/realtime/session", realtime_session_handler)
+
     # HTTP bridge endpoints — method per path
     ROUTES = {
         # GET-only
-        "/ping":          "GET",
-        "/screen":        "GET",
-        "/screenshot":    "GET",
-        "/apps":          "GET",
-        "/current_app":   "GET",
+        "/ping": "GET",
+        "/screen": "GET",
+        "/screenshot": "GET",
+        "/apps": "GET",
+        "/current_app": "GET",
         "/notifications": "GET",
-        "/contacts":      "GET",
-        "/events":        "GET",
-        "/screen_hash":   "GET",
-        "/location":      "GET",
-        "/widgets":       "GET",
-        "/mic_status":    "GET",
-        "/mic_file":      "GET",
+        "/contacts": "GET",
+        "/events": "GET",
+        "/screen_hash": "GET",
+        "/location": "GET",
+        "/widgets": "GET",
+        "/mic_status": "GET",
+        "/mic_file": "GET",
+        "/noise_watch_status": "GET",
+        "/noise_video_file": "GET",
+        "/robot_status": "GET",
         # POST-only
-        "/tap":           "POST",
-        "/tap_text":      "POST",
-        "/type":          "POST",
-        "/swipe":         "POST",
-        "/open_app":      "POST",
-        "/press_key":     "POST",
-        "/scroll":        "POST",
-        "/wait":          "POST",
-        "/long_press":    "POST",
-        "/drag":          "POST",
+        "/tap": "POST",
+        "/tap_text": "POST",
+        "/type": "POST",
+        "/swipe": "POST",
+        "/open_app": "POST",
+        "/press_key": "POST",
+        "/scroll": "POST",
+        "/wait": "POST",
+        "/long_press": "POST",
+        "/drag": "POST",
         "/describe_node": "POST",
-        "/find_nodes":    "POST",
-        "/diff_screen":   "POST",
-        "/pinch":         "POST",
-        "/send_sms":      "POST",
-        "/call":          "POST",
-        "/media":         "POST",
-        "/intent":        "POST",
-        "/broadcast":     "POST",
-        "/speak":         "POST",
+        "/find_nodes": "POST",
+        "/diff_screen": "POST",
+        "/pinch": "POST",
+        "/send_sms": "POST",
+        "/call": "POST",
+        "/media": "POST",
+        "/intent": "POST",
+        "/broadcast": "POST",
+        "/speak": "POST",
         "/stop_speaking": "POST",
         "/screen_record": "POST",
         "/events/stream": "POST",
-        "/mic_start":     "POST",
-        "/mic_stop":      "POST",
+        "/mic_start": "POST",
+        "/mic_stop": "POST",
+        "/noise_watch_start": "POST",
+        "/noise_watch_stop": "POST",
+        "/robot_state": "POST",
         # READ + WRITE
-        "/clipboard":     "BOTH",
+        "/clipboard": "BOTH",
     }
 
     for path, method in ROUTES.items():
-        async def handler(request: web.Request, route_path: str = path) -> web.StreamResponse:
+
+        async def handler(
+            request: web.Request, route_path: str = path
+        ) -> web.StreamResponse:
             return await _handle_http(request, state, route_path)
 
         if method in ("GET", "BOTH"):
@@ -381,7 +412,18 @@ def _mask_token(token: str) -> str:
 # typed text incl. passwords/OTPs, clipboard content, intent extras).
 # AGENTS.md: strip phone numbers, recipients, location from tool logs.
 _SENSITIVE_BODY_KEYS = frozenset(
-    {"to", "number", "body", "text", "message", "extras", "data", "uri", "content"}
+    {
+        "to",
+        "number",
+        "body",
+        "text",
+        "message",
+        "caption",
+        "extras",
+        "data",
+        "uri",
+        "content",
+    }
 )
 
 
@@ -419,7 +461,9 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     if not hmac.compare_digest(token, state.pairing_code):
         _auth_record_failure(remote_ip)
         logger.warning(
-            "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
+            "Phone WS rejected — bad token (got %s) from %s",
+            _mask_token(token),
+            remote_ip,
         )
         raise web.HTTPForbidden(text="Invalid pairing code")
 
@@ -461,6 +505,10 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
         logger.warning("Non-JSON message from phone: %s", raw[:200])
         return
 
+    if "event" in data and "request_id" not in data:
+        await _on_phone_event(state, data)
+        return
+
     request_id = data.get("request_id")
     if not request_id:
         logger.warning("Phone message missing request_id: %s", raw[:200])
@@ -483,6 +531,77 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
 
     if not future.done():
         future.set_result(data)
+
+
+_ALLOWED_PHONE_EVENTS = frozenset(
+    {
+        "robot.talk_requested",
+        "robot.session_stop",
+        "robot.backend_local",
+        "robot.backend_openai",
+        "robot.backend_gpt_live",
+        "robot.backend_hermes_local",
+        "robot.backend_hermes_standard",
+    }
+)
+
+_REALTIME_TRANSCRIPT_EVENT = "robot.realtime_transcript"
+_MAX_TRANSCRIPT_CHARS = 4_000
+
+
+async def _on_phone_event(state: _RelayState, data: dict[str, Any]) -> None:
+    """Queue a strictly validated phone event for the Mac companion."""
+    event_name = data.get("event")
+    protocol = data.get("protocol")
+    if event_name == _REALTIME_TRANSCRIPT_EVENT:
+        if set(data) != {"event", "protocol", "role", "text", "itemId"}:
+            logger.warning("Ignoring malformed Realtime transcript event")
+            return
+        role = data.get("role")
+        text = data.get("text")
+        item_id = data.get("itemId")
+        if (
+            protocol != 1
+            or role not in {"user", "assistant"}
+            or not isinstance(text, str)
+            or not text.strip()
+            or len(text) > _MAX_TRANSCRIPT_CHARS
+            or "\x00" in text
+            or not isinstance(item_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", item_id)
+        ):
+            logger.warning("Ignoring invalid Realtime transcript event")
+            return
+        event_payload = {
+            "event": event_name,
+            "role": role,
+            "text": text.strip(),
+            "itemId": item_id,
+        }
+    else:
+        if (
+            set(data) != {"event", "protocol"}
+            or event_name not in _ALLOWED_PHONE_EVENTS
+            or protocol != 1
+        ):
+            logger.warning("Ignoring unsupported phone event")
+            return
+        event_payload = {"event": event_name}
+
+    condition = state.phone_events_condition
+    if condition is None:
+        return
+    async with condition:
+        state.phone_event_sequence += 1
+        state.phone_events.append(
+            {
+                "id": state.phone_event_sequence,
+                **event_payload,
+                "receivedAt": int(time.time() * 1000),
+            }
+        )
+        condition.notify_all()
+    logger.info("Phone event queued: %s", event_name)
 
 
 def _decode_stream_frame(raw: bytes) -> tuple[str, bytes]:
@@ -565,14 +684,10 @@ async def _fail_inflight(state: _RelayState, reason: str) -> None:
 _RESPONSE_TIMEOUT = 30  # seconds
 
 
-async def _handle_http(
-    request: web.Request, state: _RelayState, path: str
-) -> web.StreamResponse:
-    """Forward an HTTP request from a tool to the phone over WebSocket."""
-    # ── Auth check ──────────────────────────────────────────────────────────
-    # Require Bearer token matching the pairing code.  The client already sends
-    # this (android_tool._auth_headers), so the only effect is blocking
-    # unauthenticated local processes from abusing the HTTP tool API.
+def _http_auth_error(
+    request: web.Request, state: _RelayState
+) -> Optional[web.Response]:
+    """Return an auth error response, or None when the caller is authorized."""
     remote_ip = request.remote or "unknown"
     if _auth_is_blocked(remote_ip):
         logger.warning("HTTP auth attempt from blocked IP %s — 429", remote_ip)
@@ -582,14 +697,254 @@ async def _handle_http(
         )
 
     auth_header = request.headers.get("Authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-    if not hmac.compare_digest(token, state.pairing_code):
-        _auth_record_failure(remote_ip)
-        logger.warning(
-            "HTTP %s %s rejected — bad auth from %s (header=%s)",
-            request.method, path, remote_ip, _mask_token(token),
+    token = (
+        auth_header.removeprefix("Bearer ").strip()
+        if auth_header.startswith("Bearer ")
+        else ""
+    )
+    if hmac.compare_digest(token, state.pairing_code):
+        return None
+
+    _auth_record_failure(remote_ip)
+    logger.warning(
+        "HTTP %s %s rejected — bad auth from %s (header=%s)",
+        request.method,
+        request.path,
+        remote_ip,
+        _mask_token(token),
+    )
+    return web.json_response({"error": "Unauthorized"}, status=401)
+
+
+async def _handle_robot_events(
+    request: web.Request, state: _RelayState
+) -> web.StreamResponse:
+    """Authenticated long-poll for content-free robot UI events."""
+    auth_error = _http_auth_error(request, state)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        after = max(0, int(request.query.get("after", "0")))
+        timeout = min(30.0, max(0.0, float(request.query.get("timeout", "0"))))
+    except ValueError:
+        return web.json_response(
+            {"error": "after and timeout must be numbers"}, status=400
         )
-        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    condition = state.phone_events_condition
+    if condition is None:
+        return web.json_response({"error": "Relay is not ready"}, status=503)
+
+    async with condition:
+        if state.phone_event_sequence <= after and timeout > 0:
+            try:
+                await asyncio.wait_for(
+                    condition.wait_for(lambda: state.phone_event_sequence > after),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                pass
+        events = [event for event in state.phone_events if event["id"] > after]
+        latest = state.phone_event_sequence
+
+    return web.json_response({"events": events, "latest": latest})
+
+
+_MAX_REALTIME_SDP_BYTES = 64 * 1024
+_REALTIME_MODEL_TIER_HEADER = "X-Cradata-Realtime-Tier"
+_REALTIME_MODEL_TIERS = {
+    "mini": ("ROBOT_DIALOG_OPENAI_REALTIME_MODEL_MINI", "gpt-realtime-2.1-mini"),
+    "standard": ("ROBOT_DIALOG_OPENAI_REALTIME_MODEL_STANDARD", "gpt-realtime-2"),
+    # Keep the original variable as the backwards-compatible Top override.
+    "top": ("ROBOT_DIALOG_OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
+}
+_REALTIME_VOICES = frozenset(
+    {
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar",
+    }
+)
+_REALTIME_INSTRUCTIONS = (
+    "Du bist Cradata, ein freundlicher Roboter. Fuehre ein natuerliches, "
+    "knappes Sprachgespraech auf Deutsch. Antworte klar und eher kurz. "
+    "Du hast in diesem Live-Voice-Kanal keine Werkzeuge und darfst nicht "
+    "behaupten, Geraeteaktionen, Kaeufe, Nachrichten oder Anrufe auszufuehren."
+)
+
+
+def _safe_realtime_slug(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip()
+    return value if re.fullmatch(r"[A-Za-z0-9_.:/+-]{1,160}", value) else default
+
+
+def _realtime_session_config(model_tier: str = "top") -> dict[str, Any]:
+    if model_tier not in _REALTIME_MODEL_TIERS:
+        raise ValueError("Unknown GPT Live model tier")
+    model_env, default_model = _REALTIME_MODEL_TIERS[model_tier]
+    voice = os.getenv("ROBOT_DIALOG_OPENAI_REALTIME_VOICE", "marin").strip().lower()
+    if voice not in _REALTIME_VOICES:
+        voice = "marin"
+    return {
+        "type": "realtime",
+        "model": _safe_realtime_slug(model_env, default_model),
+        "output_modalities": ["audio"],
+        "instructions": _REALTIME_INSTRUCTIONS,
+        "audio": {
+            "input": {
+                "transcription": {
+                    "model": _safe_realtime_slug(
+                        "ROBOT_DIALOG_OPENAI_TRANSCRIBE_MODEL",
+                        "gpt-4o-mini-transcribe",
+                    ),
+                    "language": "de",
+                },
+                "turn_detection": {"type": "semantic_vad"},
+            },
+            "output": {"voice": voice},
+        },
+    }
+
+
+def _realtime_client_status(upstream_status: int) -> int:
+    """Preserve only statuses the Pixel can turn into safe, useful guidance."""
+    if upstream_status in {400, 401, 403, 429}:
+        return upstream_status
+    return 502
+
+
+def _safe_realtime_error_details(payload: bytes) -> dict[str, str]:
+    """Extract only bounded machine slugs; never forward provider messages."""
+    try:
+        error = json.loads(payload.decode("utf-8")).get("error", {})
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return {}
+    details: dict[str, str] = {}
+    for source, target in (
+        ("type", "upstreamType"),
+        ("code", "upstreamCode"),
+        ("param", "upstreamParam"),
+    ):
+        value = error.get(source) if isinstance(error, dict) else None
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/+-]{1,160}", value):
+            details[target] = value
+    return details
+
+
+def _decode_realtime_sdp(payload: bytes) -> str:
+    """Validate SDP without stripping its required trailing CRLF."""
+    value = payload.decode("utf-8")
+    if not value.startswith("v=0") or "\x00" in value:
+        raise ValueError("Invalid SDP")
+    return value
+
+
+async def _handle_realtime_session(
+    request: web.Request, state: _RelayState
+) -> web.StreamResponse:
+    """Exchange a Pixel WebRTC offer while keeping the OpenAI key server-side."""
+    auth_error = _http_auth_error(request, state)
+    if auth_error is not None:
+        return auth_error
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return web.json_response(
+            {"error": "GPT Live is not configured on the Mac"}, status=503
+        )
+
+    model_tier = request.headers.get(_REALTIME_MODEL_TIER_HEADER, "top").strip().lower()
+    if model_tier not in _REALTIME_MODEL_TIERS:
+        return web.json_response({"error": "Unknown GPT Live model tier"}, status=400)
+
+    content_length = request.content_length
+    if content_length is not None and content_length > _MAX_REALTIME_SDP_BYTES:
+        return web.json_response({"error": "SDP offer is too large"}, status=413)
+    raw = await request.content.read(_MAX_REALTIME_SDP_BYTES + 1)
+    if len(raw) > _MAX_REALTIME_SDP_BYTES:
+        return web.json_response({"error": "SDP offer is too large"}, status=413)
+    try:
+        offer = _decode_realtime_sdp(raw)
+    except (UnicodeDecodeError, ValueError):
+        return web.json_response({"error": "SDP offer must be UTF-8"}, status=400)
+
+    form = aiohttp.FormData()
+    form.add_field("sdp", offer, content_type="application/sdp")
+    form.add_field(
+        "session",
+        json.dumps(_realtime_session_config(model_tier)),
+        content_type="application/json",
+    )
+    # The pairing code has deliberately low entropy. Key the identifier with
+    # the server-only API key so the hash cannot be used to brute-force it.
+    safety_identifier = hmac.new(
+        api_key.encode("utf-8"),
+        f"cradata-realtime:{state.pairing_code}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Safety-Identifier": safety_identifier,
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://api.openai.com/v1/realtime/calls",
+                data=form,
+                headers=headers,
+            ) as response:
+                answer_bytes = await response.content.read(_MAX_REALTIME_SDP_BYTES + 1)
+                if response.status < 200 or response.status >= 300:
+                    logger.warning(
+                        "OpenAI Realtime session exchange failed with status %d",
+                        response.status,
+                    )
+                    return web.json_response(
+                        {
+                            "error": "GPT Live session could not be created",
+                            **_safe_realtime_error_details(answer_bytes),
+                        },
+                        status=_realtime_client_status(response.status),
+                    )
+                if len(answer_bytes) > _MAX_REALTIME_SDP_BYTES:
+                    raise aiohttp.ClientError("Realtime SDP answer is too large")
+                try:
+                    answer = _decode_realtime_sdp(answer_bytes)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise aiohttp.ClientError("Realtime SDP answer is invalid") from exc
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        logger.warning("OpenAI Realtime session exchange failed")
+        return web.json_response(
+            {"error": "GPT Live session could not be created"}, status=502
+        )
+
+    return web.Response(
+        text=answer,
+        content_type="application/sdp",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _handle_http(
+    request: web.Request, state: _RelayState, path: str
+) -> web.StreamResponse:
+    """Forward an HTTP request from a tool to the phone over WebSocket."""
+    # ── Auth check ──────────────────────────────────────────────────────────
+    # Require Bearer token matching the pairing code.  The client already sends
+    # this (android_tool._auth_headers), so the only effect is blocking
+    # unauthenticated local processes from abusing the HTTP tool API.
+    auth_error = _http_auth_error(request, state)
+    if auth_error is not None:
+        return auth_error
 
     # ── Phone connectivity check ────────────────────────────────────────────
     async with state.phone_ws_lock:
@@ -624,7 +979,7 @@ async def _handle_http(
     logger.debug(">>> %s %s body=%s", method, path, _safe_body_repr(body))
 
     # Register the response target *before* sending so we never miss a reply.
-    is_binary_stream = path == "/mic_file"
+    is_binary_stream = path in {"/mic_file", "/noise_video_file"}
     future = None
     stream_queue = None
     if is_binary_stream:
@@ -695,12 +1050,18 @@ async def _relay_binary_stream(
         if kind == "error":
             return web.json_response({"error": first}, status=502)
         if kind != "message":
-            return web.json_response({"error": "Phone sent stream data before metadata"}, status=502)
+            return web.json_response(
+                {"error": "Phone sent stream data before metadata"}, status=502
+            )
 
         stream = first.get("stream") if isinstance(first, dict) else None
         if not isinstance(stream, dict) or stream.get("event") != "start":
             status = first.get("status", 502) if isinstance(first, dict) else 502
-            result = first.get("result", {"error": "Invalid stream response"}) if isinstance(first, dict) else {"error": "Invalid stream response"}
+            result = (
+                first.get("result", {"error": "Invalid stream response"})
+                if isinstance(first, dict)
+                else {"error": "Invalid stream response"}
+            )
             return web.json_response(result, status=status)
 
         expected_size = int(stream.get("size", -1))
@@ -709,10 +1070,13 @@ async def _relay_binary_stream(
 
         raw_filename = os.path.basename(str(stream.get("filename", "recording.wav")))
         filename = re.sub(r"[^A-Za-z0-9._-]", "_", raw_filename)
-        if not filename.lower().endswith(".wav"):
-            filename = "recording.wav"
+        is_video = str(stream.get("mimeType", "audio/wav")) == "video/mp4"
+        expected_suffix = ".mp4" if is_video else ".wav"
+        fallback_name = "noise_video.mp4" if is_video else "recording.wav"
+        if not filename.lower().endswith(expected_suffix):
+            filename = fallback_name
         mime_type = str(stream.get("mimeType", "audio/wav"))
-        if mime_type != "audio/wav":
+        if mime_type not in {"audio/wav", "video/mp4"}:
             mime_type = "application/octet-stream"
 
         response = web.StreamResponse(
@@ -729,7 +1093,9 @@ async def _relay_binary_stream(
         digest = hashlib.sha256()
         total = 0
         while True:
-            kind, payload = await asyncio.wait_for(queue.get(), timeout=_RESPONSE_TIMEOUT)
+            kind, payload = await asyncio.wait_for(
+                queue.get(), timeout=_RESPONSE_TIMEOUT
+            )
             if kind == "error":
                 raise ConnectionError(str(payload))
             if kind == "chunk":
@@ -743,7 +1109,9 @@ async def _relay_binary_stream(
                 raise ValueError("Unknown stream event")
 
             stream_event = payload.get("stream") if isinstance(payload, dict) else None
-            event_name = stream_event.get("event") if isinstance(stream_event, dict) else None
+            event_name = (
+                stream_event.get("event") if isinstance(stream_event, dict) else None
+            )
             if event_name == "error":
                 raise IOError(str(stream_event.get("message", "Phone stream failed")))
             if event_name != "end":
@@ -751,20 +1119,22 @@ async def _relay_binary_stream(
             if total != expected_size or int(stream_event.get("bytes", -1)) != total:
                 raise IOError("Recording stream length does not match metadata")
             expected_sha = str(stream_event.get("sha256", ""))
-            if not re.fullmatch(r"[0-9a-f]{64}", expected_sha) or not hmac.compare_digest(
-                digest.hexdigest(), expected_sha
-            ):
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", expected_sha
+            ) or not hmac.compare_digest(digest.hexdigest(), expected_sha):
                 raise IOError("Recording stream checksum mismatch")
             await response.write_eof()
             return response
     except asyncio.TimeoutError:
-        logger.warning("Timed out receiving microphone stream request_id=%s", request_id)
+        logger.warning(
+            "Timed out receiving recording stream request_id=%s", request_id
+        )
         if response is None:
             return web.json_response({"error": "Phone stream timed out"}, status=504)
         response.force_close()
         return response
     except Exception as exc:
-        logger.warning("Microphone stream failed request_id=%s: %s", request_id, exc)
+        logger.warning("Recording stream failed request_id=%s: %s", request_id, exc)
         if response is None:
             return web.json_response({"error": "Phone stream failed"}, status=502)
         response.force_close()

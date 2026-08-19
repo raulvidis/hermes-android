@@ -9,13 +9,20 @@ import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.audio.MicrophoneRecorderService
 import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
 import com.hermesandroid.bridge.audio.MicrophoneRecordingState
+import com.hermesandroid.bridge.audio.PcmVoiceActivityDetector
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.executor.ScreenReader
 import com.hermesandroid.bridge.media.ScreenRecorder
+import com.hermesandroid.bridge.media.NoiseTriggeredVideoService
+import com.hermesandroid.bridge.media.NoiseTriggerState
+import com.hermesandroid.bridge.media.NoiseVideoFiles
 import com.hermesandroid.bridge.model.DeviceCapabilities
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.notification.NotificationStore
+import com.hermesandroid.bridge.robot.RobotBackend
+import com.hermesandroid.bridge.robot.RobotPhase
+import com.hermesandroid.bridge.robot.RobotUiController
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import com.hermesandroid.bridge.service.BridgeNotificationListener
 import kotlinx.coroutines.Dispatchers
@@ -354,6 +361,62 @@ object CommandDispatcher {
                 result to 200
             }
 
+            method == "GET" && path == "/robot_status" -> {
+                val state = RobotUiController.state()
+                mapOf(
+                    "phase" to state.phase.wireName,
+                    "backend" to state.backend.wireName,
+                    "visible" to RobotUiController.isVisible(),
+                ) to 200
+            }
+
+            method == "POST" && path == "/robot_state" -> {
+                val rawPhase = body.get("phase")
+                    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }
+                    ?.asString
+                    ?: return mapOf("error" to "phase is required") to 400
+                val phase = RobotPhase.fromWire(rawPhase)
+                    ?: return mapOf(
+                        "error" to "phase must be idle, listening, thinking, speaking, ready, or error",
+                    ) to 400
+                val rawCaption = body.get("caption")
+                if (rawCaption != null && !rawCaption.isJsonNull &&
+                    (!rawCaption.isJsonPrimitive || !rawCaption.asJsonPrimitive.isString)
+                ) {
+                    return mapOf("error" to "caption must be a string") to 400
+                }
+                val caption = rawCaption?.takeIf { !it.isJsonNull }?.asString
+                val rawBackend = body.get("backend")
+                val backend = when {
+                    rawBackend == null || rawBackend.isJsonNull -> null
+                    !rawBackend.isJsonPrimitive || !rawBackend.asJsonPrimitive.isString -> {
+                        return mapOf("error" to "backend must be a string") to 400
+                    }
+                    else -> RobotBackend.fromWire(rawBackend.asString)
+                        ?: return mapOf(
+                            "error" to "backend must be gpt_live, hermes_local, or hermes_standard",
+                        ) to 400
+                }
+                val show = body.get("show")
+                    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
+                    ?.asBoolean
+                    ?: false
+                val state = RobotUiController.update(phase, caption, backend)
+                val shown = if (show) {
+                    withContext(Dispatchers.Main) {
+                        RobotUiController.show(BridgeApplication.instance)
+                    }
+                } else {
+                    RobotUiController.isVisible()
+                }
+                mapOf(
+                    "status" to "updated",
+                    "phase" to phase.wireName,
+                    "backend" to state.backend.wireName,
+                    "visible" to shown,
+                ) to 200
+            }
+
             method == "POST" && path == "/mic_start" -> {
                 val durationValue = body.get("duration")
                 val durationSec = when {
@@ -364,10 +427,42 @@ object CommandDispatcher {
                     else -> durationValue.asJsonPrimitive.asString.toIntOrNull()
                         ?: return mapOf("error" to "duration must be an integer number of seconds") to 400
                 }
+                val stopOnSilenceValue = body.get("stop_on_silence")
+                val stopOnSilence = when {
+                    stopOnSilenceValue == null -> false
+                    !stopOnSilenceValue.isJsonPrimitive ||
+                        !stopOnSilenceValue.asJsonPrimitive.isBoolean -> {
+                        return mapOf("error" to "stop_on_silence must be a boolean") to 400
+                    }
+                    else -> stopOnSilenceValue.asBoolean
+                }
+                val silenceValue = body.get("silence_ms")
+                val silenceMs = when {
+                    silenceValue == null -> PcmVoiceActivityDetector.DEFAULT_TRAILING_SILENCE_MS
+                    !silenceValue.isJsonPrimitive || !silenceValue.asJsonPrimitive.isNumber -> {
+                        return mapOf("error" to "silence_ms must be an integer") to 400
+                    }
+                    else -> silenceValue.asString.toIntOrNull()
+                        ?: return mapOf("error" to "silence_ms must be an integer") to 400
+                }
                 val app = BridgeApplication.instance
+                if (NoiseTriggerState.snapshot().active) {
+                    return mapOf(
+                        "error" to "The loud-noise watcher is using the microphone",
+                    ) to 409
+                }
                 if (durationSec !in 0..MicrophoneRecorderService.MAX_DURATION_SECONDS) {
                     return mapOf(
                         "error" to "duration must be between 0 and ${MicrophoneRecorderService.MAX_DURATION_SECONDS} seconds"
+                    ) to 400
+                }
+                if (silenceMs !in PcmVoiceActivityDetector.MIN_TRAILING_SILENCE_MS..
+                    PcmVoiceActivityDetector.MAX_TRAILING_SILENCE_MS
+                ) {
+                    return mapOf(
+                        "error" to "silence_ms must be between " +
+                            "${PcmVoiceActivityDetector.MIN_TRAILING_SILENCE_MS} and " +
+                            "${PcmVoiceActivityDetector.MAX_TRAILING_SILENCE_MS}"
                     ) to 400
                 }
                 if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -378,10 +473,17 @@ object CommandDispatcher {
                 }
 
                 runCatching {
-                    MicrophoneRecorderService.start(app, durationSec)
+                    MicrophoneRecorderService.start(
+                        app,
+                        durationSec,
+                        stopOnSilence,
+                        silenceMs,
+                    )
                     mapOf(
                         "status" to "starting",
                         "duration" to durationSec,
+                        "stopOnSilence" to stopOnSilence,
+                        "silenceMs" to silenceMs,
                     ) to 202
                 }.getOrElse { error ->
                     MicrophoneRecordingState.markError(
@@ -432,6 +534,83 @@ object CommandDispatcher {
                     ScreenRecorder.record(durationMs)
                 }
                 result to 200
+            }
+
+            method == "POST" && path == "/noise_watch_start" -> {
+                val threshold = body.get("thresholdRms")?.asDouble
+                    ?: NoiseTriggeredVideoService.DEFAULT_THRESHOLD_RMS
+                val clipSeconds = body.get("clipSeconds")?.asInt
+                    ?: NoiseTriggeredVideoService.DEFAULT_CLIP_SECONDS
+                val cooldownSeconds = body.get("cooldownSeconds")?.asInt
+                    ?: NoiseTriggeredVideoService.DEFAULT_COOLDOWN_SECONDS
+                if (threshold !in NoiseTriggeredVideoService.MIN_THRESHOLD_RMS..
+                    NoiseTriggeredVideoService.MAX_THRESHOLD_RMS
+                ) {
+                    return mapOf("error" to "thresholdRms is outside the supported range") to 400
+                }
+                if (clipSeconds !in 1..NoiseTriggeredVideoService.MAX_CLIP_SECONDS) {
+                    return mapOf("error" to "clipSeconds must be between 1 and 30") to 400
+                }
+                if (cooldownSeconds !in 0..NoiseTriggeredVideoService.MAX_COOLDOWN_SECONDS) {
+                    return mapOf("error" to "cooldownSeconds is outside the supported range") to 400
+                }
+                val app = BridgeApplication.instance
+                if (MicrophoneRecordingState.snapshot().isActive) {
+                    return mapOf(
+                        "error" to "A microphone recording is already active",
+                    ) to 409
+                }
+                if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+                    PackageManager.PERMISSION_GRANTED ||
+                    app.checkSelfPermission(Manifest.permission.CAMERA) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    return mapOf(
+                        "error" to "Microphone and camera permissions are required",
+                    ) to 403
+                }
+                runCatching {
+                    NoiseTriggeredVideoService.start(
+                        app,
+                        threshold,
+                        clipSeconds,
+                        cooldownSeconds,
+                    )
+                    mapOf(
+                        "status" to "starting",
+                        "thresholdRms" to threshold,
+                        "clipSeconds" to clipSeconds,
+                        "cooldownSeconds" to cooldownSeconds,
+                    ) to 202
+                }.getOrElse { error ->
+                    NoiseTriggerState.failed("Could not start noise watcher (${error.javaClass.simpleName})")
+                    mapOf(
+                        "error" to "Could not start noise watcher (${error.javaClass.simpleName})",
+                    ) to 500
+                }
+            }
+
+            method == "POST" && path == "/noise_watch_stop" -> {
+                NoiseTriggeredVideoService.stop(BridgeApplication.instance)
+                mapOf("status" to "stopping") to 202
+            }
+
+            method == "GET" && path == "/noise_watch_status" -> {
+                val state = NoiseTriggerState.snapshot()
+                mapOf(
+                    "active" to state.active,
+                    "recording" to state.recording,
+                    "pausingForDialog" to state.pausingForDialog,
+                    "pausedForDialog" to state.pausedForDialog,
+                    "thresholdRms" to state.thresholdRms,
+                    "clipSeconds" to state.clipSeconds,
+                    "cooldownSeconds" to state.cooldownSeconds,
+                    "lastTriggerAt" to state.lastTriggerAtMs,
+                    "count" to NoiseVideoFiles.listCompleted(BridgeApplication.instance).size,
+                    "latest" to NoiseVideoFiles.resolve(BridgeApplication.instance, null)?.name,
+                    "retentionLimit" to NoiseVideoFiles.MAX_COMPLETED_VIDEOS,
+                    "error" to state.error,
+                ) to 200
             }
 
             method == "GET" && path == "/widgets" -> {

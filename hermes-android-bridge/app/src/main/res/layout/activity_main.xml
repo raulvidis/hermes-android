@@ -279,6 +279,30 @@
                 android:track="@drawable/bg_switch_track"
                 android:thumb="@drawable/bg_switch_thumb" />
         </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="10dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Loud sound → rear video"
+                android:textSize="13sp"
+                android:textColor="#CCCCCC"
+                android:fontFamily="monospace" />
+
+            <Switch
+                android:id="@+id/switchNoiseWatch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:track="@drawable/bg_switch_track"
+                android:thumb="@drawable/bg_switch_thumb" />
+        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout
@@ -411,6 +435,18 @@
         android:layout_marginBottom="16dp"
         android:visibility="gone"
         android:textAllCaps="false" />
+
+    <Button
+        android:id="@+id/btnRobotMode"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginBottom="16dp"
+        android:background="@drawable/bg_button_orange"
+        android:text="🤖  ROBOTER-DIALOG"
+        android:textAllCaps="false"
+        android:textColor="#1A1A1A"
+        android:textSize="15sp"
+        android:textStyle="bold" />
 
     <TextView
         android:id="@+id/tvAddress"
