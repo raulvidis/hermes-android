@@ -148,6 +148,7 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 | `android_send_sms` | Send SMS to a phone number |
 | `android_call` | Make a phone call or open dialer |
 | `android_media` | Control media playback (play, pause, next, previous) |
+| `android_macro` | Execute a sequence of android tool calls as ordered steps in one request |
 | `android_send_intent` | Send an Android intent |
 | `android_broadcast` | Send a broadcast intent |
 | `android_clipboard_read` | Read clipboard contents |

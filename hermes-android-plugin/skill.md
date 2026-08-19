@@ -55,8 +55,14 @@ You have these 42 tools. Use them by name — they are function calls.
 - `android_setup(pairing_code)` — start relay and configure connection
 
 ### Reading the Screen
-- `android_read_screen(include_bounds=False)` — get the full accessibility tree as JSON. Returns every visible UI element with text, className, nodeId, clickable, etc. **Always call this before interacting.**
-- `android_screenshot()` — capture a screenshot as base64 PNG. Use when the accessibility tree doesn't show enough (canvas apps, image-heavy UIs).
+
+**Screenshots are NOT for finding UI elements.** Vision-based reading is slow,
+expensive, and unreliable for precise interaction. The accessibility tree gives
+you exact element text, node IDs, and tap targets — always use it first.
+
+- `android_read_screen(include_bounds=False)` — get the full accessibility tree as JSON. Returns every visible UI element with text, className, nodeId, clickable, etc. **Always call this before interacting. This is your default screen-reading tool.**
+- `android_find_nodes(text=..., class_name=..., clickable=True)` — search the accessibility tree for specific elements without pulling the whole tree. Use to locate a known button/field directly.
+- `android_screenshot()` — capture a screenshot as base64 PNG. **Only** for: showing the user what's on screen, verifying visual layout, or apps the accessibility tree can't see (canvas/game rendering). Never use it to search for where to tap — use `android_read_screen`, `android_find_nodes`, or `android_tap_text` instead.
 - `android_current_app()` — get the package name and activity of the foreground app.
 
 ### Opening Apps
@@ -97,9 +103,9 @@ You have these 42 tools. Use them by name — they are function calls.
 ### Workflow pattern
 For any task, follow this pattern and then STOP:
 1. `android_open_app(package)` — open the app
-2. `android_read_screen()` — see what's on screen
-3. 1-3 actions (tap, type, swipe) — do what the user asked
-4. `android_read_screen()` or `android_screenshot()` — verify the result
+2. `android_read_screen()` — see what's on screen (accessibility tree, not a screenshot)
+3. 1-3 actions (tap, type, swipe) — do what the user asked, preferring `android_tap_text` / node IDs from the tree
+4. `android_read_screen()` — verify the result (screenshot only if visual confirmation was requested)
 5. **Report to the user and STOP.** Do not take further actions unless the user asks.
 
 ### Other rules

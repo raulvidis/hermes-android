@@ -34,3 +34,6 @@ hermes-android-bridge/local.properties
 # personal shared standards (symlinks to ../agent-repo-standards)
 .agents/skills
 .agents/AGENTS.base.md
+
+# local agent session state
+.pi/

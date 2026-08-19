@@ -1157,7 +1157,7 @@ _SCHEMAS = {
     },
     "android_screenshot": {
         "name": "android_screenshot",
-        "description": "Take a screenshot of the current Android screen. Returns base64 PNG. Use when the accessibility tree is missing context or the screen uses canvas/game rendering.",
+        "description": "Take a screenshot of the current Android screen. Returns base64 PNG. Do NOT use this to find UI elements — call android_read_screen or android_find_nodes first to get exact element text and node IDs. Use screenshots only to show the user the screen, verify visual layout, or when the screen uses canvas/game rendering that the accessibility tree cannot read.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     "android_scroll": {
