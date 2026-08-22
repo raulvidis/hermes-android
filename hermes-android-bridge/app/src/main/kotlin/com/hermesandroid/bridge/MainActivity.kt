@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var switchAccessibility: Switch
     private lateinit var switchOverlay: Switch
     private lateinit var switchScreenRecord: Switch
+    private lateinit var switchRevival: Switch
     private lateinit var tvPairingCode: TextView
     private lateinit var btnRegenerate: Button
     private lateinit var etServerUrl: EditText
@@ -63,6 +64,7 @@ class MainActivity : Activity() {
         switchAccessibility = findViewById(R.id.switchAccessibility)
         switchOverlay = findViewById(R.id.switchOverlay)
         switchScreenRecord = findViewById(R.id.switchScreenRecord)
+        switchRevival = findViewById(R.id.switchRevival)
         tvPairingCode = findViewById(R.id.tvPairingCode)
         btnRegenerate = findViewById(R.id.btnRegenerate)
         etServerUrl = findViewById(R.id.etServerUrl)
@@ -158,16 +160,32 @@ class MainActivity : Activity() {
                 }
             }
         }
+
+        // Opt-in for the Termux auto-revival watchdog (RUN_COMMAND).
+        // Default OFF — silent script execution must be explicitly enabled.
+        switchRevival.setOnCheckedChangeListener { _, isChecked ->
+            getSharedPreferences("hermes_bridge_prefs", MODE_PRIVATE)
+                .edit().putBoolean("termux_revival_enabled", isChecked).apply()
+            Toast.makeText(
+                this,
+                if (isChecked) "Termux auto-revival ON" else "Termux auto-revival OFF",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     private fun updatePermissionSwitches() {
         switchAccessibility.setOnCheckedChangeListener(null)
         switchOverlay.setOnCheckedChangeListener(null)
         switchScreenRecord.setOnCheckedChangeListener(null)
+        switchRevival.setOnCheckedChangeListener(null)
 
         switchAccessibility.isChecked = BridgeAccessibilityService.instance != null
         switchOverlay.isChecked = Settings.canDrawOverlays(this)
         switchScreenRecord.isChecked = ScreenRecorder.hasPermission()
+        switchRevival.isChecked =
+            getSharedPreferences("hermes_bridge_prefs", MODE_PRIVATE)
+                .getBoolean("termux_revival_enabled", false)
 
         setupPermissions()
     }
