@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-android"
-version = "0.4.1"
+version = "0.5.0"
 description = "Android device control toolset for hermes-agent"
 license = { text = "MIT" }
 classifiers = [

@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-05
+
 ### Added
 - Termux auto-revival watchdog (#100): after repeated relay failures, an **opt-in** (default OFF) switch fires the Termux `RUN_COMMAND` intent to restart the stack, then schedules a delayed reconnect. Pure `RevivalPolicy` gate/counter/cooldown logic with unit tests; `SecurityException` surfaces visibly instead of being swallowed.
 - `include_removed` option on `android_notifications` (#100): dismissed notifications are retained on-device but excluded by default — callers must opt in explicitly to read notifications the user has cleared.

@@ -34,7 +34,7 @@ mkdir -p ~/.hermes/plugins
 cp -r hermes-android-plugin ~/.hermes/plugins/hermes-android
 ```
 
-Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.4.1 (42 tools)`
+Restart hermes — run `/plugins` to verify. Should show: `✓ hermes-android v0.5.0 (42 tools)`
 
 ## Quick Start
 
