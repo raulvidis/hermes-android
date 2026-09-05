@@ -223,42 +223,30 @@ cd hermes-android-bridge
 
 This is a working prototype. The vision: **give Hermes its own phone** — a fully autonomous mobile presence.
 
-### v0.2 — Polish & Reliability
-- [ ] TLS/WSS support for encrypted phone-server communication
-- [ ] Persistent relay service (systemd unit, auto-start with gateway)
-- [ ] Server-side call counter to prevent tool call loops
-- [ ] Better error reporting (screenshot + annotated explanation on failure)
-- [ ] Auto-reconnect relay on gateway restart
+Shipped milestones live in the [CHANGELOG](CHANGELOG.md) — notifications, clipboard,
+direct SMS/calls, location, microphone recording, screen-wake key, text-to-speech,
+and a persistent systemd relay are all in. What's still ahead:
 
-### v0.3 — Richer Phone Interaction
-- [x] **Notification listener** — agent reads incoming notifications in real-time
-- [x] **Clipboard bridge** — copy/paste between server and phone
-- [ ] **File transfer** — send files/photos between phone and server
-- [x] **Direct SMS/calls** — send texts and make calls without navigating the UI
-- [x] **Location sharing** — agent knows where the phone is for contextual tasks
-
-### v0.4 — Multi-Device & Automation
-- [ ] **Multiple phones** — connect more than one device to the same relay
-- [ ] **Scheduled automations** — "every morning, check my commute price on Bolt"
-- [ ] **Event triggers** — "when a notification arrives from this app, do X"
-- [ ] **Macro recording** — watch a workflow once, replay it on demand
-
-### v0.5 — Hermes Gets a Voice
-- [ ] **Phone call capability** — agent can answer and speak in phone calls using TTS/STT
-- [ ] **Voice assistant mode** — always-listening on the phone, responds via speaker
-- [ ] **Call handling** — "answer my phone, take a message, tell them I'll call back"
-
-### v0.6 — On-Device Intelligence
-- [ ] **Local model execution** — run small models (Qwen 0.5B, Gemma 2B) directly on the phone
-- [ ] **Offline fallback** — basic commands work without server connection using on-device model
-- [ ] **Hybrid routing** — simple tasks run locally, complex tasks go to the server
-- [ ] **On-device app adapters** — fast structured parsing without round-tripping to server
-
-### Future Ideas
-- [ ] iOS support via Shortcuts/accessibility bridge
-- [ ] Web dashboard for monitoring phone activity
-- [ ] Cross-app workflows ("find a restaurant on Maps, share on WhatsApp, book an Uber there")
-- [ ] Dedicated "Hermes Phone" — a phone that boots straight into agent mode
+### Upcoming
+- TLS/WSS support for encrypted phone↔server communication
+- Server-side call counter to prevent tool call loops
+- Better error reporting (screenshot + annotated explanation on failure)
+- File transfer — send files/photos between phone and server
+- Multiple phones — connect more than one device to the same relay
+- Scheduled automations — "every morning, check my commute price on Bolt"
+- Event triggers — "when a notification arrives from this app, do X"
+- Macro recording — watch a workflow once, replay it on demand
+- Phone call capability — answer and speak in calls using TTS/STT
+- Voice assistant mode — always-listening on the phone, responds via speaker
+- Call handling — answer, take a message, relay a callback
+- Local model execution — run small models (Qwen 0.5B, Gemma 2B) on-device
+- Offline fallback — basic commands work without server using an on-device model
+- Hybrid routing — simple tasks locally, complex tasks to the server
+- On-device app adapters — fast structured parsing without server round-trips
+- iOS support via Shortcuts/accessibility bridge
+- Web dashboard for monitoring phone activity
+- Cross-app workflows — "find a restaurant on Maps, share on WhatsApp, book an Uber there"
+- Dedicated "Hermes Phone" — a phone that boots straight into agent mode
 
 ## Links
 

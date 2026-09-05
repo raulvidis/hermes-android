@@ -12,29 +12,23 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Notification buffer raised from 100 to 300 entries (#100).
 - `android_press_key("wake")` turns the screen on via a short auto-releasing wake lock. `power` is unchanged and still opens the long-press power dialog (#101).
 - `android_*` tools fall back to reading `ANDROID_BRIDGE_URL`/`ANDROID_BRIDGE_TOKEN` from `~/.hermes/.env` when the gateway process does not export them (`os.environ` still takes precedence) (#101).
+- Four microphone tools (`android_mic_record`, `android_mic_stop`, `android_mic_status`, `android_mic_fetch`) with relay-routed binary WAV streaming and `MEDIA:` delivery.
+- Recorder state reporting and atomic `.part` → `.wav` finalization so interrupted recordings are never advertised as complete.
+- Keep-last-10 retention for completed WAV recordings.
 
 ### Fixed
 - Mic recorder state machine can no longer stick at `starting` after an early STOP or service destruction — `/mic_start` returned 409 until app restart before (#98).
 - Plugin now registers the android usage skill via `ctx.register_skill()`, so agents discover the accessibility-tree-first guidance instead of defaulting to screenshot + vision. Screenshot tool description defers to `android_read_screen`/`android_find_nodes`.
+- Use one canonical microphone directory for recording, status, and download.
+- Use the on-device-tested `VOICE_RECOGNITION` source with saturating 2.5x PCM gain and stop the recorder service after a STOP command.
+- Register microphone routes, schemas, and handlers in both the standalone toolset and installable plugin.
+- Replace deprecated aiohttp bare route handlers and add end-to-end binary-stream regression coverage.
 
 ### Security
 - `android_mic_fetch` connection errors no longer echo the bridge host:port from `requests` exception text (#99).
 - Regression coverage for the security-critical mic paths (#99): `MicrophoneRecordingFiles.resolve()` traversal/symlink defense, relay binary-stream negative paths (checksum/length/oversize/disconnect), and the 30-minute sample cap.
-
-### Added
-- four microphone tools (`android_mic_record`, `android_mic_stop`, `android_mic_status`, `android_mic_fetch`) with relay-routed binary WAV streaming and `MEDIA:` delivery
-- recorder state reporting and atomic `.part` → `.wav` finalization so interrupted recordings are never advertised as complete
-- keep-last-10 retention for completed WAV recordings
-
-### Security
-- remove device-specific connection details and legacy SCP instructions from microphone tooling
-- stop logging notification content and pairing-token prefixes, including in debug builds
-
-### Fixed
-- use one canonical microphone directory for recording, status, and download
-- use the on-device-tested `VOICE_RECOGNITION` source with saturating 2.5x PCM gain and stop the recorder service after a STOP command
-- register microphone routes, schemas, and handlers in both the standalone toolset and installable plugin
-- replace deprecated aiohttp bare route handlers and add end-to-end binary-stream regression coverage
+- Remove device-specific connection details and legacy SCP instructions from microphone tooling.
+- Stop logging notification content and pairing-token prefixes, including in debug builds.
 
 ## [0.4.1] - 2026-08-09
 
@@ -99,5 +93,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 - recycle AccessibilityWindowInfo in findNodeById and readWidgets (#31)
 - recycle AccessibilityWindowInfo in ScreenReader (#32)
 
-[Unreleased]: https://github.com/raulvidis/hermes-android/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/raulvidis/hermes-android/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/raulvidis/hermes-android/releases/tag/v0.5.0
+[0.4.1]: https://github.com/raulvidis/hermes-android/releases/tag/v0.4.1
+[0.4.0]: https://github.com/raulvidis/hermes-android/releases/tag/v0.4.0
 [0.3.0]: https://github.com/raulvidis/hermes-android/releases/tag/v0.3.0

@@ -67,7 +67,7 @@ Required permissions: `ACCESSIBILITY_SERVICE`, `SYSTEM_ALERT_WINDOW`, `INTERNET`
 aiohttp server in a background daemon thread, started by `android_setup()`.
 
 - `/ws` (WebSocket) — phone connects with a Bearer authorization header.
-- `/ping`, `/screen`, `/screenshot`, `/apps`, `/current_app` (GET); `/tap`, `/tap_text`, `/type`, `/swipe`, `/open_app`, `/press_key`, `/scroll`, `/wait` (POST).
+- HTTP bridge endpoints (method per path) — GET: `/ping`, `/screen`, `/screenshot`, `/apps`, `/current_app`, `/notifications`, `/contacts`, `/events`, `/screen_hash`, `/location`, `/widgets`, `/mic_status`, `/mic_file`. POST: `/tap`, `/tap_text`, `/type`, `/swipe`, `/open_app`, `/press_key`, `/scroll`, `/wait`, `/long_press`, `/drag`, `/describe_node`, `/find_nodes`, `/diff_screen`, `/pinch`, `/send_sms`, `/call`, `/media`, `/intent`, `/broadcast`, `/speak`, `/stop_speaking`, `/screen_record`, `/events/stream`, `/mic_start`, `/mic_stop`. Both: `/clipboard`.
 - Auth: pairing code case-sensitive (exact compare, see #43). 5 failed attempts / 60s → IP blocked 5 min. Only one phone connected at a time.
 
 ## Tools
