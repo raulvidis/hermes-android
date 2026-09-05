@@ -1,39 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-*.egg
-.pytest_cache/
-
-# Virtual environments
-venv/
-.venv/
-
-# IDE
-.idea/
-.vscode/
-*.iml
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Android build outputs
-hermes-android-bridge/app/build/
-hermes-android-bridge/build/
-hermes-android-bridge/.gradle/
-hermes-android-bridge/local.properties
-
-# Environment
-.env
-*.env.local
-
-# personal shared standards (symlinks to ../agent-repo-standards)
-.agents/skills
-.agents/AGENTS.base.md
-
-# local agent session state
-.pi/
+# CORE-OS artifacts — NEVER commit these (personal manifests, state, secrets)
+00_PROJECT_MANIFEST.md
+CORE-OS/
+*.env
+*_MANIFEST.md

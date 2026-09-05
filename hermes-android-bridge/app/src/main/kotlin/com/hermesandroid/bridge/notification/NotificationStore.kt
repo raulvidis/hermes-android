@@ -15,7 +15,8 @@ data class NotificationEntry(
     val category: String?,
     val timestamp: Long,
     val isOngoing: Boolean,
-    val isClearable: Boolean
+    val isClearable: Boolean,
+    val removedAt: Long? = null
 )
 
 object NotificationStore {
@@ -53,7 +54,22 @@ object NotificationStore {
 
     fun markRemoved(key: String) {
         synchronized(lock) {
-            notifications.removeIf { it.key == key }
+            val now = System.currentTimeMillis()
+            val idx = notifications.indexOfFirst { it.key == key }
+            if (idx >= 0) {
+                // Keep the entry (flagged as removed) so the PA can log it
+                // AFTER the user has read/cleared it — the old behaviour
+                // deleted it instantly and the 2-min poll missed the event.
+                val e = notifications[idx]
+                notifications[idx] = e.copy(removedAt = now)
+            }
+        }
+    }
+
+    /** Active (not removed) entries — the current shade. */
+    fun getActive(limit: Int = 50): List<NotificationEntry> {
+        synchronized(lock) {
+            return notifications.filter { it.removedAt == null }.take(limit)
         }
     }
 

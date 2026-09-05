@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Removed
+- Offline Mode (full) toggle — the on-device Lighter Zee brain was retired
+  (2026-09-03, cloud-only decision). Deleted `OfflineToggler.kt`, the dashboard
+  switch and its state wiring, and the layout rows (portrait + landscape).
+  **v0.4.2** — redo after the offline brain removal so the app no longer promises
+  a mode that doesn't exist.
+
 ### Added
 - `android_press_key("wake")` turns the screen on via a short auto-releasing wake lock. `power` is unchanged and still opens the long-press power dialog (#101).
 - `android_*` tools fall back to reading `ANDROID_BRIDGE_URL`/`ANDROID_BRIDGE_TOKEN` from `~/.hermes/.env` when the gateway process does not export them (`os.environ` still takes precedence) (#101).

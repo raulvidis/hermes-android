@@ -23,7 +23,7 @@ class BridgeNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         instance = this
-        NotificationStore.maxCapacity = 100
+        NotificationStore.maxCapacity = 300
         Log.i(TAG, "Notification listener connected")
     }
 
