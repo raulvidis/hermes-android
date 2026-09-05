@@ -373,15 +373,17 @@ def android_clipboard_write(text: str) -> str:
         return json.dumps({"error": str(e)})
 
 
-def android_notifications(limit: int = 50, since: int = 0) -> str:
+def android_notifications(limit: int = 50, since: int = 0, include_removed: bool = False) -> str:
     """
     Read recent notifications from the Android device.
     Requires notification listener permission to be enabled.
     Returns list of notifications with package, title, text, and timestamp.
     Use since (unix ms) to get only notifications after a given time.
+    Dismissed notifications are excluded unless include_removed=true.
     """
     try:
-        data = _get(f"/notifications?limit={limit}&since={since}")
+        removed_param = "&include_removed=true" if include_removed else ""
+        data = _get(f"/notifications?limit={limit}&since={since}{removed_param}")
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -1224,6 +1226,11 @@ _SCHEMAS = {
                     "type": "integer",
                     "description": "Only return notifications after this Unix timestamp in milliseconds (default 0 = all)",
                     "default": 0,
+                },
+                "include_removed": {
+                    "type": "boolean",
+                    "description": "Include notifications the user has dismissed/cleared (default false). Opt-in because cleared notifications may contain content the user has already acted on.",
+                    "default": False,
                 },
             },
             "required": [],

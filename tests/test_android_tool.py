@@ -511,6 +511,24 @@ class TestNotifications:
         assert result["count"] == 0
 
     @responses.activate
+    def test_notifications_include_removed_is_opt_in(self, bridge_url):
+        """#100 follow-up: dismissed notifications only reach the wire on
+        explicit opt-in — the default request must not ask for them."""
+        captured = {}
+
+        def cb(request):
+            captured["url"] = request.url
+            return (200, {}, json.dumps({"notifications": [], "count": 0, "listenerActive": True}))
+
+        responses.add_callback(responses.GET, f"{bridge_url}/notifications", callback=cb)
+
+        json.loads(android_notifications())
+        assert "include_removed" not in captured["url"]
+
+        json.loads(android_notifications(include_removed=True))
+        assert "include_removed=true" in captured["url"]
+
+    @responses.activate
     def test_notifications_listener_inactive(self, bridge_url):
         responses.add(
             responses.GET,

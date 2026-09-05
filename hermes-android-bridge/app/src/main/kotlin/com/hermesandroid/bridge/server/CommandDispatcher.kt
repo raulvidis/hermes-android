@@ -174,10 +174,15 @@ object CommandDispatcher {
             method == "GET" && path == "/notifications" -> {
                 val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
                 val since = params.get("since")?.asString?.toLongOrNull() ?: 0L
+                // Dismissed notifications are retained on-device but only
+                // served on explicit opt-in — cleared notifications can hold
+                // PII the user has already dealt with (#100 follow-up).
+                val includeRemoved = params.get("include_removed")?.asString
+                    ?.equals("true", ignoreCase = true) == true
                 val entries = if (since > 0) {
-                    NotificationStore.getSince(since, limit)
+                    NotificationStore.getSince(since, limit, includeRemoved)
                 } else {
-                    NotificationStore.getAll(limit)
+                    NotificationStore.getAll(limit, includeRemoved)
                 }
                 val mapped = entries.map { NotificationStore.toMap(it) }
                 val listenerRunning = BridgeNotificationListener.instance != null

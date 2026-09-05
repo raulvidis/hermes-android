@@ -34,15 +34,19 @@ object NotificationStore {
         }
     }
 
-    fun getAll(limit: Int = 50): List<NotificationEntry> {
+    fun getAll(limit: Int = 50, includeRemoved: Boolean = false): List<NotificationEntry> {
         synchronized(lock) {
-            return notifications.take(limit)
+            val source = if (includeRemoved) notifications
+                else notifications.filter { it.removedAt == null }
+            return source.take(limit)
         }
     }
 
-    fun getSince(sinceTimestamp: Long, limit: Int = 50): List<NotificationEntry> {
+    fun getSince(sinceTimestamp: Long, limit: Int = 50, includeRemoved: Boolean = false): List<NotificationEntry> {
         synchronized(lock) {
-            return notifications.filter { it.timestamp > sinceTimestamp }.take(limit)
+            return notifications
+                .filter { it.timestamp > sinceTimestamp && (includeRemoved || it.removedAt == null) }
+                .take(limit)
         }
     }
 
@@ -103,7 +107,7 @@ object NotificationStore {
     }
 
     fun toMap(entry: NotificationEntry): Map<String, Any?> {
-        return mapOf(
+        val map = mutableMapOf<String, Any?>(
             "key" to entry.key,
             "packageName" to entry.packageName,
             "title" to entry.title,
@@ -116,5 +120,10 @@ object NotificationStore {
             "isOngoing" to entry.isOngoing,
             "isClearable" to entry.isClearable
         )
+        // Only surfaced when removed entries were explicitly requested.
+        if (entry.removedAt != null) {
+            map["removedAt"] = entry.removedAt
+        }
+        return map
     }
 }
