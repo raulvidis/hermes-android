@@ -160,6 +160,25 @@ object CommandDispatcher {
                 result to 200
             }
 
+            method == "GET" && path == "/battery" -> {
+                // Language-independent battery level: AccessibilityService.getBatteryPercentage()
+                // (API 31+) returns the system value directly — no status-bar text parsing.
+                // OEM text formats differ by language and skin ("电量剩余 53。",
+                // "電池電量為百分之 87。", "87%", ...) and any sample-based parser mis-reads.
+                val service = BridgeAccessibilityService.instance
+                    ?: return mapOf("error" to "Accessibility service not running") to 503
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) {
+                    return mapOf("error" to "Requires Android 12 (API 31)") to 501
+                }
+                val result = mutableMapOf<String, Any>("batteryPercentage" to service.batteryPercentage)
+                // chargerConnected needs ConfigurationConstants (API 33+)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    result["chargerConnected"] =
+                        service.resources.configuration.constants?.chargerConnected ?: false
+                }
+                result to 200
+            }
+
             method == "GET" && path == "/clipboard" -> {
                 val result = ActionExecutor.clipboardRead()
                 result to 200
