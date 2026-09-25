@@ -5,6 +5,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -32,12 +33,12 @@ class MicrophoneRecordingFilesResolveTest {
 
     @Before
     fun cleanDirectory() {
-        directory.listFiles()?.forEach { it.delete() }
+        directory.listFiles()?.forEach { it.deleteRecursively() }
     }
 
     @After
     fun tearDown() {
-        directory.listFiles()?.forEach { it.delete() }
+        directory.listFiles()?.forEach { it.deleteRecursively() }
     }
 
     private fun createRecording(name: String, lastModified: Long): File =
@@ -115,6 +116,59 @@ class MicrophoneRecordingFilesResolveTest {
         Files.createSymbolicLink(link.toPath(), outside.toPath())
 
         assertNull(MicrophoneRecordingFiles.resolve(context, "evil.wav"))
+    }
+
+    @Test
+    fun `symlink with a generated-looking name escaping the directory is rejected`() {
+        // The name passes the regex and is a plain basename, so only the
+        // canonical-path parent check stands between it and the target.
+        val outsideDir = File(context.cacheDir, "elsewhere").apply { mkdirs() }
+        val outside = File(outsideDir, "recording_20260102_120000_000.wav").apply { writeText("secret") }
+        val link = File(directory, "recording_20260102_120000_000.wav")
+        Files.createSymbolicLink(link.toPath(), outside.toPath())
+
+        assertNull(MicrophoneRecordingFiles.resolve(context, "recording_20260102_120000_000.wav"))
+    }
+
+    @Test
+    fun `symlink into a subdirectory of the recordings directory is rejected`() {
+        val nested = File(directory, "nested").apply { mkdirs() }
+        val target = createRecording("recording_20260102_120000_000.wav", 1_000L)
+        val moved = File(nested, target.name)
+        assertTrue(target.renameTo(moved))
+        val link = File(directory, "nested_alias.wav")
+        Files.createSymbolicLink(link.toPath(), moved.toPath())
+
+        assertNull(MicrophoneRecordingFiles.resolve(context, "nested_alias.wav"))
+        moved.delete()
+    }
+
+    @Test
+    fun `symlink to an incomplete part file is rejected`() {
+        // Canonical name ends in .wav.part, so the post-canonicalization name
+        // check must refuse it even though the requested name is valid.
+        val part = File(directory, "recording_20260102_120000_000.wav.part").apply { writeText("partial") }
+        val link = File(directory, "sneaky.wav")
+        Files.createSymbolicLink(link.toPath(), part.toPath())
+
+        assertNull(MicrophoneRecordingFiles.resolve(context, "sneaky.wav"))
+    }
+
+    @Test
+    fun `directory with a wav name is rejected`() {
+        File(directory, "folder.wav").mkdirs()
+
+        assertNull(MicrophoneRecordingFiles.resolve(context, "folder.wav"))
+    }
+
+    @Test
+    fun `dot-prefixed names that pass the regex do not traverse`() {
+        // "..wav" and "...wav" match the safe alphabet but are literal
+        // basenames, never parent references.
+        File(context.cacheDir, "x.wav").writeText("outside")
+
+        assertNull(MicrophoneRecordingFiles.resolve(context, "..wav"))
+        assertNull(MicrophoneRecordingFiles.resolve(context, "...wav"))
     }
 
     @Test
