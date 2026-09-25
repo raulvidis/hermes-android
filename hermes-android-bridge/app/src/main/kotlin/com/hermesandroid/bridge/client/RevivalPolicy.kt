@@ -32,7 +32,12 @@ class RevivalPolicy(
         val next = failures + 1
         if (next < failuresToTrigger) return Decision.Wait(next)
         // Reached the threshold, but the cooldown bounds re-firing.
-        if (nowMs - lastFireMs < cooldownMs) return Decision.Wait(next)
+        // Use a signed elapsed value: if lastFireMs is in the FUTURE relative to
+        // now (wall clock corrected backwards after the last fire), sinceLast is
+        // negative and must be treated as "cooldown elapsed" so the watchdog is
+        // not wedged shut until the bogus future timestamp passes.
+        val sinceLast = nowMs - lastFireMs
+        if (sinceLast in 0 until cooldownMs) return Decision.Wait(next)
         return Decision.Fire
     }
 }
