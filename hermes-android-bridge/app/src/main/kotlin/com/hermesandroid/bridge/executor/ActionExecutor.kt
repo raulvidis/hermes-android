@@ -21,6 +21,9 @@ import com.hermesandroid.bridge.power.WakeLockManager
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
@@ -1084,19 +1087,56 @@ object ActionExecutor {
 
     @Volatile private var tts: android.speech.tts.TextToSpeech? = null
     @Volatile private var ttsReady = false
+    /** Wall-clock time of the last failed init, or 0 if the last init did not fail. */
+    @Volatile private var ttsFailedAt = 0L
+    /** Serialises ensureTts so concurrent /speak calls cannot each create an engine. */
+    private val ttsMutex = Mutex()
+    private const val TTS_INIT_TIMEOUT_MS = 10_000L
+    /**
+     * After a failed init, don't try again for this long. On a device with no
+     * TTS engine every attempt fails, and without a backoff each /speak call
+     * would bind (and leak) a fresh TextToSpeech instance.
+     */
+    private const val TTS_RETRY_BACKOFF_MS = 60_000L
 
-    private suspend fun ensureTts(): Boolean {
-        val service = BridgeAccessibilityService.instance ?: return false
-        if (tts == null || !ttsReady) {
-            ttsReady = suspendCancellableCoroutine { cont ->
-                tts = android.speech.tts.TextToSpeech(service.applicationContext, android.speech.tts.TextToSpeech.OnInitListener { status ->
-                    val ready = status == android.speech.tts.TextToSpeech.SUCCESS
-                    ttsReady = ready
-                    cont.resume(ready)
-                })
-            }
+    private suspend fun ensureTts(): Boolean = ttsMutex.withLock {
+        if (tts != null && ttsReady) return@withLock true
+        val failedAt = ttsFailedAt
+        if (failedAt != 0L && System.currentTimeMillis() - failedAt < TTS_RETRY_BACKOFF_MS) {
+            return@withLock false
         }
-        return ttsReady
+        val service = BridgeAccessibilityService.instance ?: return@withLock false
+
+        // Discard any instance left over from an earlier, unfinished init.
+        tts?.shutdown()
+        tts = null
+        ttsReady = false
+
+        var created: android.speech.tts.TextToSpeech? = null
+        val ready = withTimeoutOrNull(TTS_INIT_TIMEOUT_MS) {
+            suspendCancellableCoroutine<Boolean> { cont ->
+                created = android.speech.tts.TextToSpeech(
+                    service.applicationContext,
+                    android.speech.tts.TextToSpeech.OnInitListener { status ->
+                        // May fire after a timeout has already cancelled us.
+                        if (cont.isActive) cont.resume(status == android.speech.tts.TextToSpeech.SUCCESS)
+                    }
+                )
+            }
+        } ?: false
+
+        val instance = created
+        if (ready && instance != null) {
+            tts = instance
+            ttsReady = true
+            ttsFailedAt = 0L
+            true
+        } else {
+            // A failed (or timed-out) engine still holds a service binding.
+            try { instance?.shutdown() } catch (_: Exception) {}
+            ttsFailedAt = System.currentTimeMillis()
+            false
+        }
     }
 
     suspend fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult {
@@ -1116,6 +1156,7 @@ object ActionExecutor {
         tts?.shutdown()
         tts = null
         ttsReady = false
+        ttsFailedAt = 0L
     }
 
     private fun Context.hasSelfPermission(permission: String): Boolean {
