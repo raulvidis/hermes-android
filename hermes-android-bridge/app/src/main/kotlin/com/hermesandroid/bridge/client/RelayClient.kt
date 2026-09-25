@@ -2,6 +2,7 @@ package com.hermesandroid.bridge.client
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import android.util.Log
 import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.BuildConfig
@@ -36,12 +37,24 @@ object RelayClient {
     // --- Termux revival watchdog ---
     // When the relay is unreachable past these thresholds, fire the
     // Termux RUN_COMMAND intent to restart the whole stack (start-zee.sh).
-    private const val WATCHDOG_FAILURES_TO_TRIGGER = 3
+    const val WATCHDOG_FAILURES_TO_TRIGGER = 3
     private const val WATCHDOG_COOLDOWN_MS = 600_000L  // 10 min
+    // With revival enabled, once a full retry cycle is exhausted we do NOT give
+    // up: we wait this long, then start a fresh cycle. Each exhausted cycle
+    // counts as one watchdog failure, so the trigger threshold is actually
+    // reachable on an unattended device.
+    private const val WATCHDOG_RECONNECT_INTERVAL_MS = 60_000L  // 60s
     private val revivalPolicy = RevivalPolicy(WATCHDOG_FAILURES_TO_TRIGGER, WATCHDOG_COOLDOWN_MS)
     private const val KEY_FAILURES = "watchdog_failures"
     private const val KEY_LAST_FIRE = "watchdog_last_fire_ms"
     private const val KEY_REVIVAL_ENABLED = "termux_revival_enabled"
+
+    /** Accurate guidance shown when the Termux revival intent is rejected. Both
+     *  steps are required: the app-info permission AND allow-external-apps. */
+    const val REVIVAL_PERMISSION_HELP =
+        "Revival blocked: grant \"Run commands in Termux environment\" to Hermes " +
+            "Bridge in App info, and set allow-external-apps=true in " +
+            "~/.termux/termux.properties"
 
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
@@ -131,7 +144,7 @@ object RelayClient {
         val url = serverUrl
         val code = pairingCode
         if (!url.isNullOrBlank() && !code.isNullOrBlank()) {
-            Log.i(TAG, "Auto-connecting to $url")
+            if (BuildConfig.DEBUG) Log.i(TAG, "Auto-connecting to $url")
             connect(url, code)
         }
     }
@@ -139,8 +152,15 @@ object RelayClient {
     private fun doConnect(serverUrl: String, pairingCode: String) {
         val myGeneration = ++generation
         val wsUrl = buildWsUrl(serverUrl)
-        Log.i(TAG, "Connecting to $wsUrl")
+        if (BuildConfig.DEBUG) Log.i(TAG, "Connecting to $wsUrl")
         notifyStatus(false, "Connecting to $wsUrl ...")
+
+        // Warn (once per connect) when the token would travel over an
+        // unencrypted socket to a NON-private host — LAN/dev over ws:// is fine,
+        // but ws:// to a public host leaks the Bearer token in cleartext.
+        if (classifyConnectionSecurity(wsUrl) == ConnectionSecurity.CLEARTEXT_PUBLIC) {
+            notifyStatus(false, "Warning: unencrypted connection — use wss://")
+        }
 
         // Token goes in the Authorization header, not the URL — query strings
         // end up verbatim in reverse-proxy access logs.
@@ -152,109 +172,182 @@ object RelayClient {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
 
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (myGeneration != generation) {
-                    webSocket.cancel()
-                    return
-                }
-                Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
-                isConnected = true
-                // success resets the revival watchdog
-                prefs?.edit()?.putInt(KEY_FAILURES, 0)?.apply()
-                // NOT a policy reset: the budget is only refilled once this
-                // session proves stable (see endSession), so a relay that
-                // accepts and instantly drops us can't retry forever.
-                sessionStartedNs = System.nanoTime()
-                try {
-                    BridgeAccessibilityService.instance?.startForeground()
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "Could not promote bridge service to foreground", e)
-                }
-                notifyStatus(true, "Connected to $serverUrl")
+                handleOpen(webSocket, myGeneration, serverUrl)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                // Drop messages from a retired socket: a late frame from a
+                // superseded generation must not be dispatched as a command.
+                if (myGeneration != generation) return
                 scope?.launch {
+                    if (myGeneration != generation) return@launch
                     handleMessage(webSocket, text)
                 }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "WebSocket closing: $code $reason")
+                if (BuildConfig.DEBUG) Log.i(TAG, "WebSocket closing: $code $reason")
                 webSocket.close(1000, null)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (myGeneration != generation) return
-                Log.i(TAG, "WebSocket closed: $code $reason")
-                isConnected = false
-                endSession()
-                notifyStatus(false, "Closed: code=$code $reason")
-                scheduleReconnect()
+                handleClosed(myGeneration, code, reason)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (myGeneration != generation) return
-                val httpCode = response?.code ?: 0
-                val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
-                Log.e(TAG, "WebSocket failure: $errorDetail", t)
-                isConnected = false
-                endSession()
-                notifyStatus(false, errorDetail)
-                scheduleReconnect()
+                handleFailure(myGeneration, t, response)
             }
         })
+    }
+
+    // The generation check and the state it guards (isConnected, session clock,
+    // foreground promotion) must be one atomic step under the same monitor as
+    // disconnect()/scheduleReconnect(): otherwise a late onOpen from a retired
+    // socket can flip isConnected back to true AFTER disconnect() ran, leaving
+    // the service "connected" with no socket and the foreground stuck on.
+    @Synchronized
+    private fun handleOpen(sock: WebSocket, myGeneration: Int, serverUrl: String) {
+        if (myGeneration != generation) {
+            sock.cancel()
+            return
+        }
+        if (BuildConfig.DEBUG) Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
+        isConnected = true
+        // success resets the revival watchdog
+        prefs?.edit()?.putInt(KEY_FAILURES, 0)?.apply()
+        // NOT a policy reset: the budget is only refilled once this
+        // session proves stable (see endSession), so a relay that
+        // accepts and instantly drops us can't retry forever.
+        sessionStartedNs = System.nanoTime()
+        try {
+            BridgeAccessibilityService.instance?.startForeground()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Could not promote bridge service to foreground", e)
+        }
+        notifyStatus(true, "Connected to $serverUrl")
+    }
+
+    @Synchronized
+    private fun handleClosed(myGeneration: Int, code: Int, reason: String) {
+        if (myGeneration != generation) return
+        if (BuildConfig.DEBUG) Log.i(TAG, "WebSocket closed: $code $reason")
+        isConnected = false
+        endSession()
+        notifyStatus(false, "Closed: code=$code $reason")
+        scheduleReconnect()
+    }
+
+    @Synchronized
+    private fun handleFailure(myGeneration: Int, t: Throwable, response: Response?) {
+        if (myGeneration != generation) return
+        val httpCode = response?.code ?: 0
+        val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
+        Log.e(TAG, "WebSocket failure: $errorDetail", t)
+        isConnected = false
+        endSession()
+        notifyStatus(false, errorDetail)
+        scheduleReconnect()
     }
 
     // Invoked from OkHttp callback threads; the policy and the pending flag are
     // read-modify-written together, so serialize the whole decision.
     @Synchronized
     private fun scheduleReconnect() {
-        if (!shouldReconnect) return
         val url = serverUrl ?: return
         val code = pairingCode ?: return
         // Resolve the scope BEFORE burning budget or raising reconnectPending:
         // a late callback after disconnect() finds a null scope, and committing
         // that state with no coroutine to clear it would stall reconnects for good.
-        val activeScope = scope ?: return
+        val activeScope = scope
+        when (decideReconnect(
+            shouldReconnect = shouldReconnect,
+            hasScope = activeScope != null,
+            reconnectPending = reconnectPending,
+            isExhausted = reconnectPolicy.isExhausted,
+        )) {
+            // Not reconnecting, or another callback already scheduled the attempt.
+            ReconnectAction.IGNORE, ReconnectAction.SKIP_PENDING -> return
 
-        // onClosed and onFailure can both fire for one dead socket; only one of
-        // them should turn into an attempt. This must come BEFORE the exhausted
-        // check: otherwise the second callback sees the budget the first one
-        // just spent and declares failure while that final attempt is still
-        // waiting out its backoff, silently skipping the last retry.
-        if (reconnectPending) return
+            // The retry budget for this cycle is spent.
+            ReconnectAction.EXHAUSTED -> onCycleExhausted(activeScope!!, url, code)
 
-        // Each failed attempt fires onFailure/onClosed, which lands back here.
-        // Bail out once the shared attempt budget is spent — otherwise an
-        // unreachable address reconnects forever.
-        if (reconnectPolicy.isExhausted) {
+            ReconnectAction.ATTEMPT -> {
+                reconnectPending = true
+                val backoff = reconnectPolicy.nextBackoffMs()
+                val attempt = reconnectPolicy.attempts
+                reconnectJob = activeScope!!.launch {
+                    if (BuildConfig.DEBUG) {
+                        Log.i(TAG, "Reconnecting in ${backoff}ms... (attempt $attempt/${reconnectPolicy.limit})")
+                    }
+                    notifyStatus(false, "Reconnecting in ${backoff / 1000}s... (attempt $attempt/${reconnectPolicy.limit})")
+                    delay(backoff)
+                    beginReconnectAttempt(url, code)
+                }
+            }
+        }
+    }
+
+    /**
+     * A full retry cycle is spent. Behaviour depends on the revival opt-in:
+     *
+     * - Revival OFF: give up exactly as before — stop reconnecting and show the
+     *   terminal status.
+     * - Revival ON: never give up on an unattended device. Count this exhausted
+     *   cycle as one watchdog failure (which may fire the Termux restart once
+     *   the threshold is crossed, subject to cooldown), then wait
+     *   [WATCHDOG_RECONNECT_INTERVAL_MS] and start a fresh cycle. The loop is
+     *   cancellable by [disconnect].
+     */
+    @Synchronized
+    private fun onCycleExhausted(activeScope: CoroutineScope, url: String, code: String) {
+        // Retire the dead socket's listener: a late callback from it would
+        // otherwise overwrite status or re-enter this path. Drop the session
+        // clock too so the NEXT session is measured from its own start.
+        generation++
+        sessionStartedNs = 0L
+        webSocket?.cancel()
+        webSocket = null
+
+        val revivalEnabled = prefs?.getBoolean(KEY_REVIVAL_ENABLED, false) ?: false
+        if (!revivalEnabled) {
             shouldReconnect = false
             reconnectPending = false
-            // Retire the dead socket's listener too, otherwise a late callback
-            // from it overwrites the terminal status the user needs to see.
-            generation++
-            // Its onClosed/onFailure will now be ignored, so drop the session
-            // clock here — a stale start time would otherwise make the NEXT
-            // session look long enough to refill the retry budget.
-            sessionStartedNs = 0L
-            webSocket?.cancel()
-            webSocket = null
             notifyStatus(false, "Failed to connect after ${reconnectPolicy.limit} attempts. Tap Connect to retry.")
+            // No-op while disabled (RevivalPolicy gate returns Wait), preserving
+            // the previous give-up behaviour exactly.
             maybeFireTermuxRevival()
             return
         }
 
+        // Each exhausted cycle is one watchdog failure; may fire the restart.
+        maybeFireTermuxRevival()
+
         reconnectPending = true
-
-        val backoff = reconnectPolicy.nextBackoffMs()
-        val attempt = reconnectPolicy.attempts
-
         reconnectJob = activeScope.launch {
-            Log.i(TAG, "Reconnecting in ${backoff}ms... (attempt $attempt/${reconnectPolicy.limit})")
-            notifyStatus(false, "Reconnecting in ${backoff / 1000}s... (attempt $attempt/${reconnectPolicy.limit})")
-            delay(backoff)
-            beginReconnectAttempt(url, code)
+            notifyStatus(
+                false,
+                "Stack unreachable — retrying in ${WATCHDOG_RECONNECT_INTERVAL_MS / 1000}s…",
+            )
+            delay(WATCHDOG_RECONNECT_INTERVAL_MS)
+            beginWatchdogReconnect(url, code)
         }
+    }
+
+    /**
+     * Start a fresh retry cycle for the revival watchdog loop. Resets the retry
+     * budget so a new round of backed-off attempts runs; if that round also
+     * exhausts, [onCycleExhausted] counts another watchdog failure. Re-checks
+     * state under the lock so a [disconnect] that raced the delay wins.
+     */
+    @Synchronized
+    private fun beginWatchdogReconnect(url: String, code: String) {
+        reconnectPending = false
+        if (!shouldReconnect || isConnected || scope == null) return
+        reconnectPolicy.reset()
+        generation++
+        sessionStartedNs = 0L
+        webSocket?.cancel()
+        doConnect(url, code)
     }
 
     /**
@@ -265,7 +358,7 @@ object RelayClient {
     @Synchronized
     private fun beginReconnectAttempt(url: String, code: String) {
         reconnectPending = false
-        if (!shouldReconnect || isConnected) return
+        if (!shouldReconnect || isConnected || scope == null) return
         // Supersede the old listener BEFORE cancelling its socket: cancel()
         // drives that listener's onFailure, and if it still matched the current
         // generation it would re-enter scheduleReconnect and burn an attempt on
@@ -322,39 +415,31 @@ object RelayClient {
                 putExtra("com.termux.RUN_COMMAND_PATH",
                     "/data/data/com.termux/files/home/.termux/boot/start-zee.sh")
                 putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-                putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", 0)
+                // Termux expects the session action as a String, not an int.
+                putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
             }
-            ctx.startService(intent)
+            // RunCommandService is a foreground service: on API 26+ it MUST be
+            // started with startForegroundService or Android throws
+            // IllegalStateException from the background (Termux docs).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
             Log.i(TAG, "Termux revival: RUN_COMMAND fired (start-zee.sh)")
             notifyStatus(false, "Stack unreachable — firing Termux revival…")
-            // The watchdog fired but the app itself must keep trying to
-            // reconnect: without this the relay stays dark even after a
-            // successful revival (review point: "fires but never reconnects").
-            reconnectDelayed()
         } catch (e: SecurityException) {
             Log.e(TAG, "Termux revival BLOCKED: RUN_COMMAND permission missing", e)
-            notifyStatus(false, "Revival blocked — allow Termux RUN_COMMAND (Termux > Allow external apps)")
+            notifyStatus(false, REVIVAL_PERMISSION_HELP)
         } catch (e: Exception) {
             Log.e(TAG, "Termux revival intent failed", e)
             notifyStatus(false, "Revival failed: ${e.message?.take(80) ?: "unknown error"}")
         }
-    }
-
-    private fun reconnectDelayed() {
-        try {
-            val url = prefs?.getString(KEY_SERVER_URL, null)
-            val code = prefs?.getString(KEY_PAIRING_CODE, null)
-            if (url.isNullOrBlank() || code.isNullOrBlank()) {
-                Log.w(TAG, "Delayed reconnect skipped: no saved server/code")
-                return
-            }
-            scope?.launch {
-                kotlinx.coroutines.delay(30_000L)  // 30s later, bounded by the same cooldown
-                connect(url, code)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Delayed reconnect not scheduled: $e")
-        }
+        // NOTE: reconnection is NOT scheduled here. fireTermuxRestart only runs
+        // from onCycleExhausted's revival-enabled branch, which ALWAYS schedules
+        // the slow watchdog reconnect loop right after this returns — on the
+        // success path AND on either failure path. So the relay never stays dark
+        // regardless of how the intent fared, and we avoid double-scheduling.
     }
 
     private fun buildWsUrl(serverUrl: String): String {
@@ -543,5 +628,68 @@ object RelayClient {
                 callback(connected, message)
             }
         } catch (_: Exception) {}
+    }
+}
+
+/** Security posture of a resolved WebSocket URL, for the cleartext warning. */
+enum class ConnectionSecurity {
+    /** wss:// — encrypted. */
+    SECURE,
+
+    /** ws:// to a private/loopback/link-local host — LAN/dev, no warning. */
+    CLEARTEXT_PRIVATE,
+
+    /** ws:// to a public host — the Bearer token would travel in cleartext. */
+    CLEARTEXT_PUBLIC,
+}
+
+/**
+ * Classify a resolved ws(s):// URL. Pure (no Android) so it is unit-testable.
+ *
+ * Only ws:// to a NON-private host is flagged: LAN, loopback, link-local,
+ * `.local`, and Tailscale (100.64/10) hosts are treated as private so we do not
+ * nag dev/LAN users, while a bare public host over ws:// (token in cleartext)
+ * earns a warning.
+ */
+fun classifyConnectionSecurity(resolvedUrl: String): ConnectionSecurity {
+    val lower = resolvedUrl.trim().lowercase()
+    if (lower.startsWith("wss://")) return ConnectionSecurity.SECURE
+    if (!lower.startsWith("ws://")) return ConnectionSecurity.SECURE
+    var host = lower.removePrefix("ws://").substringBefore("/")
+    // Drop any userinfo (user:pass@host).
+    host = host.substringAfterLast("@")
+    host = if (host.startsWith("[")) {
+        // IPv6 literal: [::1]:8766 -> ::1
+        host.substringAfter("[").substringBefore("]")
+    } else {
+        // hostname or IPv4: strip the port.
+        host.substringBefore(":")
+    }
+    return if (isPrivateHost(host)) {
+        ConnectionSecurity.CLEARTEXT_PRIVATE
+    } else {
+        ConnectionSecurity.CLEARTEXT_PUBLIC
+    }
+}
+
+/** True for loopback, RFC1918, link-local, CGNAT/Tailscale, localhost, .local. */
+private fun isPrivateHost(host: String): Boolean {
+    if (host.isBlank()) return true // nothing to warn about
+    if (host == "localhost" || host.endsWith(".local")) return true
+    if (host == "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd")) return true
+
+    val octets = host.split(".")
+    if (octets.size != 4) return false
+    val nums = octets.map { it.toIntOrNull() ?: return false }
+    if (nums.any { it !in 0..255 }) return false
+    val (a, b) = nums[0] to nums[1]
+    return when {
+        a == 10 -> true                       // 10.0.0.0/8
+        a == 127 -> true                      // 127.0.0.0/8 loopback
+        a == 172 && b in 16..31 -> true       // 172.16.0.0/12
+        a == 192 && b == 168 -> true          // 192.168.0.0/16
+        a == 169 && b == 254 -> true          // 169.254.0.0/16 link-local
+        a == 100 && b in 64..127 -> true      // 100.64.0.0/10 CGNAT / Tailscale
+        else -> false
     }
 }
