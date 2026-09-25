@@ -12,9 +12,12 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 - Codes use characters `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no ambiguous 0/O/1/I)
 
 ### Rate Limiting
-- Failed WebSocket authentication attempts are rate-limited per IP
+- Failed authentication attempts are rate-limited per IP, with separate
+  tables for phone WebSocket handshakes and agent HTTP requests (bad HTTP
+  requests can't lock the phone out, and vice versa)
 - After 5 failed attempts in 60 seconds, the IP is blocked for 5 minutes
-- Blocked IPs receive HTTP 429
+- Blocked IPs receive HTTP 429 — except a loopback HTTP caller presenting the
+  valid token, which is never refused by the ban
 
 ### WebSocket Authentication Transport
 - The phone sends the pairing code as an `Authorization: Bearer` header on the

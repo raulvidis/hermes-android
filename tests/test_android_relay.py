@@ -8,11 +8,9 @@ from tools.android_relay import (
     is_phone_connected,
     get_relay_url,
     set_pairing_code,
-    _auth_is_blocked,
-    _auth_record_failure,
-    _auth_lock,
-    _auth_blocked,
-    _auth_failures,
+    _ws_auth,
+    _http_auth,
+    _is_loopback,
     _AUTH_MAX_ATTEMPTS,
     _mask_token,
     _safe_body_repr,
@@ -30,13 +28,17 @@ def reset_relay():
 
 @pytest.fixture(autouse=True)
 def reset_auth_state():
-    with _auth_lock:
-        _auth_blocked.clear()
-        _auth_failures.clear()
+    _ws_auth.reset()
+    _http_auth.reset()
     yield
-    with _auth_lock:
-        _auth_blocked.clear()
-        _auth_failures.clear()
+    _ws_auth.reset()
+    _http_auth.reset()
+
+
+def _active_code():
+    import tools.android_relay as relay_mod
+
+    return relay_mod._relay_instance.pairing_code
 
 
 def _await_log_record(caplog, substring, timeout=5.0, poll=0.01):
@@ -79,10 +81,28 @@ class TestRelayLifecycle:
         stop_relay()
 
     def test_double_start_is_noop(self):
-        start_relay(pairing_code="TEST01", port=19877)
-        start_relay(pairing_code="TEST02", port=19877)
+        assert start_relay(pairing_code="TEST01", port=19877) is True
+        # A second start leaves the running relay — and its code — alone;
+        # re-pairing has to go through set_pairing_code().
+        assert start_relay(pairing_code="TEST02", port=19877) is False
         assert is_relay_running()
+        assert _active_code() == "TEST01"
         stop_relay()
+
+    def test_start_fails_fast_when_port_is_taken(self):
+        import socket
+
+        blocker = socket.socket()
+        blocker.bind(("localhost", 19879))
+        blocker.listen()
+        try:
+            started = time.monotonic()
+            with pytest.raises(RuntimeError, match="19879"):
+                start_relay(pairing_code="TEST03", port=19879)
+            assert time.monotonic() - started < 5
+            assert not is_relay_running()
+        finally:
+            blocker.close()
 
     def test_is_phone_connected_false(self):
         assert not is_phone_connected()
@@ -95,31 +115,124 @@ class TestRelayLifecycle:
         assert url is not None
         assert "localhost" in url
 
-    def test_set_pairing_code(self):
-        set_pairing_code("NEPCODE")
-        start_relay(pairing_code="NEPCODE", port=19878)
-        assert is_relay_running()
+    def test_set_pairing_code_without_relay_is_reported(self):
+        assert set_pairing_code("NEPCODE") is False
+
+    def test_set_pairing_code_updates_the_live_relay(self):
+        import requests
+
+        start_relay(pairing_code="OLDCDE", port=19878)
+        assert set_pairing_code("NEWCDE") is True
+        assert _active_code() == "NEWCDE"
+
+        url = "http://127.0.0.1:19878/ping"
+        # 503 = auth passed, no phone; 401 = token refused.
+        assert requests.get(url, headers={"Authorization": "Bearer NEWCDE"}, timeout=5).status_code == 503
+        assert requests.get(url, headers={"Authorization": "Bearer OLDCDE"}, timeout=5).status_code == 401
         stop_relay()
+
+    def test_set_pairing_code_disconnects_phone_on_old_code(self):
+        import asyncio
+        import aiohttp
+
+        start_relay(pairing_code="OLDCDE", port=19878)
+
+        async def scenario():
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    "ws://127.0.0.1:19878/ws",
+                    headers={"Authorization": "Bearer OLDCDE"},
+                )
+                for _ in range(100):
+                    if is_phone_connected():
+                        break
+                    await asyncio.sleep(0.01)
+                assert is_phone_connected()
+                await asyncio.to_thread(set_pairing_code, "NEWCDE")
+                msg = await ws.receive(timeout=5)
+                assert msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
+                await ws.close()
+
+        asyncio.run(scenario())
+        assert not is_phone_connected()
 
 
 class TestRateLimiting:
     def test_not_blocked_initially(self):
-        assert not _auth_is_blocked("1.2.3.4")
+        assert not _ws_auth.is_blocked("1.2.3.4")
 
     def test_blocked_after_max_failures(self):
         for _ in range(_AUTH_MAX_ATTEMPTS):
-            _auth_record_failure("1.2.3.4")
-        assert _auth_is_blocked("1.2.3.4")
+            _ws_auth.record_failure("1.2.3.4")
+        assert _ws_auth.is_blocked("1.2.3.4")
 
     def test_different_ip_not_blocked(self):
         for _ in range(_AUTH_MAX_ATTEMPTS):
-            _auth_record_failure("1.2.3.4")
-        assert not _auth_is_blocked("5.6.7.8")
+            _ws_auth.record_failure("1.2.3.4")
+        assert not _ws_auth.is_blocked("5.6.7.8")
 
     def test_under_limit_not_blocked(self):
         for _ in range(_AUTH_MAX_ATTEMPTS - 1):
-            _auth_record_failure("1.2.3.4")
-        assert not _auth_is_blocked("1.2.3.4")
+            _ws_auth.record_failure("1.2.3.4")
+        assert not _ws_auth.is_blocked("1.2.3.4")
+
+    def test_ws_and_http_tables_are_separate(self):
+        for _ in range(_AUTH_MAX_ATTEMPTS):
+            _http_auth.record_failure("127.0.0.1")
+        assert _http_auth.is_blocked("127.0.0.1")
+        assert not _ws_auth.is_blocked("127.0.0.1")
+
+    def test_loopback_detection(self):
+        assert _is_loopback("127.0.0.1")
+        assert _is_loopback("::1")
+        assert not _is_loopback("192.168.1.5")
+        assert not _is_loopback("unknown")
+
+
+class TestHttpBan:
+    """Regression: five bad HTTP requests used to ban localhost for 300 s on
+    the table the phone's WS handshake also used, so the agent — and the
+    phone — were locked out even with the correct code."""
+
+    PORT = 19885
+    CODE = "BANCDE"
+
+    def _burn_http_attempts(self):
+        import requests
+
+        url = f"http://127.0.0.1:{self.PORT}/ping"
+        statuses = [
+            requests.get(url, headers={"Authorization": "Bearer WRONG0"}, timeout=5).status_code
+            for _ in range(_AUTH_MAX_ATTEMPTS + 1)
+        ]
+        assert statuses[:_AUTH_MAX_ATTEMPTS] == [401] * _AUTH_MAX_ATTEMPTS
+        assert statuses[-1] == 429  # the ban does engage for bad tokens
+        return url
+
+    def test_valid_token_from_loopback_is_not_refused_by_the_ban(self):
+        import requests
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        url = self._burn_http_attempts()
+        good = requests.get(url, headers={"Authorization": f"Bearer {self.CODE}"}, timeout=5)
+        assert good.status_code == 503  # auth passed; no phone connected
+
+    def test_http_failures_do_not_ban_the_phone(self):
+        import asyncio
+        import aiohttp
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        self._burn_http_attempts()
+
+        async def connect():
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers={"Authorization": f"Bearer {self.CODE}"},
+                )
+                await ws.close()
+
+        asyncio.run(connect())
 
 
 class TestTokenMasking:
@@ -167,6 +280,37 @@ class TestBodyLogRedaction:
     def test_truncated_to_200_chars(self):
         repr_ = _safe_body_repr({"key": "v" * 500})
         assert len(repr_) <= 200
+
+    def test_intent_data_uri_redacted(self):
+        repr_ = _safe_body_repr({"action": "VIEW", "dataUri": "tel:+15551234567"})
+        assert "+15551234567" not in repr_
+        assert "VIEW" in repr_
+
+    def test_every_pii_payload_android_tool_sends_is_redacted(self, monkeypatch):
+        """Drive each PII-carrying tool with a sentinel and run the body it
+        actually sends through the relay's log redaction. A new payload key
+        that carries user data but is missing from _SENSITIVE_BODY_KEYS fails
+        here rather than landing in a debug log."""
+        import tools.android_tool as tool
+
+        sent = []
+        monkeypatch.setattr(tool, "_post", lambda path, payload: sent.append((path, payload)) or {})
+        pii = "PII-SENTINEL-+15551234567"
+
+        tool.android_send_sms(to=pii, body=pii)
+        tool.android_call(number=pii)
+        tool.android_type(text=pii)
+        tool.android_tap_text(text=pii)
+        tool.android_clipboard_write(text=pii)
+        tool.android_speak(text=pii)
+        tool.android_wait(text=pii)
+        tool.android_find_nodes(text=pii)
+        tool.android_send_intent(action="android.intent.action.VIEW", data_uri=pii, extras={"k": pii})
+        tool.android_broadcast(action="com.example.PING", extras={"k": pii})
+
+        assert len(sent) == 10
+        for path, payload in sent:
+            assert pii not in _safe_body_repr(payload), f"{path} leaks PII via {sorted(payload)}"
 
 
 class TestWsAuthHeader:
@@ -360,6 +504,87 @@ class TestPhoneReplacement:
         asyncio.run(scenario())
 
 
+class TestUnresponsiveOldPhone:
+    PORT = 19886
+    CODE = "HALFDD"
+
+    def test_half_dead_old_socket_does_not_stall_http(self):
+        """Closing the replaced socket can block for a long time on a
+        half-dead peer (drain on a full send buffer, or waiting up to 10 s for
+        its close frame). That must not happen under phone_ws_lock, or every
+        HTTP request stalls behind it.
+
+        A real half-dead TCP peer is hard to fake portably, so the relay-side
+        socket's close() is replaced with one that hangs until released.
+        """
+        import asyncio
+        import aiohttp
+        import tools.android_relay as relay_mod
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        state = relay_mod._relay_instance
+        release = asyncio.Event()  # bound to the relay loop on first await
+        close_called = threading.Event()
+
+        async def hanging_close(*args, **kwargs):
+            close_called.set()
+            await release.wait()
+            return True
+
+        async def scenario():
+            headers = {"Authorization": f"Bearer {self.CODE}"}
+            async with aiohttp.ClientSession() as session:
+                old_ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws", headers=headers
+                )
+                for _ in range(200):
+                    if state.phone_ws is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                state.phone_ws.close = hanging_close
+
+                new_ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws", headers=headers
+                )
+                assert await asyncio.to_thread(close_called.wait, 3)
+                request = asyncio.create_task(
+                    session.get(f"http://127.0.0.1:{self.PORT}/ping", headers=headers)
+                )
+                command = await new_ws.receive_json(timeout=3)
+                await new_ws.send_json(
+                    {"request_id": command["request_id"], "status": 200, "result": {"ok": True}}
+                )
+                response = await asyncio.wait_for(request, timeout=3)
+                assert response.status == 200
+                state.loop.call_soon_threadsafe(release.set)
+                await new_ws.close()
+                await old_ws.close()
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            state.loop.call_soon_threadsafe(release.set)
+
+
+class TestPhoneMessageLogging:
+    def test_non_json_and_missing_id_log_no_content(self, caplog):
+        import asyncio
+        import logging
+        from tools.android_relay import _on_phone_message
+
+        state = _RelayState(pairing_code="LOGCDE", port=0)
+        secret = "+15551234567 meet at 221B Baker St"
+        with caplog.at_level(logging.DEBUG, logger="android_relay"):
+            asyncio.run(_on_phone_message(state, secret))
+            asyncio.run(_on_phone_message(state, '{"result": "' + secret + '"}'))
+            asyncio.run(_on_phone_message(state, '["' + secret + '"]'))
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 3
+        for message in messages:
+            assert "+1555" not in message and "Baker" not in message
+
+
 class TestMicrophoneBinaryStreamNegative:
     """Negative paths for the binary stream relay (#99).
 
@@ -478,12 +703,10 @@ class TestMicrophoneBinaryStreamNegative:
                 }
             )
 
-        # The full body has already been streamed when the checksum is
-        # verified, so the HTTP client cannot observe the abort — pin the
-        # server-side detection instead: the relay must log the mismatch and
-        # force-close rather than complete the stream cleanly.
+        # The relay withholds the last chunk until the checksum is verified,
+        # so the client must see a torn-down download, never the full body.
         with caplog.at_level(logging.WARNING, logger="tools.android_relay"):
-            self._run_stream_scenario(phone_play, expect="teardown-or-complete")
+            self._run_stream_scenario(phone_play, expect="teardown")
             # The relay reaches this verdict on its own thread, after the
             # client has returned — wait for it rather than racing it.
             record = _await_log_record(caplog, "checksum mismatch")
@@ -541,10 +764,9 @@ class TestMicrophoneBinaryStreamNegative:
                 }
             )
 
-        # Same shape as the checksum case: the payload is fully delivered
-        # before the end event lies, so pin the server-side detection.
+        # Same as the checksum case: the withheld final chunk is never sent.
         with caplog.at_level(logging.WARNING, logger="tools.android_relay"):
-            self._run_stream_scenario(phone_play, expect="teardown-or-complete")
+            self._run_stream_scenario(phone_play, expect="teardown")
             # As above: the verdict is logged on the relay's own thread.
             record = _await_log_record(caplog, "length does not match")
 
@@ -704,6 +926,41 @@ class TestRouteAllowlist:
             f"allowlisted only: {sorted(set(_ROUTES) - set(documented))}, "
             "method mismatches: "
             f"{sorted(p for p in set(documented) & set(_ROUTES) if documented[p] != _ROUTES[p])}"
+        )
+
+    def test_the_bridge_routes_are_exactly_the_allowlist(self):
+        """Parse the phone's actual routes and compare them to _ROUTES.
+
+        CommandDispatcher.dispatch matches `method == "X" && path == "/y"`;
+        /mic_file is the one route handled outside it, in RelayClient (binary
+        stream), with the same matching shape.
+        """
+        import pathlib
+        import re
+        from tools.android_relay import _ROUTES
+
+        kotlin = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "hermes-android-bridge" / "app" / "src" / "main" / "kotlin"
+            / "com" / "hermesandroid" / "bridge"
+        )
+        pattern = re.compile(r'method\s*==\s*"(GET|POST)"\s*&&\s*path\s*==\s*"([^"]+)"')
+        found: dict[str, set] = {}
+        for rel in ("server/CommandDispatcher.kt", "client/RelayClient.kt"):
+            for method, path in pattern.findall((kotlin / rel).read_text(encoding="utf-8")):
+                found.setdefault(path, set()).add(method)
+        assert len(found) > 30, "route pattern no longer matches the Kotlin source"
+
+        bridge = {
+            path: "BOTH" if methods == {"GET", "POST"} else methods.pop()
+            for path, methods in found.items()
+        }
+        assert bridge == _ROUTES, (
+            "CommandDispatcher/RelayClient and the relay allowlist disagree — "
+            f"bridge only: {sorted(set(bridge) - set(_ROUTES))}, "
+            f"allowlisted only: {sorted(set(_ROUTES) - set(bridge))}, "
+            "method mismatches: "
+            f"{sorted(p for p in set(bridge) & set(_ROUTES) if bridge[p] != _ROUTES[p])}"
         )
 
     def test_the_two_relay_copies_are_byte_identical(self):

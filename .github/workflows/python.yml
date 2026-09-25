@@ -19,6 +19,10 @@ on:
       - 'pyproject.toml'
       - 'setup.py'
       - 'requirements.txt'
+      - 'docs/**'
+      # The allowlist tests parse these Kotlin files for the bridge's routes.
+      - 'hermes-android-bridge/**/CommandDispatcher.kt'
+      - 'hermes-android-bridge/**/RelayClient.kt'
       - '.github/workflows/python.yml'
   pull_request:
     paths:
@@ -28,6 +32,11 @@ on:
       - 'pyproject.toml'
       - 'setup.py'
       - 'requirements.txt'
+      - 'docs/**'
+      # The allowlist tests parse these Kotlin files for the bridge's routes.
+      - 'hermes-android-bridge/**/CommandDispatcher.kt'
+      - 'hermes-android-bridge/**/RelayClient.kt'
+      - '.github/workflows/python.yml'
   workflow_dispatch:
 
 permissions:

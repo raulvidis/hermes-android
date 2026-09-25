@@ -368,15 +368,158 @@ class TestCurrentApp:
 
 
 class TestSetup:
-    @responses.activate
-    def test_setup_saves_config(self, monkeypatch):
-        """android_setup saves pairing code and sets env vars."""
-        from tools.android_tool import _get_public_ip
+    """android_setup, with the relay stubbed and HOME/HERMES_HOME isolated
+    (conftest) — it must never write the real ~/.hermes/.env or bind 8766."""
 
+    @pytest.fixture
+    def relay(self, monkeypatch):
+        """Stub the relay module's lifecycle; record what setup asked of it."""
+        import tools.android_relay as relay_mod
+
+        calls = {"start": [], "set_code": [], "running": False, "fail": None}
+
+        def fake_start(pairing_code, port=0):
+            calls["start"].append((pairing_code, port))
+            if calls["fail"] is not None:
+                raise calls["fail"]
+            if calls["running"]:
+                return False
+            calls["running"] = True
+            return True
+
+        def fake_set(code):
+            calls["set_code"].append(code)
+            return calls["running"]
+
+        monkeypatch.setattr(relay_mod, "start_relay", fake_start)
+        monkeypatch.setattr(relay_mod, "set_pairing_code", fake_set)
+        monkeypatch.setattr(relay_mod, "is_phone_connected", lambda: False)
         monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.setattr("tools.android_tool.time.sleep", lambda s: None)
+        return calls
+
+    def test_setup_saves_config(self, relay, isolated_home, monkeypatch):
+        """android_setup saves pairing code and sets env vars."""
+        from tools.android_tool import _env_file_vars
+
+        # Registered with monkeypatch so android_setup's writes are undone.
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "placeholder")
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "placeholder")
+
         result = json.loads(android_setup("ABC123"))
+
+        assert result["status"] == "ok"
+        assert relay["start"] == [("ABC123", 8766)]
         assert os.environ.get("ANDROID_BRIDGE_TOKEN") == "ABC123"
         assert "localhost" in os.environ.get("ANDROID_BRIDGE_URL", "")
+        env_file = isolated_home / ".hermes" / ".env"
+        assert env_file.exists()
+        assert oct(env_file.stat().st_mode & 0o777) == oct(0o600)
+        assert _env_file_vars()["ANDROID_BRIDGE_TOKEN"] == "ABC123"
+
+    def test_setup_repairs_a_relay_that_is_already_running(self, relay, monkeypatch):
+        """Second setup: start_relay is a no-op, so the live code must be swapped."""
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "placeholder")
+        android_setup("FIRST1")
+        assert relay["set_code"] == []
+
+        result = json.loads(android_setup("SECND2"))
+
+        assert result["status"] == "ok"
+        assert relay["set_code"] == ["SECND2"]
+        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "SECND2"
+
+    def test_setup_does_not_overwrite_token_when_relay_cannot_start(
+        self, relay, isolated_home, monkeypatch
+    ):
+        """Port held by an external relay: keep the saved token, say why."""
+        from tools.android_tool import _update_env_file
+
+        env_file = isolated_home / ".hermes" / ".env"
+        _update_env_file(env_file, {"ANDROID_BRIDGE_TOKEN": "OLDCODE"})
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "OLDCODE")
+        relay["fail"] = RuntimeError("address already in use")
+
+        result = json.loads(android_setup("NEWCODE"))
+
+        assert result["status"] == "error"
+        assert "8766" in result["message"]
+        assert "unchanged" in result["message"]
+        assert "ANDROID_BRIDGE_TOKEN=OLDCODE" in env_file.read_text()
+        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "OLDCODE"
+
+    def test_real_relay_live_code_follows_setup(self, monkeypatch):
+        """End to end against a real relay on a test port: after a second
+        setup the relay accepts the new token and rejects the old one."""
+        import requests as _requests
+        import tools.android_relay as relay_mod
+
+        port = 19890
+        monkeypatch.setenv("ANDROID_RELAY_PORT", str(port))
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "placeholder")
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "placeholder")
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.setattr("tools.android_tool.time.sleep", lambda s: None)
+        try:
+            assert json.loads(android_setup("CODEAA"))["status"] == "ok"
+            assert json.loads(android_setup("CODEBB"))["status"] == "ok"
+            assert relay_mod._relay_instance.pairing_code == "CODEBB"
+
+            url = f"http://127.0.0.1:{port}/ping"
+            # No phone connected → 503 once auth passes; 401 on a bad token.
+            new = _requests.get(url, headers={"Authorization": "Bearer CODEBB"}, timeout=5)
+            old = _requests.get(url, headers={"Authorization": "Bearer CODEAA"}, timeout=5)
+            assert new.status_code == 503
+            assert old.status_code == 401
+        finally:
+            relay_mod.stop_relay()
+            relay_mod._http_auth.reset()
+
+
+class TestEnvFileWriter:
+    def test_writes_atomically_with_0600_and_0700_dir(self, tmp_path, monkeypatch):
+        from tools import android_tool
+
+        seen_modes = []
+        real_open = os.open
+
+        def spy_open(path, flags, mode=0o777, *a, **kw):
+            seen_modes.append((str(path), flags, mode))
+            return real_open(path, flags, mode, *a, **kw)
+
+        monkeypatch.setattr(android_tool.os, "open", spy_open)
+        env_file = tmp_path / "hermes" / ".env"
+        android_tool._update_env_file(env_file, {"ANDROID_BRIDGE_TOKEN": "T0KEN1"})
+
+        assert oct(env_file.parent.stat().st_mode & 0o777) == oct(0o700)
+        assert oct(env_file.stat().st_mode & 0o777) == oct(0o600)
+        (path, flags, mode), = seen_modes
+        assert path != str(env_file)  # temp file, then replaced
+        assert flags & os.O_EXCL and flags & os.O_CREAT
+        assert mode == 0o600
+        assert list(env_file.parent.iterdir()) == [env_file]  # no temp left
+
+    def test_updates_in_place_and_keeps_other_lines(self, tmp_path):
+        from tools import android_tool
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("# comment\nOTHER=1\nexport ANDROID_BRIDGE_TOKEN=OLD\n")
+        android_tool._update_env_file(
+            env_file, {"ANDROID_BRIDGE_TOKEN": "NEW", "ANDROID_RELAY_PORT": "9"}
+        )
+        assert env_file.read_text() == (
+            "# comment\nOTHER=1\nANDROID_BRIDGE_TOKEN=NEW\nANDROID_RELAY_PORT=9\n"
+        )
+
+    def test_writer_and_reader_agree_on_hermes_home(self, tmp_path, monkeypatch):
+        from tools import android_tool
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom"))
+        monkeypatch.delenv("ANDROID_BRIDGE_TOKEN", raising=False)
+        android_tool._save_bridge_config("http://localhost:1", "ZZTOP1", 1)
+
+        assert (tmp_path / "custom" / ".env").exists()
+        assert android_tool._bridge_token() == "ZZTOP1"
 
 
 class TestEnvFileFallback:
@@ -418,6 +561,36 @@ class TestEnvFileFallback:
 
         assert android_tool._bridge_token() is None
         assert android_tool._bridge_url() == "http://localhost:8766"
+
+    def test_file_created_after_first_read_is_picked_up(self, monkeypatch, tmp_path):
+        """A missing (or empty) .env must not be cached forever."""
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_BRIDGE_TOKEN", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        env_file = tmp_path / ".env"
+
+        assert android_tool._bridge_token() is None
+        env_file.write_text("")
+        assert android_tool._bridge_token() is None
+        env_file.write_text("ANDROID_BRIDGE_TOKEN=LATE01\n")
+        assert android_tool._bridge_token() == "LATE01"
+
+    def test_export_prefix_and_inline_comments(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_BRIDGE_TOKEN", raising=False)
+        monkeypatch.delenv("ANDROID_BRIDGE_URL", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / ".env").write_text(
+            "export ANDROID_BRIDGE_TOKEN=EXP123   # set by android_setup\n"
+            'ANDROID_BRIDGE_URL="http://10.0.0.2:8765#frag"  # quoted keeps #\n'
+            "PLAIN=a#b\n"
+        )
+
+        assert android_tool._bridge_token() == "EXP123"
+        assert android_tool._bridge_url() == "http://10.0.0.2:8765#frag"
+        assert android_tool._env_file_vars()["PLAIN"] == "a#b"
 
 
 class TestClipboardRead:
