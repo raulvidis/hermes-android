@@ -78,12 +78,30 @@ class _RelayState:
         # Shutdown event
         self.shutdown_event: Optional[asyncio.Event] = None
 
+        # Set by the background thread when the server could not start (e.g.
+        # the port is already held by another relay), so start_relay() can
+        # fail fast with the real cause instead of timing out.
+        self.start_error: Optional[BaseException] = None
+
+        # Close handshakes for replaced phone sockets run in the background so
+        # a half-dead old socket cannot stall the relay; keep strong refs.
+        self.close_tasks: set = set()
+
 
 # ── Public API (called from sync code) ────────────────────────────────────────
 
 
-def start_relay(pairing_code: str, port: int = 0) -> None:
-    """Start the relay in a background thread.  No-op if already running."""
+def start_relay(pairing_code: str, port: int = 0) -> bool:
+    """Start the relay in a background thread.
+
+    Returns True if a new relay was started, False if one was already running
+    in this process.  An already-running relay is left untouched — including
+    its pairing code — so callers that are re-pairing must follow a False
+    return with set_pairing_code().
+
+    Raises RuntimeError if the server could not start (e.g. the port is
+    already held by another process such as a systemd-managed relay).
+    """
     global _relay_instance
     if port == 0:
         port = int(os.getenv("ANDROID_RELAY_PORT", "8766"))
@@ -95,7 +113,7 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
             and _relay_instance.thread.is_alive()
         ):
             logger.info("Relay already running on port %d", _relay_instance.port)
-            return
+            return False
 
         state = _RelayState(pairing_code, port)
         _relay_instance = state
@@ -107,10 +125,17 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
         state.thread = t
         t.start()
         # Wait until the server is actually listening (up to 10 s)
-        if not ready.wait(timeout=10):
+        if not ready.wait(timeout=10) or state.start_error is not None:
+            _relay_instance = None
+            if state.start_error is not None:
+                logger.error("Relay failed to start: %s", state.start_error)
+                raise RuntimeError(
+                    f"Relay failed to start on port {port}: {state.start_error}"
+                ) from state.start_error
             logger.error("Relay failed to start within 10 seconds")
             raise RuntimeError("Relay failed to start")
         logger.info("Relay started on port %d", port)
+        return True
 
 
 def stop_relay() -> None:
@@ -152,13 +177,36 @@ def get_relay_url() -> str:
     return f"http://localhost:{port}"
 
 
-def set_pairing_code(code: str) -> None:
-    """Update the pairing code (e.g. when user reconnects with new code)."""
+def set_pairing_code(code: str) -> bool:
+    """Update the live relay's pairing code (e.g. when the user re-pairs).
+
+    Every WS handshake and HTTP request is checked against the state's current
+    code, so the change takes effect immediately.  A phone that authenticated
+    with the previous code is disconnected: it no longer holds a valid
+    credential and must reconnect with the new one.
+
+    Returns True if a running relay was updated, False if none is running.
+    """
     with _relay_lock:
         s = _relay_instance
-        if s is not None:
-            s.pairing_code = code
-            logger.info("Pairing code updated")
+        if s is None or s.thread is None or not s.thread.is_alive():
+            return False
+        changed = s.pairing_code != code
+        s.pairing_code = code
+        loop = s.loop
+        # Only the socket authenticated under the old code: a phone that
+        # reconnects with the new code before the cleanup runs must survive.
+        old_ws = s.phone_ws
+    logger.info("Pairing code updated")
+    if changed and old_ws is not None and loop is not None and not loop.is_closed():
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _cleanup_phone(s, reason="pairing code changed", expected_ws=old_ws),
+                loop,
+            )
+        except RuntimeError:
+            pass  # loop shutting down
+    return True
 
 
 # ── Background event-loop entry point ─────────────────────────────────────────
@@ -176,8 +224,13 @@ def _run_loop(state: _RelayState, ready: threading.Event) -> None:
 
     try:
         loop.run_until_complete(_serve(state, ready))
-    except Exception:
-        logger.exception("Relay event loop crashed")
+    except Exception as exc:
+        if not ready.is_set():
+            # Never got as far as listening — report back to start_relay().
+            state.start_error = exc
+            ready.set()
+        else:
+            logger.exception("Relay event loop crashed")
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
@@ -282,7 +335,11 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     host = os.getenv("ANDROID_RELAY_HOST", "localhost")
     site = web.TCPSite(runner, host, state.port, ssl_context=ssl_ctx)
     state.site = site
-    await site.start()
+    try:
+        await site.start()
+    except BaseException:
+        await runner.cleanup()
+        raise
 
     scheme = "https" if ssl_ctx else "http"
     logger.info("Relay listening on %s://%s:%d", scheme, host, state.port)
@@ -305,78 +362,92 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     logger.info("Relay server cleaned up")
 
 
-# ── Rate limiting for WebSocket auth ─────────────────────────────────────────
+# ── Rate limiting for auth ────────────────────────────────────────────────────
 
 _AUTH_MAX_ATTEMPTS = 5  # max failed attempts before blocking
 _AUTH_WINDOW_SECONDS = 60  # sliding window for counting failures
 _AUTH_BLOCK_SECONDS = 300  # how long to block an IP (5 minutes)
 _AUTH_CLEANUP_INTERVAL = 120  # seconds between cleanup sweeps
 
-# {ip: [timestamp, timestamp, ...]} — tracks failed auth attempt times per IP
-_auth_failures: dict[str, list[float]] = {}
-# {ip: unblock_timestamp} — IPs currently blocked
-_auth_blocked: dict[str, float] = {}
-_auth_lock = threading.Lock()
-_auth_last_cleanup: float = 0.0
 
+class _AuthLimiter:
+    """Per-IP failed-auth counter and ban table.
 
-def _auth_cleanup() -> None:
-    """Remove expired entries from the failure and block dicts."""
-    global _auth_last_cleanup
-    now = time.monotonic()
-    if now - _auth_last_cleanup < _AUTH_CLEANUP_INTERVAL:
-        return
-    _auth_last_cleanup = now
+    The phone side (WS) and the agent side (HTTP) each get their own instance,
+    so a burst of bad HTTP requests from a local process with a stale token
+    cannot ban the phone, and vice versa.
+    """
 
-    # Remove expired blocks
-    expired_blocks = [ip for ip, until in _auth_blocked.items() if now >= until]
-    for ip in expired_blocks:
-        del _auth_blocked[ip]
+    def __init__(self, name: str):
+        self.name = name
+        # {ip: [timestamp, ...]} — failed attempt times per IP
+        self.failures: dict[str, list[float]] = {}
+        # {ip: unblock_timestamp} — IPs currently blocked
+        self.blocked: dict[str, float] = {}
+        self.lock = threading.Lock()
+        self._last_cleanup = 0.0
 
-    # Remove stale failure windows
-    cutoff = now - _AUTH_WINDOW_SECONDS
-    stale = []
-    for ip, timestamps in _auth_failures.items():
-        _auth_failures[ip] = [t for t in timestamps if t > cutoff]
-        if not _auth_failures[ip]:
-            stale.append(ip)
-    for ip in stale:
-        del _auth_failures[ip]
-
-
-def _auth_is_blocked(ip: str) -> bool:
-    """Check whether *ip* is currently blocked. Also triggers periodic cleanup."""
-    now = time.monotonic()
-    with _auth_lock:
-        _auth_cleanup()
-        until = _auth_blocked.get(ip)
-        if until is not None:
-            if now < until:
-                return True
-            # Block expired — remove it
-            del _auth_blocked[ip]
-    return False
-
-
-def _auth_record_failure(ip: str) -> None:
-    """Record a failed auth attempt for *ip*; block if threshold reached."""
-    now = time.monotonic()
-    with _auth_lock:
-        timestamps = _auth_failures.setdefault(ip, [])
-        timestamps.append(now)
-        # Prune timestamps outside the window
+    def _cleanup(self, now: float) -> None:
+        """Remove expired entries. Caller holds self.lock."""
+        if now - self._last_cleanup < _AUTH_CLEANUP_INTERVAL:
+            return
+        self._last_cleanup = now
+        for ip in [ip for ip, until in self.blocked.items() if now >= until]:
+            del self.blocked[ip]
         cutoff = now - _AUTH_WINDOW_SECONDS
-        _auth_failures[ip] = [t for t in timestamps if t > cutoff]
+        for ip in list(self.failures):
+            self.failures[ip] = [t for t in self.failures[ip] if t > cutoff]
+            if not self.failures[ip]:
+                del self.failures[ip]
 
-        if len(_auth_failures[ip]) >= _AUTH_MAX_ATTEMPTS:
-            _auth_blocked[ip] = now + _AUTH_BLOCK_SECONDS
-            _auth_failures.pop(ip, None)
-            logger.warning(
-                "IP %s blocked for %ds after %d failed auth attempts",
-                ip,
-                _AUTH_BLOCK_SECONDS,
-                _AUTH_MAX_ATTEMPTS,
-            )
+    def is_blocked(self, ip: str) -> bool:
+        """Check whether *ip* is currently blocked. Also triggers cleanup."""
+        now = time.monotonic()
+        with self.lock:
+            self._cleanup(now)
+            until = self.blocked.get(ip)
+            if until is not None:
+                if now < until:
+                    return True
+                del self.blocked[ip]
+        return False
+
+    def record_failure(self, ip: str) -> None:
+        """Record a failed auth attempt for *ip*; block if threshold reached."""
+        now = time.monotonic()
+        with self.lock:
+            cutoff = now - _AUTH_WINDOW_SECONDS
+            timestamps = [t for t in self.failures.get(ip, []) if t > cutoff]
+            timestamps.append(now)
+            self.failures[ip] = timestamps
+            if len(timestamps) >= _AUTH_MAX_ATTEMPTS:
+                self.blocked[ip] = now + _AUTH_BLOCK_SECONDS
+                self.failures.pop(ip, None)
+                logger.warning(
+                    "%s: IP %s blocked for %ds after %d failed auth attempts",
+                    self.name,
+                    ip,
+                    _AUTH_BLOCK_SECONDS,
+                    _AUTH_MAX_ATTEMPTS,
+                )
+
+    def reset(self) -> None:
+        with self.lock:
+            self.failures.clear()
+            self.blocked.clear()
+
+
+_ws_auth = _AuthLimiter("WS")
+_http_auth = _AuthLimiter("HTTP")
+
+
+def _is_loopback(ip: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
 
 
 # ── WebSocket handler (phone side) ───────────────────────────────────────────
@@ -391,7 +462,10 @@ def _mask_token(token: str) -> str:
 # typed text incl. passwords/OTPs, clipboard content, intent extras).
 # AGENTS.md: strip phone numbers, recipients, location from tool logs.
 _SENSITIVE_BODY_KEYS = frozenset(
-    {"to", "number", "body", "text", "message", "extras", "data", "uri", "content"}
+    {
+        "to", "number", "body", "text", "message", "extras", "data", "uri",
+        "dataUri", "content",
+    }
 )
 
 
@@ -408,7 +482,7 @@ def _safe_body_repr(body: dict) -> str:
 async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketResponse:
     # Rate limiting — check before token validation
     remote_ip = request.remote or "unknown"
-    if _auth_is_blocked(remote_ip):
+    if _ws_auth.is_blocked(remote_ip):
         logger.warning("Auth attempt from blocked IP %s — returning 429", remote_ip)
         raise web.HTTPTooManyRequests(
             text="Too many failed authentication attempts. Try again later."
@@ -427,7 +501,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     # PairingManager generates uppercase-only codes — compare exact-case to
     # preserve full key-space entropy.
     if not hmac.compare_digest(token, state.pairing_code):
-        _auth_record_failure(remote_ip)
+        _ws_auth.record_failure(remote_ip)
         logger.warning(
             "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
         )
@@ -436,15 +510,24 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
 
-    # Only one phone at a time — kick previous if any
+    # Only one phone at a time — kick previous if any.  Swap the reference
+    # under the lock but close the old socket outside it: close() waits for
+    # the peer's close frame (up to aiohttp's 10 s timeout), and a half-dead
+    # old socket would otherwise stall every HTTP request behind the lock.
     async with state.phone_ws_lock:
-        if state.phone_ws is not None and not state.phone_ws.closed:
+        old_ws = state.phone_ws
+        if old_ws is not None and not old_ws.closed:
             logger.info("Replacing previous phone connection")
             await _fail_inflight(state, reason="phone connection replaced")
-            await state.phone_ws.close(
-                code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced"
-            )
+        else:
+            old_ws = None
         state.phone_ws = ws
+    if old_ws is not None:
+        task = asyncio.ensure_future(
+            old_ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced")
+        )
+        state.close_tasks.add(task)
+        task.add_done_callback(state.close_tasks.discard)
 
     logger.info("Phone connected from %s", request.remote)
 
@@ -468,12 +551,18 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Non-JSON message from phone: %s", raw[:200])
+        # Never log the content: phone messages carry screen text, contacts,
+        # SMS, location — see AGENTS.md.
+        logger.warning("Non-JSON message from phone (%d chars)", len(raw))
         return
 
-    request_id = data.get("request_id")
+    request_id = data.get("request_id") if isinstance(data, dict) else None
     if not request_id:
-        logger.warning("Phone message missing request_id: %s", raw[:200])
+        logger.warning(
+            "Phone message missing request_id (%s, %d chars)",
+            type(data).__name__,
+            len(raw),
+        )
         return
 
     async with state.streams_lock:
@@ -583,18 +672,26 @@ async def _handle_http(
     # Require Bearer token matching the pairing code.  The client already sends
     # this (android_tool._auth_headers), so the only effect is blocking
     # unauthenticated local processes from abusing the HTTP tool API.
+    #
+    # HTTP failures are tracked separately from the phone's WS handshakes.  A
+    # loopback caller presenting the valid token is never refused by the ban:
+    # the usual way to rack up failures locally is the agent itself sending a
+    # stale token right after re-pairing, and locking it out for 5 minutes
+    # once it has the right one helps nobody.  Non-loopback callers (relay
+    # bound off-localhost) keep block-before-check so a ban cannot be used as
+    # an oracle for guessing the code remotely.
     remote_ip = request.remote or "unknown"
-    if _auth_is_blocked(remote_ip):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    token_ok = hmac.compare_digest(token, state.pairing_code)
+    if (not token_ok or not _is_loopback(remote_ip)) and _http_auth.is_blocked(remote_ip):
         logger.warning("HTTP auth attempt from blocked IP %s — 429", remote_ip)
         return web.json_response(
             {"error": "Too many failed authentication attempts. Try again later."},
             status=429,
         )
-
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-    if not hmac.compare_digest(token, state.pairing_code):
-        _auth_record_failure(remote_ip)
+    if not token_ok:
+        _http_auth.record_failure(remote_ip)
         logger.warning(
             "HTTP %s %s rejected — bad auth from %s (header=%s)",
             request.method, path, remote_ip, _mask_token(token),
@@ -736,8 +833,14 @@ async def _relay_binary_stream(
         )
         await response.prepare(request)
 
+        # The phone's sha256 only arrives in the "end" event, after the bytes.
+        # Hold the most recent chunk back until that event is verified: on a
+        # mismatch the connection is torn down short of Content-Length, so the
+        # client sees an incomplete download instead of a complete-looking
+        # file with the wrong contents.
         digest = hashlib.sha256()
         total = 0
+        held: Optional[bytes] = None
         while True:
             kind, payload = await asyncio.wait_for(queue.get(), timeout=_RESPONSE_TIMEOUT)
             if kind == "error":
@@ -747,7 +850,9 @@ async def _relay_binary_stream(
                 if total > expected_size or total > _MAX_STREAM_BYTES:
                     raise ValueError("Phone sent more recording data than declared")
                 digest.update(payload)
-                await response.write(payload)
+                if held is not None:
+                    await response.write(held)
+                held = payload
                 continue
             if kind != "message":
                 raise ValueError("Unknown stream event")
@@ -765,6 +870,8 @@ async def _relay_binary_stream(
                 digest.hexdigest(), expected_sha
             ):
                 raise IOError("Recording stream checksum mismatch")
+            if held:
+                await response.write(held)
             await response.write_eof()
             return response
     except asyncio.TimeoutError:

@@ -42,6 +42,9 @@ Automated: `pytest tests/` (Python toolset) and `cd hermes-android-bridge && ./g
 
 18. 5 wrong pairing codes within 60s → IP blocked 5 min, HTTP 429 (#51).
 19. Correct code → connects.
+    WS (phone) and HTTP (agent) failures are counted separately: 5 bad HTTP
+    tokens do not block the phone, and a loopback HTTP request with the correct
+    token still succeeds while its IP is blocked.
 
 ## AAOS (if applicable)
 
