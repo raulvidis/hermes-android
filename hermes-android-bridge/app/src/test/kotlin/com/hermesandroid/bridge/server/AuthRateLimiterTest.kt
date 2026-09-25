@@ -1,5 +1,6 @@
 package com.hermesandroid.bridge.server
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,6 +52,69 @@ class AuthRateLimiterTest {
         repeat(2) { rl.recordFailure("attacker") }
         assertTrue(rl.isBlocked("attacker"))
         assertFalse("unrelated IP must not be blocked", rl.isBlocked("bystander"))
+    }
+
+    @Test
+    fun `sweep drops IPs whose failures have all left the window`() {
+        var t = 1000L
+        val rl = AuthRateLimiter(
+            maxAttempts = 5, windowMs = 100, blockMs = 200, cleanupIntervalMs = 50
+        ) { t }
+
+        rl.recordFailure("stale")
+        assertEquals(1, rl.trackedIpCount())
+
+        t += 500 // "stale" is now outside the window; this call also sweeps
+        rl.recordFailure("fresh")
+        assertEquals("only the fresh IP should remain tracked", 1, rl.trackedIpCount())
+    }
+
+    @Test
+    fun `reaching the threshold clears the failure history`() {
+        val rl = AuthRateLimiter(maxAttempts = 2, windowMs = 100, blockMs = 200) { 1000L }
+
+        repeat(2) { rl.recordFailure("ip") }
+        assertTrue(rl.isBlocked("ip"))
+        assertEquals(0, rl.trackedIpCount())
+    }
+
+    @Test
+    fun `a new block after expiry is honoured`() {
+        var t = 1000L
+        val rl = AuthRateLimiter(maxAttempts = 1, windowMs = 100, blockMs = 200) { t }
+
+        rl.recordFailure("ip")
+        t += 201
+        assertFalse(rl.isBlocked("ip"))
+        rl.recordFailure("ip")
+        assertTrue("re-block must take effect", rl.isBlocked("ip"))
+    }
+
+    @Test
+    fun `concurrent failures with sweeping on every call are not lost`() {
+        // cleanupIntervalMs = 0 sweeps on every call, maximising overlap
+        // between recordFailure and the sweep. Every failure is in-window, so
+        // all threads x perThread failures must count and trip the block.
+        val threads = 8
+        val perThread = 50
+        val rl = AuthRateLimiter(
+            maxAttempts = threads * perThread,
+            windowMs = 60_000,
+            blockMs = 300_000,
+            cleanupIntervalMs = 0,
+        ) { 1_000_000L }
+
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val workers = (1..threads).map {
+            Thread {
+                gate.await()
+                repeat(perThread) { rl.recordFailure("shared") }
+            }.apply { start() }
+        }
+        gate.countDown()
+        workers.forEach { it.join(10_000) }
+
+        assertTrue("no failure may be dropped under concurrency", rl.isBlocked("shared"))
     }
 
     @Test
