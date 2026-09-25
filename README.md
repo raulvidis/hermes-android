@@ -274,3 +274,4 @@ and a persistent systemd relay are all in. What's still ahead:
 ## Links
 
 - **hermes-agent**: [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- **Community projects**: [COMMUNITY.md](COMMUNITY.md) — third-party tools built around hermes-android
