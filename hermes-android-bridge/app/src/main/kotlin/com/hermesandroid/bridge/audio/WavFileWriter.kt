@@ -10,6 +10,56 @@ internal class WavFileWriter(
     private val pending: PendingMicrophoneRecording,
     private val sampleRate: Int,
 ) : Closeable {
+    companion object {
+        internal const val HEADER_SIZE = 44
+
+        /** Largest even PCM16 data size that still fits the 32-bit RIFF size field. */
+        private const val MAX_DATA_SIZE = 4_294_967_258L // (0xffff_ffff - 36) rounded down to even
+
+        /**
+         * Repairs a WAV this writer started but never finalized (e.g. the
+         * process died mid-recording): the header still claims a 0-byte data
+         * chunk. Truncates the payload to whole PCM16 samples and rewrites the
+         * RIFF and data sizes from the file length.
+         *
+         * Returns the repaired data size in bytes, or -1 if [file] does not
+         * start with the header layout this writer produces.
+         */
+        internal fun repairHeader(file: File): Long {
+            return RandomAccessFile(file, "rw").use { raf ->
+                val length = raf.length()
+                if (length < HEADER_SIZE) return -1L
+                val header = ByteArray(HEADER_SIZE)
+                raf.seek(0L)
+                raf.readFully(header)
+                if (!header.hasAscii(0, "RIFF") ||
+                    !header.hasAscii(8, "WAVE") ||
+                    !header.hasAscii(36, "data")
+                ) {
+                    return -1L
+                }
+                val payload = length - HEADER_SIZE
+                val dataSize = minOf(payload - (payload % 2L), MAX_DATA_SIZE)
+                raf.setLength(HEADER_SIZE + dataSize)
+                raf.seek(4L)
+                writeIntLittleEndian(raf, 36L + dataSize)
+                raf.seek(40L)
+                writeIntLittleEndian(raf, dataSize)
+                raf.fd.sync()
+                dataSize
+            }
+        }
+
+        private fun ByteArray.hasAscii(offset: Int, text: String): Boolean =
+            text.indices.all { index -> this[offset + index] == text[index].code.toByte() }
+
+        private fun writeIntLittleEndian(file: RandomAccessFile, value: Long) {
+            for (byteIndex in 0 until 4) {
+                file.write(((value ushr (byteIndex * 8)) and 0xff).toInt())
+            }
+        }
+    }
+
     private var output: FileOutputStream? = FileOutputStream(pending.temporaryFile)
     private var finished = false
     private var byteBuffer = ByteArray(0)

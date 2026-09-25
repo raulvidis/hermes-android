@@ -436,12 +436,12 @@ object CommandDispatcher {
                         "duration" to durationSec,
                     ) to 202
                 }.getOrElse { error ->
-                    MicrophoneRecordingState.markError(
-                        "Could not start microphone service (${error.javaClass.simpleName})",
-                    )
-                    mapOf(
-                        "error" to "Could not start microphone service (${error.javaClass.simpleName})"
-                    ) to 500
+                    // startForegroundService() throws synchronously here (e.g.
+                    // ForegroundServiceStartNotAllowedException from the
+                    // background on Android 12+); report it, never crash.
+                    val message = MicrophoneRecorderService.startFailureMessage(error)
+                    MicrophoneRecordingState.markError(message)
+                    mapOf("error" to message) to 500
                 }
             }
 
