@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
@@ -26,6 +27,11 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE_SCREEN_RECORD = 1001
+        private const val REQUEST_CODE_RUN_COMMAND = 1002
+        private const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
+        private const val REVIVAL_PERMISSION_HELP =
+            "Grant \"Run commands in Termux environment\" to Hermes Bridge in App " +
+                "info, and set allow-external-apps=true in ~/.termux/termux.properties"
     }
 
     private lateinit var tvA11yStatus: TextView
@@ -163,16 +169,53 @@ class MainActivity : Activity() {
 
         // Opt-in for the Termux auto-revival watchdog (RUN_COMMAND).
         // Default OFF — silent script execution must be explicitly enabled.
+        // RUN_COMMAND is a dangerous permission, so enabling the toggle must
+        // request it at runtime; a denial turns the toggle back off.
         switchRevival.setOnCheckedChangeListener { _, isChecked ->
-            getSharedPreferences("hermes_bridge_prefs", MODE_PRIVATE)
-                .edit().putBoolean("termux_revival_enabled", isChecked).apply()
-            Toast.makeText(
-                this,
-                if (isChecked) "Termux auto-revival ON" else "Termux auto-revival OFF",
-                Toast.LENGTH_SHORT
-            ).show()
+            if (isChecked) {
+                if (checkSelfPermission(RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED) {
+                    setRevivalEnabled(true)
+                } else {
+                    requestPermissions(arrayOf(RUN_COMMAND_PERMISSION), REQUEST_CODE_RUN_COMMAND)
+                }
+            } else {
+                setRevivalEnabled(false)
+            }
         }
 
+    }
+
+    /** Persist the revival opt-in and confirm to the user. */
+    private fun setRevivalEnabled(enabled: Boolean) {
+        getSharedPreferences("hermes_bridge_prefs", MODE_PRIVATE)
+            .edit().putBoolean("termux_revival_enabled", enabled).apply()
+        Toast.makeText(
+            this,
+            if (enabled) "Termux auto-revival ON" else "Termux auto-revival OFF",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CODE_RUN_COMMAND) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                setRevivalEnabled(true)
+            } else {
+                setRevivalEnabled(false)
+                // Reflect the denial in the UI without re-triggering the request.
+                switchRevival.setOnCheckedChangeListener(null)
+                switchRevival.isChecked = false
+                setupPermissions()
+                Toast.makeText(this, REVIVAL_PERMISSION_HELP, Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun updatePermissionSwitches() {
