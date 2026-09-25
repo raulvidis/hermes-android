@@ -162,7 +162,7 @@ For any task, follow this pattern and then STOP:
 5. `android_tap_text("Type a message")`
 6. `android_type("<message text>")`
 7. **STOP** — Confirm with user before sending
-8. `android_tap_text("Send")` or `android_press_key("enter")`
+8. Tap the send button: `android_find_nodes(text="Send")` (it is usually an icon whose content description is "Send") and `android_tap(node_id=...)`, or `android_tap_text("Send")`. There is no Enter key — `android_press_key` only supports global actions.
 
 **Pitfalls:** Message input is `android.widget.EditText`. Read screen after typing to verify before sending.
 
@@ -176,12 +176,15 @@ Screenshot + vision loops are slow and burn tokens; the tree has the text alread
 3. To locate a specific message or conversation, `android_find_nodes(text="<keyword>")` is much cheaper than reading the whole screen.
 
 **Drafting without sending (review-first workflow):**
-```
-android_send_intent("android.intent.action.SENDTO",
-                    data_uri="smsto:<number>",
-                    extras={"sms_body": "<draft text>"})
-```
-This opens the compose screen pre-filled — the user reviews and hits send themselves. Prefer this over `android_send_sms` whenever the user wants to approve messages; `android_send_sms` sends immediately and must be confirmed with the user first.
+Do not use `android_send_intent` with `smsto:`/`sms:`/`mmsto:`/`mms:` URIs — the bridge blocks messaging schemes. Draft in the Messages UI instead:
+
+1. `android_open_app("com.google.android.apps.messaging")` (see the package pitfall below)
+2. Existing thread: `android_tap_text("<contact>")`. New thread: tap "Start chat" → `android_type("<name or number>")` → tap the match.
+3. `android_tap_text("Text message")` (the compose field; check with `android_find_nodes(class_name="android.widget.EditText")` if the hint differs) → `android_type("<draft text>")`
+4. `android_read_screen()` to verify recipient and text, then **STOP** — show the user the exact recipient and message. Never tap send without their explicit confirmation; if they want to send it themselves, leave the draft open.
+5. Only after confirmation: tap the send button (`android_find_nodes(text="Send")` → `android_tap(node_id=...)`).
+
+`android_send_sms` sends immediately with no draft step — it too must be confirmed with the user first.
 
 **Contact lookup:** `android_search_contacts("<name>")` returns numbers directly — don't navigate the Contacts app.
 
