@@ -260,7 +260,20 @@ object CommandDispatcher {
             method == "POST" && path == "/pinch" -> {
                 val x = body.get("x")?.asInt ?: 0
                 val y = body.get("y")?.asInt ?: 0
-                val scale = body.get("scale")?.asFloat ?: 1.5f
+                val scaleValue = body.get("scale")
+                val scale = when {
+                    scaleValue == null || scaleValue.isJsonNull -> 1.5f
+                    !scaleValue.isJsonPrimitive || !scaleValue.asJsonPrimitive.isNumber -> {
+                        return mapOf("error" to "scale must be a number") to 400
+                    }
+                    else -> scaleValue.asJsonPrimitive.asFloat
+                }
+                // Reject before dispatching to the main thread: a scale of 1
+                // never moves the fingers, and <= 0 / NaN / Infinity would
+                // build a nonsensical (or off-screen) gesture path.
+                ActionExecutor.pinchScaleError(scale)?.let { error ->
+                    return mapOf("error" to error) to 400
+                }
                 val duration = body.get("duration")?.asLong ?: 300L
                 val result = withContext(Dispatchers.Main) {
                     ActionExecutor.pinch(x, y, scale, duration)

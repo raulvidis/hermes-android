@@ -21,6 +21,9 @@ import com.hermesandroid.bridge.power.WakeLockManager
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
@@ -173,16 +176,18 @@ object ActionExecutor {
     }
 
     fun pressKey(key: String): ActionResult {
-        val service = BridgeAccessibilityService.instance
-            ?: return ActionResult(false, "Accessibility service not running")
-
         // "wake" turns the screen on (short press) — NOT the power dialog.
         // GLOBAL_ACTION_POWER_DIALOG is the long-press menu (reboot/emergency),
         // which is almost never what a caller wants when waking the device.
+        // Handled before the accessibility-service check: it only needs
+        // PowerManager, so it must keep working when the service is down.
         if (key == "wake") {
             val woke = WakeLockManager.wake()
             return ActionResult(woke, if (woke) "Woke screen" else "Wake failed (PowerManager unavailable)")
         }
+
+        val service = BridgeAccessibilityService.instance
+            ?: return ActionResult(false, "Accessibility service not running")
 
         val action = when (key) {
             "back" -> AccessibilityService.GLOBAL_ACTION_BACK
@@ -433,18 +438,54 @@ object ActionExecutor {
         return count
     }
 
+    /**
+     * Returns an error message if [scale] is not a usable pinch factor, or
+     * null if it is. A pinch needs a finite, positive factor other than 1
+     * (1 would dispatch a gesture whose fingers never move).
+     */
+    fun pinchScaleError(scale: Float): String? = when {
+        !scale.isFinite() -> "scale must be a finite number"
+        scale <= 0f -> "scale must be greater than 0"
+        scale == 1f -> "scale must not be 1 (use >1 to zoom in, <1 to zoom out)"
+        else -> null
+    }
+
     suspend fun pinch(x: Int, y: Int, scale: Float = 1.5f, duration: Long = 300): ActionResult =
         WakeLockManager.wakeForAction {
+        pinchScaleError(scale)?.let { return@wakeForAction ActionResult(false, it) }
         val service = BridgeAccessibilityService.instance
             ?: return@wakeForAction ActionResult(false, "Accessibility service not running")
+        val metrics = service.resources.displayMetrics
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        if (x !in 0 until w || y !in 0 until h) {
+            return@wakeForAction ActionResult(false, "Pinch center ($x, $y) is outside the screen (${w}x$h)")
+        }
         val centerX = x.toFloat()
         val centerY = y.toFloat()
         // Perpendicular strokes on opposite sides of center along the X axis.
         // Fingers start at ±startOff and end at ±endOff. For scale>1 (zoom in),
         // endOff > startOff so fingers move apart; for scale<1 (zoom out),
         // endOff < startOff so fingers move together.
-        val startOff = 50f
-        val endOff = 50f * scale
+        //
+        // The start span (2 * startOff) is ~40% of the short screen edge. A
+        // fixed 100px span is below ScaleGestureDetector's minimum scaling
+        // span (~27mm) on most devices, so apps silently ignored the gesture.
+        var startOff = minOf(w, h) * 0.2f
+        var endOff = startOff * scale
+        // Keep both fingers on screen for the whole gesture. The wider of the
+        // two spans is the one that can leave the screen; shrink both by the
+        // same factor so the effective scale is preserved.
+        val maxOff = minOf(centerX, (w - 1) - centerX)
+        val widest = maxOf(startOff, endOff)
+        if (widest > maxOff) {
+            val factor = maxOff / widest
+            startOff *= factor
+            endOff *= factor
+        }
+        if (minOf(startOff, endOff) < 1f) {
+            return@wakeForAction ActionResult(false, "Pinch center ($x, $y) is too close to the screen edge")
+        }
         val path1 = Path().apply {
             moveTo(centerX - startOff, centerY)
             lineTo(centerX - endOff, centerY)
@@ -641,99 +682,224 @@ object ActionExecutor {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // sendIntent / sendBroadcast safety lists.
+    //
+    // These are BEST-EFFORT denylists, not a security boundary. A paired
+    // caller already has full remote control of the device (it can tap its
+    // way through Settings via the accessibility service), and new or
+    // OEM-specific actions, schemes and providers appear all the time. The
+    // lists exist to stop the obvious one-shot foot-guns — package
+    // install/uninstall, factory reset, credential/admin changes, silent
+    // dial/SMS deep links — not to contain a hostile client. Do not rely on
+    // them for anything stronger than that.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Activity actions sendIntent refuses to launch. These have no legitimate
+     * agent use case via a raw intent (the dedicated call/send_sms tools cover
+     * telephony, and settings can be navigated to via open_app). Custom
+     * namespace actions (containing a dot) are NOT exempt, because
+     * package-manager actions like android.intent.action.DELETE are dotted too.
+     */
+    private val blockedIntentActions = setOf(
+        // Package management — install/uninstall from arbitrary sources
+        "android.intent.action.INSTALL_PACKAGE",
+        "android.intent.action.DELETE",
+        "android.intent.action.UNINSTALL_PACKAGE",
+        "android.intent.action.PACKAGE_INSTALL",
+        // Device wipe / factory reset / power
+        "android.intent.action.MASTER_CLEAR",
+        "android.intent.action.FACTORY_RESET",
+        "android.intent.action.ACTION_SHUTDOWN",
+        "android.intent.action.REBOOT",
+        "android.intent.action.REQUEST_SHUTDOWN",
+        "com.android.internal.intent.action.REQUEST_SHUTDOWN",
+        // Telephony — direct dial without confirmation
+        "android.intent.action.CALL",
+        "android.intent.action.CALL_PRIVILEGED",
+        "android.intent.action.CALL_EMERGENCY",
+        // Default-app / role changes (e.g. hijacking the default SMS app)
+        "android.provider.Telephony.ACTION_CHANGE_DEFAULT",
+        "android.telecom.action.CHANGE_DEFAULT_DIALER",
+        "android.app.role.action.REQUEST_ROLE",
+        // Runtime-permission management UI
+        "android.intent.action.MANAGE_PERMISSIONS",
+        "android.intent.action.MANAGE_APP_PERMISSIONS",
+        "android.intent.action.MANAGE_PERMISSION_APPS",
+        "android.intent.action.MANAGE_DEFAULT_APP",
+        // Device admin, screen lock and provisioning (android.app.action.*).
+        // An explicit list rather than a prefix: the namespace also holds
+        // harmless actions, and a prefix would hide which ones were meant.
+        "android.app.action.ADD_DEVICE_ADMIN",
+        "android.app.action.SET_NEW_PASSWORD",
+        "android.app.action.SET_NEW_PARENT_PROFILE_PASSWORD",
+        "android.app.action.START_ENCRYPTION",
+        "android.app.action.PROVISION_MANAGED_PROFILE",
+        "android.app.action.PROVISION_MANAGED_DEVICE",
+        "android.app.action.PROVISION_FINANCED_DEVICE",
+        "android.app.action.PROVISION_MANAGED_DEVICE_FROM_TRUSTED_SOURCE",
+        "android.app.action.CONFIRM_DEVICE_CREDENTIAL",
+        "android.app.action.CONFIRM_FRP_CREDENTIAL",
+        // Credential storage — install/reset CA and user certificates
+        "android.credentials.INSTALL",
+        "android.credentials.INSTALL_AS_USER",
+        "android.credentials.RESET",
+        "android.credentials.UNLOCK",
+        // Dangerous settings toggles — permissions, accessibility, dev options.
+        // (Also covered by the android.settings. prefix below; listed so the
+        // intent is explicit if the prefix rule ever changes.)
+        "android.settings.ACCESSIBILITY_SETTINGS",
+        "android.settings.APPLICATION_DETAILS_SETTINGS",
+        "android.settings.APPLICATION_DEVELOPMENT_SETTINGS",
+        "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
+        "android.settings.MANAGE_UNKNOWN_APP_SOURCES",
+        "android.settings.MANAGE_OVERLAY_PERMISSION",
+        "android.settings.action.MANAGE_OVERLAY_PERMISSION",
+        "android.settings.NOTIFICATION_LISTENER_SETTINGS",
+        "android.settings.USAGE_ACCESS_SETTINGS",
+        "android.settings.VR_LISTENER_SETTINGS",
+        "android.settings.WIFI_SETTINGS",
+        "android.settings.WIRELESS_SETTINGS",
+        "android.settings.AIRPLANE_MODE_SETTINGS",
+        "android.settings.DATA_ROAMING_SETTINGS",
+        "android.settings.SECURITY_SETTINGS",
+        "android.settings.PRIVACY_SETTINGS",
+        "android.settings.BIOMETRIC_ENROLL",
+        "android.settings.ADD_ACCOUNT_SETTINGS",
+        "android.settings.SYNC_SETTINGS",
+        // Unknown app sources (alternate action name)
+        "android.provider.action.MANAGE_UNKNOWN_APP_SOURCES",
+        // App ops — can grant dangerous permissions
+        "android.settings.APP_OPS_SETTINGS"
+    )
+
+    /** Any action in these namespaces is refused (settings / provider screens). */
+    private val blockedIntentActionPrefixes = listOf(
+        "android.settings.",
+        "android.provider.action."
+    )
+
+    /**
+     * Packages sendIntent will not target via packageOverride: the system
+     * Settings app and the permission / package installer UIs. Reaching these
+     * with an arbitrary action sidesteps the action blocklist entirely.
+     */
+    private val blockedIntentPackages = setOf(
+        "com.android.settings",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller"
+    )
+
+    /**
+     * URI schemes that turn a benign action (e.g. VIEW) into something the
+     * action blocklist is meant to prevent: intent:// redirects, Play Store
+     * deep links, and dial / SMS / MMS / SIP / voicemail composers.
+     */
+    private val blockedUriSchemes = setOf(
+        "intent", "market",
+        "sms", "smsto", "mms", "mmsto",
+        "tel", "sip", "voicemail", "wtai"
+    )
+
+    /**
+     * content:// authorities holding settings, contacts, call log, SMS/MMS and
+     * SIM data. Matched against the parsed authority, not a string prefix, so
+     * content://CALL_LOG/... and user-qualified content://10@com.android.contacts
+     * are caught too.
+     */
+    private val blockedContentAuthorities = setOf(
+        "settings",
+        "com.android.contacts", "contacts",
+        "call_log",
+        "sms", "mms", "mms-sms",
+        "icc"
+    )
+
+    /**
+     * Web hosts that open the Play Store exactly like market:// does. Blocking
+     * market:// alone is pointless if https://play.google.com/store/... works.
+     * A null path prefix means every path on the host is blocked.
+     */
+    private val blockedStoreHosts = mapOf(
+        "play.google.com" to "/store",
+        "market.android.com" to null
+    )
+
+    /**
+     * Returns a rejection message if [dataUri] must not be attached to an
+     * outgoing intent, or null if it is allowed.
+     */
+    private fun blockedDataUriReason(dataUri: String): String? {
+        val uri = android.net.Uri.parse(dataUri)
+        // Two scheme readings, both checked. Uri.getScheme() is what intent
+        // resolution actually sees; the manual split also covers single-colon
+        // schemes (tel:, smsto:) in case parsing ever disagrees — there
+        // substringBefore("://") alone would return the whole "tel:123456".
+        val parsedScheme = uri.scheme?.trim()?.lowercase()
+        val manualScheme = dataUri.trim().substringBefore("://").substringBefore(":").lowercase()
+        for (candidate in listOfNotNull(parsedScheme, manualScheme)) {
+            if (candidate in blockedUriSchemes) {
+                return "URI scheme '$candidate' is blocked for safety"
+            }
+        }
+        val scheme = parsedScheme ?: manualScheme
+        if (scheme == "content") {
+            // Strip a "<userId>@" qualifier (content://10@com.android.contacts).
+            val authority = uri.authority?.substringAfterLast('@')?.trim()?.lowercase()
+            if (authority != null && authority in blockedContentAuthorities) {
+                return "Content provider URI is blocked for safety"
+            }
+        }
+        if (scheme == "http" || scheme == "https") {
+            val host = uri.host?.trim()?.lowercase()?.removeSuffix(".")
+            if (host != null && blockedStoreHosts.containsKey(host)) {
+                val pathPrefix = blockedStoreHosts[host]
+                val path = uri.path?.lowercase() ?: ""
+                if (pathPrefix == null || path == pathPrefix || path.startsWith("$pathPrefix/")) {
+                    return "Play Store links are blocked for safety"
+                }
+            }
+        }
+        return null
+    }
+
     fun sendIntent(action: String, dataUri: String? = null, extras: Map<String, String>? = null, packageOverride: String? = null): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
 
-        // Reject activity-launch actions that could be used to install/uninstall
-        // packages, factory reset, or otherwise damage the device. These have no
-        // legitimate agent use case via a raw intent (the dedicated call/send_sms
-        // tools cover telephony, and settings can be navigated to via open_app).
-        // Custom namespace actions (containing a dot) are NOT exempt here, because
-        // package-manager actions like android.intent.action.DELETE are also dotted.
-        val blockedIntents = setOf(
-            // Package management — install/uninstall from arbitrary sources
-            "android.intent.action.INSTALL_PACKAGE",
-            "android.intent.action.DELETE",
-            "android.intent.action.UNINSTALL_PACKAGE",
-            "android.intent.action.PACKAGE_INSTALL",
-            // Device wipe / factory reset
-            "android.intent.action.MASTER_CLEAR",
-            "android.intent.action.FACTORY_RESET",
-            "android.intent.action.ACTION_SHUTDOWN",
-            // Telephony — direct dial without confirmation
-            "android.intent.action.CALL",
-            "android.intent.action.CALL_PRIVILEGED",
-            // Dangerous settings toggles — permissions, accessibility, dev options
-            "android.settings.ACCESSIBILITY_SETTINGS",
-            "android.settings.APPLICATION_DETAILS_SETTINGS",
-            "android.settings.APPLICATION_DEVELOPMENT_SETTINGS",
-            "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
-            "android.settings.MANAGE_UNKNOWN_APP_SOURCES",
-            "android.settings.MANAGE_OVERLAY_PERMISSION",
-            "android.settings.action.MANAGE_OVERLAY_PERMISSION",
-            "android.settings.NOTIFICATION_LISTENER_SETTINGS",
-            "android.settings.USAGE_ACCESS_SETTINGS",
-            "android.settings.VR_LISTENER_SETTINGS",
-            "android.settings.WIFI_SETTINGS",
-            "android.settings.WIRELESS_SETTINGS",
-            "android.settings.AIRPLANE_MODE_SETTINGS",
-            "android.settings.DATA_ROAMING_SETTINGS",
-            "android.settings.SECURITY_SETTINGS",
-            "android.settings.PRIVACY_SETTINGS",
-            "android.settings.BIOMETRIC_ENROLL",
-            "android.settings.ADD_ACCOUNT_SETTINGS",
-            "android.settings.SYNC_SETTINGS",
-            // Unknown app sources (alternate action name)
-            "android.provider.action.MANAGE_UNKNOWN_APP_SOURCES",
-            // App ops — can grant dangerous permissions
-            "android.settings.APP_OPS_SETTINGS"
-        )
-        // Block any android.settings.* action that isn't explicitly allowlisted
-        val blockedPrefixes = listOf(
-            "android.settings.",
-            "android.provider.action."
-        )
         if (action.isBlank()) {
             return ActionResult(false, "Intent action is empty")
         }
-        if (action in blockedIntents) {
+        if (action in blockedIntentActions) {
             return ActionResult(false, "Intent action '$action' is blocked for safety")
         }
-        if (blockedPrefixes.any { action.startsWith(it) }) {
+        if (blockedIntentActionPrefixes.any { action.startsWith(it) }) {
             return ActionResult(false, "Intent action '$action' is blocked for safety (settings/provider actions are not allowed)")
         }
-
-        val intent = Intent(action).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (dataUri != null) {
-                // Denylist dangerous URI schemes that can bypass the action blocklist.
-                // An attacker can use a benign action like VIEW with a malicious URI
-                // (intent:// redirects, content:// providers, market:// deep links,
-                //  tel:, smsto:, mmsto:).
-                val blockedUriSchemes = setOf("intent", "market", "smsto", "mmsto", "tel")
-                val blockedUriPrefixes = listOf("content://settings", "content://com.android.contacts")
-                // Handle both standard schemes (http://, intent://) and single-colon
-                // schemes (tel:, smsto:, mmsto:). substringBefore("://") alone fails
-                // for single-colon URIs because "://" is absent, returning the full
-                // string (e.g. "tel:123456") instead of just "tel".
-                val scheme = dataUri.substringBefore("://").substringBefore(":").lowercase()
-                if (scheme in blockedUriSchemes) {
-                    return ActionResult(false, "URI scheme '$scheme' is blocked for safety")
-                }
-                if (blockedUriPrefixes.any { dataUri.lowercase().startsWith(it) }) {
-                    return ActionResult(false, "Content provider URI is blocked for safety")
-                }
-                setData(android.net.Uri.parse(dataUri))
-            }
-            extras?.forEach { (key, value) ->
-                putExtra(key, value)
-            }
-            if (packageOverride != null) {
-                setPackage(packageOverride)
-            }
+        if (packageOverride != null && packageOverride.trim().lowercase() in blockedIntentPackages) {
+            return ActionResult(false, "Target package '$packageOverride' is blocked for safety")
         }
+        if (dataUri != null) {
+            val reason = blockedDataUriReason(dataUri)
+            if (reason != null) return ActionResult(false, reason)
+        }
+
         return try {
+            val intent = Intent(action).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (dataUri != null) {
+                    setData(android.net.Uri.parse(dataUri))
+                }
+                extras?.forEach { (key, value) ->
+                    putExtra(key, value)
+                }
+                if (packageOverride != null) {
+                    setPackage(packageOverride)
+                }
+            }
             service.startActivity(intent)
             ActionResult(true, "Intent sent: $action")
         } catch (e: Exception) {
@@ -741,42 +907,52 @@ object ActionExecutor {
         }
     }
 
+    /**
+     * System broadcasts sendBroadcast refuses to send. Most are protected
+     * broadcasts the OS rejects anyway (SecurityException); listing them keeps
+     * the refusal explicit instead of relying on that. Any other action —
+     * dotted system actions included — is sent as-is, so like the sendIntent
+     * lists above this is best-effort, not a boundary.
+     */
+    private val blockedBroadcastActions = setOf(
+        "android.intent.action.MEDIA_MOUNTED",
+        "android.intent.action.MEDIA_UNMOUNTED",
+        "android.intent.action.MEDIA_EJECT",
+        "android.intent.action.MEDIA_SCANNER_FINISHED",
+        "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+        "android.intent.action.PACKAGE_ADDED",
+        "android.intent.action.PACKAGE_REMOVED",
+        "android.intent.action.PACKAGE_REPLACED",
+        "android.intent.action.PACKAGE_DATA_CLEARED",
+        "android.intent.action.DEVICE_STORAGE_LOW",
+        "android.intent.action.DEVICE_STORAGE_OK",
+        "android.intent.action.ACTION_SHUTDOWN",
+        "android.intent.action.MASTER_CLEAR",
+        "android.intent.action.FACTORY_RESET",
+        "android.intent.action.REBOOT",
+        "com.android.internal.intent.action.REQUEST_SHUTDOWN"
+    )
+
     fun sendBroadcast(action: String, extras: Map<String, String>? = null): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
 
-        // Block known-dangerous system broadcasts that can cause DoS or abuse
-        // device resources when fired from an unprivileged bridge context.
-        // Custom namespace actions (containing a dot) are allowed.
-        val blockedBroadcasts = setOf(
-            "android.intent.action.MEDIA_MOUNTED",
-            "android.intent.action.MEDIA_UNMOUNTED",
-            "android.intent.action.MEDIA_EJECT",
-            "android.intent.action.MEDIA_SCANNER_FINISHED",
-            "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-            "android.intent.action.PACKAGE_ADDED",
-            "android.intent.action.PACKAGE_REMOVED",
-            "android.intent.action.PACKAGE_REPLACED",
-            "android.intent.action.PACKAGE_DATA_CLEARED",
-            "android.intent.action.DEVICE_STORAGE_LOW",
-            "android.intent.action.DEVICE_STORAGE_OK",
-            "android.intent.action.ACTION_SHUTDOWN",
-            "android.intent.action.MASTER_CLEAR",
-            "android.intent.action.FACTORY_RESET"
-        )
         if (action.isBlank()) {
             return ActionResult(false, "Broadcast action is empty")
         }
-        if (action in blockedBroadcasts) {
+        if (action in blockedBroadcastActions) {
             return ActionResult(false, "Broadcast action '$action' is blocked for safety")
         }
 
+        // Catch everything, as sendIntent does: SecurityException for a
+        // protected broadcast is the common case, but anything thrown here
+        // must become an error result rather than escape as a 500.
         return try {
             val intent = Intent(action)
             extras?.forEach { (key, value) -> intent.putExtra(key, value) }
             service.sendBroadcast(intent)
             ActionResult(true, "Broadcast sent: $action")
-        } catch (e: SecurityException) {
+        } catch (e: Exception) {
             ActionResult(false, "Broadcast failed: ${e.message}")
         }
     }
@@ -911,19 +1087,56 @@ object ActionExecutor {
 
     @Volatile private var tts: android.speech.tts.TextToSpeech? = null
     @Volatile private var ttsReady = false
+    /** Wall-clock time of the last failed init, or 0 if the last init did not fail. */
+    @Volatile private var ttsFailedAt = 0L
+    /** Serialises ensureTts so concurrent /speak calls cannot each create an engine. */
+    private val ttsMutex = Mutex()
+    private const val TTS_INIT_TIMEOUT_MS = 10_000L
+    /**
+     * After a failed init, don't try again for this long. On a device with no
+     * TTS engine every attempt fails, and without a backoff each /speak call
+     * would bind (and leak) a fresh TextToSpeech instance.
+     */
+    private const val TTS_RETRY_BACKOFF_MS = 60_000L
 
-    private suspend fun ensureTts(): Boolean {
-        val service = BridgeAccessibilityService.instance ?: return false
-        if (tts == null || !ttsReady) {
-            ttsReady = suspendCancellableCoroutine { cont ->
-                tts = android.speech.tts.TextToSpeech(service.applicationContext, android.speech.tts.TextToSpeech.OnInitListener { status ->
-                    val ready = status == android.speech.tts.TextToSpeech.SUCCESS
-                    ttsReady = ready
-                    cont.resume(ready)
-                })
-            }
+    private suspend fun ensureTts(): Boolean = ttsMutex.withLock {
+        if (tts != null && ttsReady) return@withLock true
+        val failedAt = ttsFailedAt
+        if (failedAt != 0L && System.currentTimeMillis() - failedAt < TTS_RETRY_BACKOFF_MS) {
+            return@withLock false
         }
-        return ttsReady
+        val service = BridgeAccessibilityService.instance ?: return@withLock false
+
+        // Discard any instance left over from an earlier, unfinished init.
+        tts?.shutdown()
+        tts = null
+        ttsReady = false
+
+        var created: android.speech.tts.TextToSpeech? = null
+        val ready = withTimeoutOrNull(TTS_INIT_TIMEOUT_MS) {
+            suspendCancellableCoroutine<Boolean> { cont ->
+                created = android.speech.tts.TextToSpeech(
+                    service.applicationContext,
+                    android.speech.tts.TextToSpeech.OnInitListener { status ->
+                        // May fire after a timeout has already cancelled us.
+                        if (cont.isActive) cont.resume(status == android.speech.tts.TextToSpeech.SUCCESS)
+                    }
+                )
+            }
+        } ?: false
+
+        val instance = created
+        if (ready && instance != null) {
+            tts = instance
+            ttsReady = true
+            ttsFailedAt = 0L
+            true
+        } else {
+            // A failed (or timed-out) engine still holds a service binding.
+            try { instance?.shutdown() } catch (_: Exception) {}
+            ttsFailedAt = System.currentTimeMillis()
+            false
+        }
     }
 
     suspend fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult {
@@ -943,6 +1156,7 @@ object ActionExecutor {
         tts?.shutdown()
         tts = null
         ttsReady = false
+        ttsFailedAt = 0L
     }
 
     private fun Context.hasSelfPermission(permission: String): Boolean {

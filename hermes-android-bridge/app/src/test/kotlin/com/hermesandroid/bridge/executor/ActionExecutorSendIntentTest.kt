@@ -238,4 +238,182 @@ class ActionExecutorSendIntentTest {
         assertTrue("expected success — got: ${result.message}", result.success)
         verify(exactly = 1) { mockService.startActivity(any()) }
     }
+
+    // --- Expanded denylist: SMS/MMS/SIP schemes, Play Store web links,
+    // content authorities, credential/admin actions, blocked packages ---
+
+    private fun assertIntentBlocked(
+        action: String = "android.intent.action.VIEW",
+        dataUri: String? = null,
+        packageOverride: String? = null,
+        expectMessage: String? = null,
+    ) {
+        val result = ActionExecutor.sendIntent(
+            action = action, dataUri = dataUri, packageOverride = packageOverride
+        )
+        assertFalse("expected block for action=$action uri=$dataUri pkg=$packageOverride", result.success)
+        if (expectMessage != null) {
+            assertTrue("message was: ${result.message}", result.message.contains(expectMessage))
+        }
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks sms and mms URI schemes`() {
+        assertIntentBlocked(dataUri = "sms:5551234", expectMessage = "URI scheme 'sms' is blocked")
+        assertIntentBlocked(dataUri = "mms:5551234", expectMessage = "URI scheme 'mms' is blocked")
+        assertIntentBlocked(dataUri = "mmsto:5551234", expectMessage = "URI scheme 'mmsto' is blocked")
+    }
+
+    @Test
+    fun `sendIntent blocks sip voicemail and wtai URI schemes`() {
+        assertIntentBlocked(dataUri = "sip:alice@example.com", expectMessage = "URI scheme 'sip' is blocked")
+        assertIntentBlocked(dataUri = "voicemail:", expectMessage = "URI scheme 'voicemail' is blocked")
+        assertIntentBlocked(dataUri = "wtai://wp/mc;5551234", expectMessage = "URI scheme 'wtai' is blocked")
+    }
+
+    @Test
+    fun `sendIntent blocks schemes regardless of case`() {
+        assertIntentBlocked(dataUri = "SMS:5551234", expectMessage = "URI scheme 'sms' is blocked")
+        assertIntentBlocked(dataUri = "Tel:5551234", expectMessage = "URI scheme 'tel' is blocked")
+    }
+
+    @Test
+    fun `sendIntent blocks Play Store web links`() {
+        assertIntentBlocked(
+            dataUri = "https://play.google.com/store/apps/details?id=com.example",
+            expectMessage = "Play Store links are blocked"
+        )
+        assertIntentBlocked(
+            dataUri = "http://PLAY.GOOGLE.COM/store/apps/details?id=com.example",
+            expectMessage = "Play Store links are blocked"
+        )
+        assertIntentBlocked(
+            dataUri = "https://market.android.com/details?id=com.example",
+            expectMessage = "Play Store links are blocked"
+        )
+    }
+
+    @Test
+    fun `sendIntent allows non-store pages on play google com`() {
+        every { mockService.startActivity(any()) } returns Unit
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "https://play.google.com/about/developer-content-policy/"
+        )
+        assertTrue("expected success — got: ${result.message}", result.success)
+        verify(exactly = 1) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent blocks sensitive content authorities`() {
+        for (uri in listOf(
+            "content://contacts/people",
+            "content://call_log/calls",
+            "content://sms/inbox",
+            "content://mms/part",
+            "content://mms-sms/conversations",
+            "content://icc/adn",
+        )) {
+            assertIntentBlocked(dataUri = uri, expectMessage = "Content provider URI is blocked")
+        }
+    }
+
+    @Test
+    fun `sendIntent content authority check is case-insensitive and ignores a user prefix`() {
+        assertIntentBlocked(dataUri = "content://CALL_LOG/calls", expectMessage = "Content provider URI is blocked")
+        assertIntentBlocked(
+            dataUri = "content://10@com.android.contacts/contacts",
+            expectMessage = "Content provider URI is blocked"
+        )
+    }
+
+    @Test
+    fun `sendIntent allows an unrelated content authority`() {
+        every { mockService.startActivity(any()) } returns Unit
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "content://com.example.provider/items/1"
+        )
+        assertTrue("expected success — got: ${result.message}", result.success)
+    }
+
+    @Test
+    fun `sendIntent blocks password credential and device admin actions`() {
+        for (action in listOf(
+            "android.app.action.SET_NEW_PASSWORD",
+            "android.app.action.SET_NEW_PARENT_PROFILE_PASSWORD",
+            "android.app.action.ADD_DEVICE_ADMIN",
+            "android.app.action.PROVISION_MANAGED_PROFILE",
+            "android.credentials.INSTALL",
+            "android.credentials.RESET",
+            "android.provider.Telephony.ACTION_CHANGE_DEFAULT",
+            "android.app.role.action.REQUEST_ROLE",
+            "android.intent.action.REBOOT",
+        )) {
+            assertIntentBlocked(action = action, expectMessage = "blocked for safety")
+        }
+    }
+
+    @Test
+    fun `sendIntent blocks targeting the Settings package`() {
+        assertIntentBlocked(
+            action = "android.intent.action.MAIN",
+            packageOverride = "com.android.settings",
+            expectMessage = "Target package 'com.android.settings' is blocked"
+        )
+        assertIntentBlocked(
+            action = "android.intent.action.VIEW",
+            packageOverride = "com.google.android.permissioncontroller",
+            expectMessage = "is blocked for safety"
+        )
+    }
+
+    @Test
+    fun `sendIntent allows an ordinary package override`() {
+        every { mockService.startActivity(any()) } returns Unit
+        val result = ActionExecutor.sendIntent(
+            action = "android.intent.action.VIEW",
+            dataUri = "https://example.com",
+            packageOverride = "com.android.chrome"
+        )
+        assertTrue("expected success — got: ${result.message}", result.success)
+        verify(exactly = 1) { mockService.startActivity(any()) }
+    }
+
+    @Test
+    fun `sendIntent turns a startActivity failure into an error result`() {
+        every { mockService.startActivity(any()) } throws RuntimeException("no activity")
+        val result = ActionExecutor.sendIntent(action = "com.example.app.OPEN_DETAIL")
+        assertFalse(result.success)
+        assertTrue(result.message.contains("Intent failed"))
+    }
+
+    // --- sendBroadcast ---
+
+    @Test
+    fun `sendBroadcast blocks a listed system broadcast`() {
+        val result = ActionExecutor.sendBroadcast("android.intent.action.FACTORY_RESET")
+        assertFalse(result.success)
+        assertTrue(result.message.contains("blocked for safety"))
+        verify(exactly = 0) { mockService.sendBroadcast(any()) }
+    }
+
+    @Test
+    fun `sendBroadcast turns any exception into an error result`() {
+        // Not just SecurityException: anything thrown must become a failed
+        // ActionResult, never escape to the transport as a 500.
+        every { mockService.sendBroadcast(any()) } throws IllegalArgumentException("bad extras")
+        val result = ActionExecutor.sendBroadcast("com.example.app.PING")
+        assertFalse(result.success)
+        assertEquals("Broadcast failed: bad extras", result.message)
+    }
+
+    @Test
+    fun `sendBroadcast sends an unlisted custom action`() {
+        every { mockService.sendBroadcast(any()) } returns Unit
+        val result = ActionExecutor.sendBroadcast("com.example.app.PING", mapOf("k" to "v"))
+        assertTrue("expected success — got: ${result.message}", result.success)
+        verify(exactly = 1) { mockService.sendBroadcast(any()) }
+    }
 }

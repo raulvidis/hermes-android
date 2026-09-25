@@ -7,6 +7,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Base64
@@ -18,23 +19,35 @@ object ScreenRecorder {
         "No MediaProjection. Grant Screen Recording in the app before each capture on Android 16."
     private const val MAX_DURATION_MS = 30_000L
 
-    @Volatile private var projectionResultCode: Int? = null
-    @Volatile private var projectionData: Intent? = null
+    /**
+     * The user's MediaProjection consent (the result of the system capture
+     * dialog). Held as one immutable object so a recording can clear exactly
+     * the grant it consumed — never a newer one set while it was running.
+     */
+    private class ProjectionGrant(val resultCode: Int, val data: Intent)
+
+    @Volatile private var grant: ProjectionGrant? = null
     @Volatile private var recorder: MediaRecorder? = null
     @Volatile private var virtualDisplay: VirtualDisplay? = null
     private val handlerThread = HandlerThread("ScreenRecorder").apply { start() }
     private val handler = Handler(handlerThread.looper)
 
-    fun hasPermission(): Boolean = projectionData != null
+    /**
+     * True only while a grant is held that [record] can still use. Grants are
+     * dropped once consumed on Android 14+ (see [record]) and whenever the
+     * platform rejects one, so this does not report a stale token as usable.
+     */
+    fun hasPermission(): Boolean = grant != null
 
+    @Synchronized
     fun setProjectionPermission(resultCode: Int, data: Intent) {
-        projectionResultCode = resultCode
-        projectionData = Intent(data)
+        grant = ProjectionGrant(resultCode, Intent(data))
     }
 
-    private fun clearProjectionPermission() {
-        projectionResultCode = null
-        projectionData = null
+    /** Clears [used] if it is still the current grant; a newer grant is kept. */
+    @Synchronized
+    private fun clearProjectionPermission(used: ProjectionGrant) {
+        if (grant === used) grant = null
     }
 
     /**
@@ -47,10 +60,10 @@ object ScreenRecorder {
         val safeDuration = durationMs.coerceAtMost(MAX_DURATION_MS)
         val service = BridgeAccessibilityService.instance
             ?: return mapOf("success" to false, "message" to "Accessibility service not running")
-        val resultCode = projectionResultCode
+        val usedGrant = grant
             ?: return mapOf("success" to false, "message" to NO_PERMISSION_MESSAGE)
-        val resultData = projectionData
-            ?: return mapOf("success" to false, "message" to NO_PERMISSION_MESSAGE)
+        val resultCode = usedGrant.resultCode
+        val resultData = usedGrant.data
 
         val latch = java.util.concurrent.CountDownLatch(1)
         val resultHolder = arrayOf<Map<String, Any?>?>(null)
@@ -127,7 +140,9 @@ object ScreenRecorder {
                 cleanupRecording()
                 outputFile?.delete()
                 if (e is SecurityException || e is IllegalStateException) {
-                    clearProjectionPermission()
+                    // The platform rejected the token itself — it is dead on
+                    // every Android version.
+                    clearProjectionPermission(usedGrant)
                 }
                 resultHolder[0] = mapOf("success" to false, "message" to "Recording failed: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
@@ -135,6 +150,21 @@ object ScreenRecorder {
                     if (projectionCallback != null) projection?.unregisterCallback(projectionCallback)
                 } catch (_: Exception) {}
                 try { projection?.stop() } catch (_: Exception) {}
+                // Android 14+ makes the consent token single-use: once
+                // getMediaProjection() has handed out a projection, calling it
+                // again with the same Intent throws SecurityException. So drop
+                // the grant after it has actually been consumed — whether the
+                // recording then succeeded or failed — and let hasPermission()
+                // report that a fresh grant is needed.
+                //
+                // Below 14 the token is reusable across recordings. deae1fc
+                // removed an unconditional clear here precisely so users on
+                // those versions don't have to re-grant before every capture;
+                // this keeps that behaviour and only clears where reuse is
+                // impossible anyway.
+                if (projection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    clearProjectionPermission(usedGrant)
+                }
                 latch.countDown()
             }
         }
