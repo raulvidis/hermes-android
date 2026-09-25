@@ -59,6 +59,41 @@ class WavFileWriterTest {
         assertFalse(pending.completedFile.exists())
     }
 
+    @Test
+    fun `repairHeader fixes sizes of an unfinalized WAV and drops a torn sample`() {
+        val directory = temporaryFolder.newFolder("repair")
+        val pending = PendingMicrophoneRecording(
+            temporaryFile = directory.resolve("recording.wav.part"),
+            completedFile = directory.resolve("recording.wav"),
+        )
+        // Simulate process death: samples flushed, header never finalized.
+        val writer = WavFileWriter(pending, sampleRate = 16_000)
+        writer.write(shortArrayOf(1, 2, 3), 3)
+        writer.close()
+        pending.temporaryFile.appendBytes(byteArrayOf(0x7f)) // half a sample
+        assertEquals(0, littleEndianInt(pending.temporaryFile.readBytes(), 40))
+
+        val dataSize = WavFileWriter.repairHeader(pending.temporaryFile)
+
+        val bytes = pending.temporaryFile.readBytes()
+        assertEquals(6L, dataSize)
+        assertEquals(44 + 6, bytes.size)
+        assertEquals(bytes.size - 8, littleEndianInt(bytes, 4))
+        assertEquals(6, littleEndianInt(bytes, 40))
+        assertArrayEquals(byteArrayOf(1, 0, 2, 0, 3, 0), bytes.copyOfRange(44, bytes.size))
+    }
+
+    @Test
+    fun `repairHeader rejects files that are not our WAV layout`() {
+        val directory = temporaryFolder.newFolder("repair_invalid")
+        val tooShort = directory.resolve("short.wav.part").apply { writeBytes(ByteArray(10)) }
+        val notWav = directory.resolve("junk.wav.part").apply { writeBytes(ByteArray(100) { 7 }) }
+
+        assertEquals(-1L, WavFileWriter.repairHeader(tooShort))
+        assertEquals(-1L, WavFileWriter.repairHeader(notWav))
+        assertEquals(100L, notWav.length())
+    }
+
     private fun littleEndianInt(bytes: ByteArray, offset: Int): Int =
         ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
 }
