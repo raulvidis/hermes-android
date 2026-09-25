@@ -62,3 +62,50 @@ class ReconnectPolicy(
         attemptCount = 0
     }
 }
+
+/**
+ * What [RelayClient.scheduleReconnect] should do when a dead socket lands back
+ * on it. Extracted as a pure enum + function so the exact ordering the
+ * production path relies on can be unit-tested without OkHttp, coroutines or
+ * Android — the test exercises THIS, not a copy of the loop.
+ */
+enum class ReconnectAction {
+    /** Not reconnecting at all (disconnected, or the scope is already gone). */
+    IGNORE,
+
+    /** Another callback for the same dead socket already scheduled an attempt. */
+    SKIP_PENDING,
+
+    /** The retry budget for this cycle is spent — hand off to the give-up /
+     *  watchdog path. */
+    EXHAUSTED,
+
+    /** Schedule the next backed-off reconnect attempt. */
+    ATTEMPT,
+}
+
+/**
+ * Decide what a reconnect request should do.
+ *
+ * The ordering is load-bearing and mirrors the production callback path:
+ *  1. bail if we should not reconnect or the scope is gone,
+ *  2. THEN honour an in-flight pending attempt (so a second callback for the
+ *     same socket does not consume the budget the first one just spent),
+ *  3. THEN check exhaustion,
+ *  4. otherwise attempt.
+ *
+ * `reconnectPending` MUST be evaluated before `isExhausted`: swapping them lets
+ * the second of onClosed/onFailure declare failure while the first's final
+ * attempt is still waiting out its backoff, silently skipping the last retry.
+ */
+fun decideReconnect(
+    shouldReconnect: Boolean,
+    hasScope: Boolean,
+    reconnectPending: Boolean,
+    isExhausted: Boolean,
+): ReconnectAction {
+    if (!shouldReconnect || !hasScope) return ReconnectAction.IGNORE
+    if (reconnectPending) return ReconnectAction.SKIP_PENDING
+    if (isExhausted) return ReconnectAction.EXHAUSTED
+    return ReconnectAction.ATTEMPT
+}

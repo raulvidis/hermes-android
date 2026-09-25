@@ -28,9 +28,16 @@ class ReconnectPolicyTest {
         val policy = ReconnectPolicy(maxRetries = 5)
 
         var attemptsMade = 0
-        // Simulate 100 failure callbacks against an unreachable address.
+        // Drive the SAME decision function production uses, not a copy of the
+        // loop, so this regression is pinned to the real code path.
         repeat(100) {
-            if (!policy.isExhausted) {
+            val action = decideReconnect(
+                shouldReconnect = true,
+                hasScope = true,
+                reconnectPending = false,
+                isExhausted = policy.isExhausted,
+            )
+            if (action == ReconnectAction.ATTEMPT) {
                 policy.nextBackoffMs()
                 attemptsMade++
             }
@@ -78,7 +85,13 @@ class ReconnectPolicyTest {
 
         var attemptsMade = 0
         repeat(100) {
-            if (!policy.isExhausted) {
+            val action = decideReconnect(
+                shouldReconnect = true,
+                hasScope = true,
+                reconnectPending = false,
+                isExhausted = policy.isExhausted,
+            )
+            if (action == ReconnectAction.ATTEMPT) {
                 policy.nextBackoffMs()
                 attemptsMade++
                 // Connection opens, then dies 250ms later — never stable.
