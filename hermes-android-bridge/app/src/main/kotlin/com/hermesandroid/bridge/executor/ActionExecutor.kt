@@ -435,18 +435,54 @@ object ActionExecutor {
         return count
     }
 
+    /**
+     * Returns an error message if [scale] is not a usable pinch factor, or
+     * null if it is. A pinch needs a finite, positive factor other than 1
+     * (1 would dispatch a gesture whose fingers never move).
+     */
+    fun pinchScaleError(scale: Float): String? = when {
+        !scale.isFinite() -> "scale must be a finite number"
+        scale <= 0f -> "scale must be greater than 0"
+        scale == 1f -> "scale must not be 1 (use >1 to zoom in, <1 to zoom out)"
+        else -> null
+    }
+
     suspend fun pinch(x: Int, y: Int, scale: Float = 1.5f, duration: Long = 300): ActionResult =
         WakeLockManager.wakeForAction {
+        pinchScaleError(scale)?.let { return@wakeForAction ActionResult(false, it) }
         val service = BridgeAccessibilityService.instance
             ?: return@wakeForAction ActionResult(false, "Accessibility service not running")
+        val metrics = service.resources.displayMetrics
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        if (x !in 0 until w || y !in 0 until h) {
+            return@wakeForAction ActionResult(false, "Pinch center ($x, $y) is outside the screen (${w}x$h)")
+        }
         val centerX = x.toFloat()
         val centerY = y.toFloat()
         // Perpendicular strokes on opposite sides of center along the X axis.
         // Fingers start at ±startOff and end at ±endOff. For scale>1 (zoom in),
         // endOff > startOff so fingers move apart; for scale<1 (zoom out),
         // endOff < startOff so fingers move together.
-        val startOff = 50f
-        val endOff = 50f * scale
+        //
+        // The start span (2 * startOff) is ~40% of the short screen edge. A
+        // fixed 100px span is below ScaleGestureDetector's minimum scaling
+        // span (~27mm) on most devices, so apps silently ignored the gesture.
+        var startOff = minOf(w, h) * 0.2f
+        var endOff = startOff * scale
+        // Keep both fingers on screen for the whole gesture. The wider of the
+        // two spans is the one that can leave the screen; shrink both by the
+        // same factor so the effective scale is preserved.
+        val maxOff = minOf(centerX, (w - 1) - centerX)
+        val widest = maxOf(startOff, endOff)
+        if (widest > maxOff) {
+            val factor = maxOff / widest
+            startOff *= factor
+            endOff *= factor
+        }
+        if (minOf(startOff, endOff) < 1f) {
+            return@wakeForAction ActionResult(false, "Pinch center ($x, $y) is too close to the screen edge")
+        }
         val path1 = Path().apply {
             moveTo(centerX - startOff, centerY)
             lineTo(centerX - endOff, centerY)
