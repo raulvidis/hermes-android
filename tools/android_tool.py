@@ -52,8 +52,11 @@ Tools registered:
 
 import json
 import os
+import re
+import secrets
 import time
 import requests
+from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
@@ -68,11 +71,54 @@ from urllib.parse import quote
 # by setting ANDROID_BRIDGE_URL to the phone's IP.
 
 
-_ENV_FILE_CACHE: Optional[dict] = None
+# (path, mtime_ns, size, parsed) of the last .env read — re-parsed whenever the
+# file changes, so a file that was missing or empty at first use is picked up
+# once android_setup (or the user) writes it.
+_ENV_FILE_CACHE: Optional[tuple] = None
+
+
+def _hermes_env_path() -> Path:
+    """The .env both the reader and the fallback writer use.
+
+    $HERMES_HOME/.env if HERMES_HOME is set, else ~/.hermes/.env.
+    """
+    home = os.environ.get("HERMES_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".hermes"
+    return base / ".env"
+
+
+_ENV_INLINE_COMMENT = re.compile(r"\s+#.*$")
+
+
+def _parse_env_line(line: str) -> Optional[tuple]:
+    """Parse one .env line into (key, value), or None for blanks/comments.
+
+    Handles `export KEY=value`, quoted values ('...' or "..."), and inline
+    ` # comments` after unquoted values.
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export ") or line.startswith("export\t"):
+        line = line[len("export"):].lstrip()
+    if "=" not in line:
+        return None
+    key, _, value = line.partition("=")
+    key = key.strip()
+    if not key:
+        return None
+    value = value.strip()
+    if value[:1] in ("'", '"'):
+        quote_char = value[0]
+        end = value.find(quote_char, 1)
+        value = value[1:end] if end != -1 else value[1:]
+    else:
+        value = _ENV_INLINE_COMMENT.sub("", value)
+    return key, value
 
 
 def _env_file_vars() -> dict:
-    """Parse ~/.hermes/.env once, cached.
+    """Parse the Hermes .env (see _hermes_env_path), cached per file version.
 
     The gateway process does not always export every .env var into os.environ
     (it loads .env for its own config but the plugin runs in a context where
@@ -80,23 +126,28 @@ def _env_file_vars() -> dict:
     directly so auth works regardless of how the process was started.
     """
     global _ENV_FILE_CACHE
-    if _ENV_FILE_CACHE is not None:
-        return _ENV_FILE_CACHE
-    _ENV_FILE_CACHE = {}
-    env_path = os.path.join(
-        os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env"
-    )
+    env_path = _hermes_env_path()
+    try:
+        st = env_path.stat()
+    except OSError:
+        # Missing: do not cache, so the file is read as soon as it appears.
+        _ENV_FILE_CACHE = None
+        return {}
+    signature = (str(env_path), st.st_mtime_ns, st.st_size)
+    if _ENV_FILE_CACHE is not None and _ENV_FILE_CACHE[:3] == signature:
+        return _ENV_FILE_CACHE[3]
+    parsed: dict = {}
     try:
         with open(env_path, "r", encoding="utf-8") as fh:
             for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                _ENV_FILE_CACHE[key.strip()] = value.strip().strip('"').strip("'")
+                item = _parse_env_line(line)
+                if item is not None:
+                    parsed[item[0]] = item[1]
     except Exception:
-        pass
-    return _ENV_FILE_CACHE
+        _ENV_FILE_CACHE = None
+        return {}
+    _ENV_FILE_CACHE = signature + (parsed,)
+    return parsed
 
 
 def _env(key: str) -> Optional[str]:
@@ -705,7 +756,16 @@ def android_mic_status() -> str:
 
 
 def android_mic_fetch(remote_path: str = "") -> str:
-    """Stream the latest (or named) WAV to a temporary local MEDIA path."""
+    """Stream the latest (or named) WAV to a temporary local MEDIA path.
+
+    Integrity: the phone's sha256 is only known once every byte has been sent
+    (it arrives in the relay's "end" event, not as a header), so it cannot be
+    checked here.  The relay verifies it and withholds the final chunk until
+    it matches; on a mismatch the connection is cut short of Content-Length,
+    which this function rejects as an incomplete download.  A direct USB/LAN
+    connection to the phone has no checksum at all — only the length and WAV
+    header checks below apply.
+    """
     if not isinstance(remote_path, str):
         return json.dumps({"error": "remote_path must be a WAV filename"})
     if remote_path and (
@@ -936,68 +996,13 @@ def android_setup(pairing_code: str) -> str:
     """
     try:
         port = _relay_port()
-        public_ip = _get_public_ip()
 
-        # Save config to ~/.hermes/.env
-        relay_url = f"http://localhost:{port}"
-        try:
-            from hermes_cli.config import save_env_value
-
-            save_env_value("ANDROID_BRIDGE_URL", relay_url)
-            save_env_value("ANDROID_BRIDGE_TOKEN", pairing_code)
-            save_env_value("ANDROID_RELAY_PORT", str(port))
-        except ImportError:
-            from pathlib import Path
-
-            env_path = Path.home() / ".hermes" / ".env"
-            env_path.parent.mkdir(parents=True, exist_ok=True)
-            _update_env_file(env_path, "ANDROID_BRIDGE_URL", relay_url)
-            _update_env_file(env_path, "ANDROID_BRIDGE_TOKEN", pairing_code)
-            _update_env_file(env_path, "ANDROID_RELAY_PORT", str(port))
-
-        # Update current process env
-        os.environ["ANDROID_BRIDGE_URL"] = relay_url
-        os.environ["ANDROID_BRIDGE_TOKEN"] = pairing_code
-
-        # Start the relay server
         try:
             from tools.android_relay import (
                 start_relay,
+                set_pairing_code,
                 is_phone_connected,
             )
-
-            start_relay(pairing_code=pairing_code, port=port)
-
-            # Check if phone is already connected
-            time.sleep(1)
-            phone_connected = is_phone_connected()
-
-            server_address = f"{public_ip}:{port}"
-
-            if phone_connected:
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "message": "Phone is connected and ready!",
-                        "phone_connected": True,
-                        "server_address": server_address,
-                    }
-                )
-            else:
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "message": "Relay is running. Now tell the user to connect their phone.",
-                        "phone_connected": False,
-                        "server_address": server_address,
-                        "user_instructions": (
-                            f"Open the Hermes Bridge app on your phone and enter:\n"
-                            f"  Server: {server_address}\n"
-                            f"  Pairing code: {pairing_code}\n"
-                            f"Then tap Connect."
-                        ),
-                    }
-                )
         except ImportError:
             return json.dumps(
                 {
@@ -1006,31 +1011,134 @@ def android_setup(pairing_code: str) -> str:
                 }
             )
 
+        # Bring the relay up with the new code *before* persisting it: if the
+        # port is held by something else (e.g. a relay run as a systemd
+        # service) the stored token would no longer match the relay that is
+        # actually answering, and every call would fail with 401/403.
+        try:
+            if not start_relay(pairing_code=pairing_code, port=port):
+                # Already running in this process: start_relay() leaves its
+                # code alone, so switch the live relay to the new one.
+                set_pairing_code(pairing_code)
+        except RuntimeError as e:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": (
+                        f"Could not start the relay on port {port} ({e}). If "
+                        "another relay (e.g. a systemd service) already holds "
+                        "this port, set the pairing code there or stop it, then "
+                        "run android_setup again. The saved bridge token was "
+                        "left unchanged."
+                    ),
+                }
+            )
+
+        public_ip = _get_public_ip()
+        relay_url = f"http://localhost:{port}"
+        _save_bridge_config(relay_url, pairing_code, port)
+
+        # Update current process env
+        os.environ["ANDROID_BRIDGE_URL"] = relay_url
+        os.environ["ANDROID_BRIDGE_TOKEN"] = pairing_code
+
+        # Check if phone is already connected
+        time.sleep(1)
+        phone_connected = is_phone_connected()
+
+        server_address = f"{public_ip}:{port}"
+
+        if phone_connected:
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "message": "Phone is connected and ready!",
+                    "phone_connected": True,
+                    "server_address": server_address,
+                }
+            )
+        else:
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "message": "Relay is running. Now tell the user to connect their phone.",
+                    "phone_connected": False,
+                    "server_address": server_address,
+                    "user_instructions": (
+                        f"Open the Hermes Bridge app on your phone and enter:\n"
+                        f"  Server: {server_address}\n"
+                        f"  Pairing code: {pairing_code}\n"
+                        f"Then tap Connect."
+                    ),
+                }
+            )
+
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
 
-def _update_env_file(env_path, key: str, value: str):
-    """Simple .env file updater (fallback when hermes_cli.config not available)."""
+def _save_bridge_config(relay_url: str, pairing_code: str, port: int) -> None:
+    """Persist bridge settings via hermes_cli, or the Hermes .env fallback."""
+    try:
+        from hermes_cli.config import save_env_value
+    except ImportError:
+        save_env_value = None
+    if save_env_value is not None:
+        save_env_value("ANDROID_BRIDGE_URL", relay_url)
+        save_env_value("ANDROID_BRIDGE_TOKEN", pairing_code)
+        save_env_value("ANDROID_RELAY_PORT", str(port))
+        return
+    _update_env_file(
+        _hermes_env_path(),
+        {
+            "ANDROID_BRIDGE_URL": relay_url,
+            "ANDROID_BRIDGE_TOKEN": pairing_code,
+            "ANDROID_RELAY_PORT": str(port),
+        },
+    )
+
+
+def _update_env_file(env_path, updates: dict) -> None:
+    """Set KEY=value lines in a .env file (fallback when hermes_cli is absent).
+
+    The file holds the pairing token (full device access), so it is never
+    readable by anyone else, not even briefly: the new content goes to a temp
+    file created 0600 with O_EXCL in the same directory, which then atomically
+    replaces the original.  A missing parent directory is created 0700.
+    """
+    global _ENV_FILE_CACHE
+    env_path = Path(env_path)
+    env_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
     lines = []
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
-    found = False
+    remaining = dict(updates)
     for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-    if not found:
+        parsed = _parse_env_line(line)
+        if parsed is not None and parsed[0] in remaining:
+            key = parsed[0]
+            lines[i] = f"{key}={remaining.pop(key)}\n"
+    if remaining:
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
-    env_path.write_text("".join(lines), encoding="utf-8")
-    # Restrict permissions: .env may contain the pairing token (full device access).
+        lines.extend(f"{key}={value}\n" for key, value in remaining.items())
+
+    tmp_path = env_path.with_name(f".{env_path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
     try:
-        env_path.chmod(0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(lines))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _ENV_FILE_CACHE = None
 
 
 # ── Schema definitions ─────────────────────────────────────────────────────────
