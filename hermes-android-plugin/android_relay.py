@@ -427,6 +427,42 @@ def _mask_token(token: str) -> str:
     return "****"
 
 
+def _tokens_equal(token: str, expected: str) -> bool:
+    """Constant-time comparison that cannot raise on non-ASCII input.
+
+    AUTH-5: `hmac.compare_digest` refuses to compare `str` values containing
+    non-ASCII characters (`TypeError: comparing strings with non-ASCII characters
+    is not supported`). Neither call site was wrapped, so a garbage
+    `Authorization: Bearer <non-ASCII>` header produced an unhandled exception →
+    aiohttp 500 — and because `_auth_record_failure` sat on the line *after* the
+    comparison, the attempt was never counted against the throttle. Comparing
+    UTF-8 bytes keeps the constant-time property and cannot raise.
+
+    Not a brute-force bypass today (generated codes are ASCII, so a non-ASCII
+    token could never have matched), but it removes an unauthenticated 500 path,
+    a rate-limit accounting hole and stack traces in the relay log — and it stays
+    correct if the code alphabet is ever widened.
+    """
+    if not isinstance(token, str) or not isinstance(expected, str):
+        return False
+    return hmac.compare_digest(_token_bytes(token), _token_bytes(expected))
+
+
+def _token_bytes(value: str) -> bytes:
+    """Encode a token for comparison without ever raising.
+
+    "surrogateescape" round-trips exactly the bytes a latin-1-decoded header
+    carried. A lone surrogate cannot arrive that way, but if one ever does the
+    comparison must still not blow up, so fall back to a lossy encoding. The
+    fallback cannot produce a false match: a generated code is pure ASCII, and
+    nothing that needed replacing can encode to ASCII bytes.
+    """
+    try:
+        return value.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "replace")
+
+
 # Request-body fields that may carry PII or secrets (phone numbers, SMS text,
 # typed text incl. passwords/OTPs, clipboard content, intent extras).
 # AGENTS.md: strip phone numbers, recipients, location from tool logs.
@@ -466,7 +502,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     # could otherwise leak the pairing code byte-by-byte.
     # PairingManager generates uppercase-only codes — compare exact-case to
     # preserve full key-space entropy.
-    if not hmac.compare_digest(token, state.pairing_code):
+    if not _tokens_equal(token, state.pairing_code):
         _auth_record_failure(remote_ip)
         logger.warning(
             "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
@@ -633,7 +669,7 @@ async def _handle_http(
 
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
-    if not hmac.compare_digest(token, state.pairing_code):
+    if not _tokens_equal(token, state.pairing_code):
         _auth_record_failure(remote_ip)
         logger.warning(
             "HTTP %s %s rejected — bad auth from %s (header=%s)",

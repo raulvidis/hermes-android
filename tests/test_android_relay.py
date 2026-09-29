@@ -873,3 +873,105 @@ class TestPairingCodeRotation:
         stop_relay()
         set_pairing_code(self.NEW)  # must not raise
         assert not is_relay_running()
+
+
+class TestNonAsciiTokenComparison:
+    """AUTH-5: a non-ASCII Bearer token must be a counted rejection, not a 500.
+
+    `hmac.compare_digest` refuses to compare `str` values containing non-ASCII
+    characters, and neither call site was wrapped — so a garbage `Authorization`
+    header produced an unhandled TypeError → aiohttp 500, and because
+    `_auth_record_failure` sat on the line *after* the comparison, the attempt was
+    never counted against the throttle.
+    """
+
+    CODE = "ABC234"
+    PORT = 19974
+
+    def test_compare_digest_would_have_raised(self):
+        """Pins the bug the helper exists for."""
+        import hmac
+
+        with pytest.raises(TypeError):
+            hmac.compare_digest("café", self.CODE)
+
+    @pytest.mark.parametrize(
+        "token,expected,result",
+        [
+            ("ABC234", "ABC234", True),
+            ("café", "ABC234", False),
+            ("ABC234", "café", False),
+            ("日本", "日本", True),
+            ("日本", "ABC234", False),
+            ("", "ABC234", False),
+            ("ABC234", "", False),
+            ("", "", True),
+            ("abc234", "ABC234", False),
+            ("\ud800", "ABC234", False),  # lone surrogate: surrogateescape must cope
+        ],
+    )
+    def test_tokens_equal_never_raises(self, token, expected, result):
+        from tools.android_relay import _tokens_equal
+
+        assert _tokens_equal(token, expected) is result
+
+    def test_tokens_equal_rejects_non_strings(self):
+        from tools.android_relay import _tokens_equal
+
+        assert _tokens_equal(None, self.CODE) is False
+        assert _tokens_equal(self.CODE, None) is False
+        assert _tokens_equal(123456, self.CODE) is False
+
+    def _handshake_status(self, header_value: str):
+        import asyncio
+
+        import aiohttp
+
+        async def attempt():
+            async with aiohttp.ClientSession() as session:
+                try:
+                    ws = await session.ws_connect(
+                        f"ws://127.0.0.1:{self.PORT}/ws",
+                        headers={"Authorization": header_value},
+                    )
+                except aiohttp.WSServerHandshakeError as exc:
+                    return exc.status
+                await ws.close()
+                return None
+
+        return asyncio.run(attempt())
+
+    def test_ws_rejects_a_non_ascii_token_with_403_not_500(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+
+        assert self._handshake_status("Bearer café") == 403
+
+    def test_http_rejects_a_non_ascii_token_with_401_not_500(self):
+        import requests
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+
+        response = requests.get(
+            f"http://127.0.0.1:{self.PORT}/ping",
+            headers={"Authorization": "Bearer café"},
+            timeout=10,
+        )
+
+        assert response.status_code == 401
+
+    def test_a_non_ascii_attempt_counts_towards_the_throttle(self):
+        """The accounting hole: garbage traffic used to be free."""
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        assert not _auth_is_blocked("127.0.0.1")
+
+        for _ in range(_AUTH_MAX_ATTEMPTS):
+            assert self._handshake_status("Bearer café") == 403
+
+        assert _auth_is_blocked("127.0.0.1"), (
+            "non-ASCII attempts must be recorded like any other failure"
+        )
+
+    def test_a_valid_token_still_authenticates(self):
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+
+        assert self._handshake_status(f"Bearer {self.CODE}") is None
