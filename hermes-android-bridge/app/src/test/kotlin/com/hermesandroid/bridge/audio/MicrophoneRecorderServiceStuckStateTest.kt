@@ -1,6 +1,10 @@
 package com.hermesandroid.bridge.audio
 
 import android.content.Intent
+import android.media.AudioRecord
+import io.mockk.mockk
+import io.mockk.unmockkAll
+import io.mockk.verify
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -13,6 +17,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,6 +49,7 @@ class MicrophoneRecorderServiceStuckStateTest {
         // active phase, and the next test's tryReserveStart() would fail for
         // somebody else's reason.
         MicrophoneRecordingState.markError("test reset")
+        unmockkAll()
     }
 
     @Test
@@ -325,5 +331,114 @@ class MicrophoneRecorderServiceStuckStateTest {
         val job = scope.launch { ran = true }
         assertFalse("the job body must not have run", ran)
         return job
+    }
+
+    // ── Review F22: the abandoned job leaks the AudioRecord, not just the phase ──
+
+    /**
+     * F16 settled the *phase* for a job cancelled before its body started, but the
+     * same job also owns the `AudioRecord` release: it happens in the record loop's
+     * `finally`, and a coroutine whose body never starts runs no finally. `onDestroy`
+     * only calls `safelyStop`, which stops capture without releasing, and its
+     * unconditional release is guarded by `recordingJob == null` — which is exactly
+     * the case this is not. The native recorder stayed held for the life of the
+     * process: the microphone-in-use indicator never cleared and the next
+     * `/mic_start` could fail to initialise the microphone.
+     */
+    @Test
+    fun `an abandoned job's recorder is released on destroy`() {
+        val audioRecord = mockk<AudioRecord>(relaxed = true)
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().recorder = audioRecord
+        controller.get().ownedFileName = "recording.wav"
+        controller.get().recordingJob = unrunnableJob()
+
+        controller.destroy()
+
+        verify(exactly = 1) { audioRecord.release() }
+        assertNull("the field must not outlive the release", controller.get().recorder)
+    }
+
+    @Test
+    fun `the release happens whatever phase the abandoned job left behind`() {
+        // The leak is not tied to FINALIZING: a STARTING phase is reset by
+        // onDestroy's own branch, and the recorder was still held either way.
+        val audioRecord = mockk<AudioRecord>(relaxed = true)
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+        MicrophoneRecordingState.markStarting("recording.wav")
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().recorder = audioRecord
+        controller.get().ownedFileName = "recording.wav"
+        controller.get().recordingJob = unrunnableJob()
+
+        controller.destroy()
+
+        verify(exactly = 1) { audioRecord.release() }
+        assertEquals(MicrophoneRecordingPhase.ERROR, MicrophoneRecordingState.snapshot().phase)
+    }
+
+    @Test
+    fun `a still-running finaliser keeps ownership of the recorder`() {
+        // The other half: releasing eagerly would pull the microphone out from
+        // under a record loop that is still writing to it. A bare `Job()` will not
+        // model this — cancelling it completes it instantly — so this is a real
+        // coroutine blocked on a latch, which is what a loop inside a blocking
+        // `AudioRecord.read` looks like to `cancel()`: uninterruptible.
+        val audioRecord = mockk<AudioRecord>(relaxed = true)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val job = scope.launch {
+            started.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+        }
+        assertTrue("the loop must be running before destroy", started.await(5, TimeUnit.SECONDS))
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().recorder = audioRecord
+        controller.get().ownedFileName = "recording.wav"
+        controller.get().recordingJob = job
+
+        controller.destroy()
+
+        verify(exactly = 0) { audioRecord.release() }
+
+        // Registered after the production handler, so it runs after it. Once the
+        // job is done, anything still held is released — in production the loop's
+        // own finally has already nulled the field, so the handler is the no-op.
+        val settled = CountDownLatch(1)
+        job.invokeOnCompletion { settled.countDown() }
+        gate.countDown()
+        assertTrue(settled.await(5, TimeUnit.SECONDS))
+        verify(exactly = 1) { audioRecord.release() }
+        scope.cancel()
+    }
+
+    @Test
+    fun `destroy with no recorder held releases nothing`() {
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().recordingJob = unrunnableJob()
+
+        controller.destroy()
+
+        assertNull(controller.get().recorder)
     }
 }

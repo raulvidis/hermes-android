@@ -45,6 +45,15 @@ class MicrophoneRecorderService : Service() {
         private const val ACTION_STOP = "stop"
         private const val EXTRA_DURATION = "duration"
 
+        /**
+         * What `/mic_status` reports when the service died while a recording was
+         * still being finalised (review F16). Distinct from the STARTING/RECORDING
+         * message above it: this one is published after the fact, from the abandoned
+         * job's completion handler.
+         */
+        internal const val ABANDONED_RECORDING_MESSAGE =
+            "Recorder service was destroyed before the recording completed"
+
         fun start(context: Context, durationSec: Int = 0) {
             require(durationSec in 0..MAX_DURATION_SECONDS) {
                 "duration must be between 0 and $MAX_DURATION_SECONDS seconds"
@@ -69,8 +78,14 @@ class MicrophoneRecorderService : Service() {
     private val isRecording = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
 
+    /**
+     * The live `AudioRecord`. Internal rather than private so a test can hold one
+     * and assert it is released: the case that leaks it is a job cancelled before
+     * its body ran, which no real `AudioRecord` can be made to reproduce on demand
+     * (review F22).
+     */
     @Volatile
-    private var recorder: AudioRecord? = null
+    internal var recorder: AudioRecord? = null
 
     /**
      * The record loop's handle. Internal rather than private so a test can put the
@@ -331,7 +346,7 @@ class MicrophoneRecorderService : Service() {
             runCatching { recorder?.release() }
             recorder = null
         }
-        settleAbandonedFinalizing(job)
+        settleAbandonedRecording(job)
         scope.cancel()
         super.onDestroy()
     }
@@ -353,15 +368,42 @@ class MicrophoneRecorderService : Service() {
      * the settle is a no-op, while a job that never ran gets settled here. A null
      * job means this instance never started a recording, so the phase is somebody
      * else's and is left alone.
+     *
+     * The same job also owns the `AudioRecord` release (review F22), so it is
+     * handled here too — see [releaseAbandonedRecorder].
      */
-    private fun settleAbandonedFinalizing(job: Job?) {
+    private fun settleAbandonedRecording(job: Job?) {
         if (job == null) return
         val owned = ownedFileName
         job.invokeOnCompletion {
             MicrophoneRecordingState.settleAbandonedFinalizing(
                 activeFile = owned,
-                message = "Recorder service was destroyed before the recording completed",
+                message = ABANDONED_RECORDING_MESSAGE,
             )
+            releaseAbandonedRecorder()
         }
+    }
+
+    /**
+     * Release an `AudioRecord` whose job never ran (review F22).
+     *
+     * The record loop's `finally` releases it, but a coroutine cancelled before its
+     * body starts runs nothing — not the loop, not the catch, not the finally — and
+     * `onDestroy`'s own unconditional release is guarded by `recordingJob == null`,
+     * which is exactly the case this is not. `safelyStop` only stops capture; it
+     * does not release. The native recorder therefore stayed held for the life of
+     * the process: the microphone-in-use indicator never cleared, and the next
+     * `/mic_start` could fail to initialise the microphone.
+     *
+     * Runs from the job's completion handler, so a loop that did execute has
+     * already released and nulled the field and this is a no-op. Waiting for
+     * completion is also what keeps a still-running loop from having the microphone
+     * pulled out from under it.
+     */
+    private fun releaseAbandonedRecorder() {
+        val abandoned = recorder ?: return
+        recorder = null
+        safelyStop(abandoned)
+        runCatching { abandoned.release() }
     }
 }
