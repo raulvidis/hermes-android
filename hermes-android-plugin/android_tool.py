@@ -9,6 +9,7 @@ Used by the plugin's __init__.py to register tools into hermes-agent
 via ctx.register_tool().
 """
 
+import atexit
 import json
 import os
 import re
@@ -91,6 +92,78 @@ def _auth_headers() -> dict:
     if token:
         return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+# ── MEDIA temp-file retention (PY-2) ─────────────────────────────────────────
+#
+# Screenshots, screen recordings and microphone WAVs are rendered content from
+# arbitrary apps: banking balances, message threads, health data, and the pairing
+# code whenever the Bridge app is on screen. AGENTS.md is explicit that a MEDIA:
+# path is a temp file to relay, not to persist, and android_mic_fetch already
+# unlinked on its error path — but the success paths of all three left the file in
+# /tmp for the lifetime of the filesystem.
+#
+# The file cannot be deleted inline: the gateway reads MEDIA:<path> after the tool
+# returns. So this process deletes everything it created when it exits, and the
+# first time it creates one it sweeps stale leftovers from earlier (possibly
+# crashed) runs. Both are best-effort — a cleanup failure must never fail a tool
+# call.
+_MEDIA_TEMP_PREFIXES = ("android_screenshot_", "android_record_", "android_mic_")
+_MEDIA_TEMP_MAX_AGE_SECONDS = 60 * 60
+_media_temp_files: set = set()
+_media_temp_atexit_registered = False
+_media_temp_swept = False
+
+
+def _register_media_temp(path: str) -> str:
+    """Track a MEDIA temp file for deletion at process exit and return it."""
+    global _media_temp_atexit_registered
+    try:
+        if not _media_temp_atexit_registered:
+            atexit.register(_delete_media_temp_files)
+            _media_temp_atexit_registered = True
+        _media_temp_files.add(path)
+        _sweep_stale_media_temps()
+    except Exception:
+        pass
+    return path
+
+
+def _delete_media_temp_files() -> None:
+    """Remove every MEDIA temp file this process created."""
+    for path in list(_media_temp_files):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    _media_temp_files.clear()
+
+
+def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS) -> None:
+    """Once per process, delete our own stale MEDIA files left in the temp dir.
+
+    Only files whose name starts with one of our prefixes and whose mtime is older
+    than *max_age_seconds* are touched, so a file another live session is about to
+    relay is never deleted.
+    """
+    global _media_temp_swept
+    if _media_temp_swept:
+        return
+    _media_temp_swept = True
+    cutoff = time.time() - max_age_seconds
+    try:
+        names = os.listdir(tempfile.gettempdir())
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(_MEDIA_TEMP_PREFIXES):
+            continue
+        candidate = os.path.join(tempfile.gettempdir(), name)
+        try:
+            if os.path.isfile(candidate) and os.path.getmtime(candidate) < cutoff:
+                os.unlink(candidate)
+        except OSError:
+            pass
 
 
 def _check_requirements() -> bool:
@@ -349,7 +422,7 @@ def android_screenshot() -> str:
         w = result.get("width", "?")
         h = result.get("height", "?")
 
-        return f"Screenshot captured ({w}x{h})\nMEDIA:{tmp.name}"
+        return f"Screenshot captured ({w}x{h})\nMEDIA:{_register_media_temp(tmp.name)}"
     except Exception as e:
         return json.dumps({"error": _safe_error(e)})
 
@@ -733,7 +806,7 @@ def android_screen_record(duration_ms: int = 5000) -> str:
                 tmp.close()
                 w = video_data.get("width", "?")
                 h = video_data.get("height", "?")
-                return f"Screen recorded ({w}x{h}, {duration_ms}ms)\nMEDIA:{tmp.name}"
+                return f"Screen recorded ({w}x{h}, {duration_ms}ms)\nMEDIA:{_register_media_temp(tmp.name)}"
         return json.dumps(data)
     except Exception as e:
         return json.dumps({"error": _safe_error(e)})
@@ -820,7 +893,7 @@ def android_mic_fetch(remote_path: str = "") -> str:
             raise IOError("Microphone recording download was incomplete")
         if len(prefix) < 12 or prefix[:4] != b"RIFF" or prefix[8:12] != b"WAVE":
             raise IOError("Downloaded microphone recording is not a WAV file")
-        return f"Microphone recording fetched ({written} bytes)\nMEDIA:{temp_path}"
+        return f"Microphone recording fetched ({written} bytes)\nMEDIA:{_register_media_temp(temp_path)}"
     except requests.exceptions.RequestException:
         # requests exception text embeds the bridge host:port; tool responses
         # must not expose device connection details (AGENTS.md convention).

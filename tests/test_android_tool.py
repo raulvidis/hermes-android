@@ -1835,3 +1835,155 @@ class TestEventStreamingContract:
             plugin["_SCHEMAS"]["android_event_stream"]
             == _SCHEMAS["android_event_stream"]
         )
+
+
+class TestMediaTempFileRetention:
+    """PY-2: MEDIA temp files hold rendered screen content and must not persist.
+
+    Screenshots, screen recordings and microphone WAVs contain whatever was on
+    screen — banking balances, message threads, the pairing code whenever the
+    Bridge app is open. AGENTS.md says a `MEDIA:` path is a temp file to relay,
+    not to persist, and `android_mic_fetch` already unlinked on its error path;
+    the success paths of all three left the file in the temp dir for the lifetime
+    of the filesystem.
+
+    The file cannot be deleted inline — the gateway reads `MEDIA:<path>` after the
+    tool returns — so it is deleted at process exit, and stale leftovers from
+    earlier (possibly crashed) runs are swept once per process.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch, tmp_path):
+        import tempfile
+
+        from tools import android_tool as mod
+
+        self.mod = mod
+        monkeypatch.setattr(mod, "_media_temp_files", set())
+        monkeypatch.setattr(mod, "_media_temp_swept", False)
+        monkeypatch.setattr(mod, "_media_temp_atexit_registered", False)
+        # conftest already points tempfile.gettempdir() at a per-test directory.
+        self.media_dir = _Path(tempfile.gettempdir())
+        yield
+        mod._delete_media_temp_files()
+
+    def test_a_registered_file_survives_the_call_and_dies_with_the_process(self):
+        target = self.media_dir / "android_screenshot_x.jpg"
+        target.write_bytes(b"pixels")
+
+        assert self.mod._register_media_temp(str(target)) == str(target)
+        assert target.exists(), "the gateway still has to be able to read MEDIA:<path>"
+
+        self.mod._delete_media_temp_files()
+
+        assert not target.exists()
+        assert not self.mod._media_temp_files
+
+    def test_atexit_is_registered_once(self, monkeypatch):
+        registered = []
+        monkeypatch.setattr(self.mod.atexit, "register", lambda fn: registered.append(fn))
+
+        self.mod._register_media_temp(str(self.media_dir / "a.jpg"))
+        self.mod._register_media_temp(str(self.media_dir / "b.jpg"))
+
+        assert len(registered) == 1
+        assert registered[0] is self.mod._delete_media_temp_files
+
+    def test_deleting_an_already_gone_file_is_not_an_error(self):
+        self.mod._register_media_temp(str(self.media_dir / "never-existed.jpg"))
+        self.mod._delete_media_temp_files()  # must not raise
+        assert not self.mod._media_temp_files
+
+    def test_the_sweeper_removes_only_our_own_stale_files(self):
+        stale_shot = self.media_dir / "android_screenshot_old.jpg"
+        stale_shot.write_bytes(b"x")
+        os.utime(stale_shot, (0, 0))
+        stale_recording = self.media_dir / "android_record_old.mp4"
+        stale_recording.write_bytes(b"x")
+        os.utime(stale_recording, (0, 0))
+        stale_mic = self.media_dir / "android_mic_old.wav"
+        stale_mic.write_bytes(b"x")
+        os.utime(stale_mic, (0, 0))
+        fresh = self.media_dir / "android_screenshot_new.jpg"
+        fresh.write_bytes(b"x")
+        unrelated = self.media_dir / "someone_elses_file.jpg"
+        unrelated.write_bytes(b"x")
+        os.utime(unrelated, (0, 0))
+
+        self.mod._sweep_stale_media_temps()
+
+        assert not stale_shot.exists()
+        assert not stale_recording.exists()
+        assert not stale_mic.exists()
+        assert fresh.exists(), "a file another session may still relay must survive"
+        assert unrelated.exists(), "never touch files we did not create"
+
+    def test_the_sweeper_runs_at_most_once_per_process(self):
+        first = self.media_dir / "android_screenshot_a.jpg"
+        first.write_bytes(b"x")
+        os.utime(first, (0, 0))
+
+        self.mod._sweep_stale_media_temps()
+        assert not first.exists()
+
+        second = self.media_dir / "android_screenshot_b.jpg"
+        second.write_bytes(b"x")
+        os.utime(second, (0, 0))
+        self.mod._sweep_stale_media_temps()
+
+        assert second.exists(), "the sweep must not repeat within one process"
+
+    def test_the_sweeper_tolerates_an_unreadable_temp_dir(self, monkeypatch):
+        monkeypatch.setattr(self.mod.os, "listdir", _raise_oserror)
+        self.mod._sweep_stale_media_temps()  # must not raise
+
+    @responses.activate
+    def test_screenshot_registers_its_media_file(self, bridge_url):
+        import base64
+
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/screenshot",
+            json={
+                "image": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(),
+                "width": 1080,
+                "height": 1920,
+            },
+        )
+
+        result = android_screenshot()
+
+        path = result.split("MEDIA:")[1].strip()
+        assert path in self.mod._media_temp_files
+        assert os.path.exists(path), "the gateway must still be able to read it"
+        self.mod._delete_media_temp_files()
+        assert not os.path.exists(path)
+
+    @responses.activate
+    def test_screen_record_registers_its_media_file(self, bridge_url):
+        import base64
+
+        responses.add(
+            responses.POST,
+            f"{bridge_url}/screen_record",
+            json={
+                "success": True,
+                "data": {
+                    "video": base64.b64encode(b"\x00\x00\x00\x18ftypmp42").decode(),
+                    "width": 1080,
+                    "height": 1920,
+                },
+            },
+        )
+
+        result = android_screen_record()
+
+        path = result.split("MEDIA:")[1].strip()
+        assert path in self.mod._media_temp_files
+        assert os.path.exists(path)
+        self.mod._delete_media_temp_files()
+        assert not os.path.exists(path)
+
+
+def _raise_oserror(_path):
+    raise OSError("temp dir unreadable")

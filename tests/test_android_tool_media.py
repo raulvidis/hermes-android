@@ -13,8 +13,9 @@ error and *no* advertised file, because a MEDIA: line pointing at a truncated
 or half-written file is worse than an error the agent can act on.
 
 Everything runs against ``responses`` or an in-process stub response, and
-``tempfile.tempdir`` is redirected into pytest's tmp_path, so no socket is
-opened and no file is left in the real temp directory.
+conftest's autouse ``hermetic_tempdir`` redirects the temp directory into
+pytest's tmp_path, so no socket is opened and no file is left in the real temp
+directory.
 
 One branch is deliberately not covered: the 256 MiB guard *inside* the chunk
 loop (``if written > 256 * 1024 * 1024``). It is a literal rather than a module
@@ -46,17 +47,20 @@ from tests.support import (
 
 
 @pytest.fixture(autouse=True)
-def temp_dir(monkeypatch, tmp_path):
-    """Send every NamedTemporaryFile the toolset creates into pytest's tmp dir.
+def temp_dir(hermetic_tempdir):
+    """The directory every MEDIA temp file lands in.
 
-    The MEDIA tools use delete=False on purpose — the gateway still has to read
-    the file — so without this a test run litters /tmp with screenshots and
-    recordings it will never clean up.
+    ``hermetic_tempdir`` (conftest, autouse) already points
+    ``tempfile.gettempdir()`` and ``$TMPDIR`` at a per-test directory — which is
+    what keeps PY-2's stale-file sweeper off the machine's real /tmp — so this
+    fixture only hands that same path back. The MEDIA tools use delete=False on
+    purpose (the gateway still has to read the file), so the tests assert on
+    exactly which files a call left behind.
+
+    Requesting ``hermetic_tempdir`` by name pins the setup order: the redirect
+    has to be in place before ``gettempdir()`` is read.
     """
-    workdir = tmp_path / "media"
-    workdir.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(workdir))
-    return workdir
+    return Path(tempfile.gettempdir())
 
 
 def media_files(workdir):

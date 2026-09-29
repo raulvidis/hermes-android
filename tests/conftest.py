@@ -64,6 +64,24 @@ def hermetic_home(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def hermetic_tempdir(monkeypatch, tmp_path):
+    """Keep MEDIA temp files inside the test's own directory.
+
+    PY-2 added a sweeper that deletes stale `android_screenshot_*` /
+    `android_record_*` / `android_mic_*` files from the temp dir. `/tmp` is
+    shared with every other process on the machine — including a pytest run from
+    another checkout — so tests must not sweep or litter it.
+    """
+    import tempfile
+
+    media = tmp_path / "tmp"
+    media.mkdir(exist_ok=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(media))
+    monkeypatch.setenv("TMPDIR", str(media))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def no_lingering_relay():
     """Never let a test leave a relay thread (and its port) behind.
 
