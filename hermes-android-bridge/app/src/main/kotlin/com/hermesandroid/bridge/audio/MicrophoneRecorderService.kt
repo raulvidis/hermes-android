@@ -227,7 +227,9 @@ class MicrophoneRecorderService : Service() {
             // early failure) must not leave the state machine stuck in an
             // active phase, or every later /mic_start returns 409 until the
             // app restarts (#98).
-            if (MicrophoneRecordingState.snapshot().isActive) {
+            // isAwaitingRecorder, not isActive: a second STOP arriving while the
+            // first is finalising must not downgrade a complete recording (F10).
+            if (MicrophoneRecordingState.snapshot().isAwaitingRecorder) {
                 MicrophoneRecordingState.markError("Recording stopped before it completed")
             }
             stopForegroundCompat()
@@ -296,10 +298,13 @@ class MicrophoneRecorderService : Service() {
     override fun onDestroy() {
         stopRequested.set(true)
         isRecording.set(false)
-        // The system can destroy the service before the record loop starts
-        // (or mid-finalization) with no STOP command. Reset an active phase
-        // so /mic_start does not stay blocked with 409 (#98).
-        if (MicrophoneRecordingState.snapshot().isActive) {
+        // The system can destroy the service before the record loop starts, with
+        // no STOP command. Reset a phase that can no longer complete so
+        // /mic_start does not stay blocked with 409 (#98) — but leave FINALIZING
+        // to the job that owns it, which has no suspension points left to run and
+        // will reach markReady/markError on its own. Resetting it here published a
+        // transient `error` for a recording that was already complete (F10).
+        if (MicrophoneRecordingState.snapshot().isAwaitingRecorder) {
             MicrophoneRecordingState.markError("Recorder service was destroyed before completion")
         }
         safelyStop(recorder)

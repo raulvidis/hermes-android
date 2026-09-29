@@ -22,6 +22,20 @@ internal data class MicrophoneRecordingSnapshot(
         get() = phase == MicrophoneRecordingPhase.STARTING ||
             phase == MicrophoneRecordingPhase.RECORDING ||
             phase == MicrophoneRecordingPhase.FINALIZING
+
+    /**
+     * Active phases that cannot reach a terminal state without the recorder loop.
+     *
+     * FINALIZING is deliberately excluded. Its block has no suspension points and
+     * it owns both terminal states (`markReady`, `markError`), so resetting it
+     * from outside publishes a transient `error` for a recording that is already
+     * complete and downloadable — `CommandDispatcher` serves `latest` from disk
+     * regardless of phase (review F10). STARTING and RECORDING do have to be
+     * reset, or `/mic_start` stays blocked with 409 until the app restarts (#98).
+     */
+    val isAwaitingRecorder: Boolean
+        get() = phase == MicrophoneRecordingPhase.STARTING ||
+            phase == MicrophoneRecordingPhase.RECORDING
 }
 
 internal object MicrophoneRecordingState {
