@@ -234,12 +234,30 @@ def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS)
     stayed in the temp dir until the process happened to exit. The interval is what
     keeps the sweep off the hot path — it lists the whole temp dir, so it cannot run
     for every MEDIA file created.
+
+    The same pass prunes `_media_temp_files` of paths that no longer exist, so the
+    registry is bounded by the files actually on disk rather than by how long the
+    process has been up (review F28).
     """
     global _media_temp_last_sweep
     now = time.time()
     if now - _media_temp_last_sweep < _MEDIA_TEMP_SWEEP_INTERVAL_SECONDS:
         return
     _media_temp_last_sweep = now
+
+    # Drop registered paths whose file is already gone — deleted by this sweep, by
+    # an earlier one, or by anything else. The registry was only ever added to, so a
+    # gateway that runs for days accumulated one dead path per screenshot, screen
+    # recording and microphone fetch, and atexit then walked a list of nothing
+    # (review F28). Pruned before the listing so an unreadable temp dir does not
+    # also stop this.
+    for path in list(_media_temp_files):
+        try:
+            if not os.path.exists(path):
+                _media_temp_files.discard(path)
+        except OSError:
+            pass
+
     cutoff = now - max_age_seconds
     try:
         names = os.listdir(tempfile.gettempdir())
@@ -252,6 +270,10 @@ def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS)
         try:
             if os.path.isfile(candidate) and os.path.getmtime(candidate) < cutoff:
                 os.unlink(candidate)
+                # Same pass as the prune above, which ran before this file was
+                # deleted — so drop it here too, or a path this sweep just removed
+                # stays registered until the next one.
+                _media_temp_files.discard(candidate)
         except OSError:
             pass
 

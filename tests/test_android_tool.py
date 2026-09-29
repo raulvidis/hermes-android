@@ -2118,6 +2118,65 @@ class TestMediaTempFileRetention:
 
         assert target.exists()
 
+    # ── F28: the registry itself must not grow without bound ─────────────────
+    #
+    # F18 made the sweep repeat, but the set of registered paths was still only
+    # ever added to. A gateway that runs for days accumulates one entry per
+    # screenshot, screen recording and microphone fetch — the files are long gone
+    # from disk, the paths stay, and atexit then walks a list of nothing.
+
+    def test_the_registry_discards_paths_the_sweep_deleted(self):
+        leftover = self.media_dir / "android_screenshot_old.jpg"
+        leftover.write_bytes(b"x")
+        os.utime(leftover, (0, 0))
+        self.mod._media_temp_files.add(str(leftover))
+
+        self.mod._sweep_stale_media_temps()
+
+        assert not leftover.exists()
+        assert str(leftover) not in self.mod._media_temp_files, (
+            "the sweep deleted the file but left it registered"
+        )
+
+    def test_the_registry_discards_paths_that_no_longer_exist(self):
+        gone = self.media_dir / "android_record_gone.mp4"
+        self.mod._media_temp_files.add(str(gone))
+        live = self.media_dir / "android_screenshot_live.jpg"
+        live.write_bytes(b"pixels")
+
+        self.mod._register_media_temp(str(live))
+
+        assert str(gone) not in self.mod._media_temp_files
+        assert str(live) in self.mod._media_temp_files, (
+            "a file that still exists must stay registered so atexit deletes it"
+        )
+
+    def test_the_registry_stays_bounded_over_many_calls(self):
+        """The shape the finding is about: a long-lived process taking one MEDIA
+        file after another, none of which survive on disk."""
+        for index in range(5):
+            shot = self.media_dir / f"android_screenshot_{index}.jpg"
+            shot.write_bytes(b"x")
+            os.utime(shot, (0, 0))
+            self.mod._media_temp_last_sweep = 0.0  # let every call sweep
+            self.mod._register_media_temp(str(shot))
+
+        assert not self.mod._media_temp_files, (
+            f"every file is gone from disk but {len(self.mod._media_temp_files)} "
+            "paths are still registered"
+        )
+
+    def test_pruning_survives_an_unreadable_temp_dir(self, monkeypatch):
+        """Best-effort all the way down: the registry is pruned on what we know,
+        even when the directory listing itself fails."""
+        gone = self.media_dir / "android_mic_gone.wav"
+        self.mod._media_temp_files.add(str(gone))
+        monkeypatch.setattr(self.mod.os, "listdir", _raise_oserror)
+
+        self.mod._sweep_stale_media_temps()
+
+        assert str(gone) not in self.mod._media_temp_files
+
     def test_the_sweeper_tolerates_an_unreadable_temp_dir(self, monkeypatch):
         monkeypatch.setattr(self.mod.os, "listdir", _raise_oserror)
         self.mod._sweep_stale_media_temps()  # must not raise
