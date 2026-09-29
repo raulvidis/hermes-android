@@ -910,7 +910,76 @@ class TestAndroidSetup:
         else:
             monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", configured)
 
-        assert tool_mod._relay_public_host(FAKE_IP) == expected
+        assert tool_mod._relay_public_host(lambda: FAKE_IP) == expected
+
+    # ── F39: one read of the variable, and a fallback that is not paid for ─────
+
+    def test_the_helper_takes_a_lazy_fallback_and_only_calls_it_when_needed(
+        self, tool_mod, monkeypatch
+    ):
+        """The fallback is `_get_public_ip()` — three external HTTPS calls at 3 s
+        each. Passing it in as a value, the way F34 left it, meant the caller had to
+        decide whether to compute it *before* knowing whether it was wanted, which is
+        how the variable ended up read twice."""
+        calls = []
+
+        def detect():
+            calls.append("called")
+            return FAKE_IP
+
+        monkeypatch.delenv("ANDROID_RELAY_PUBLIC_HOST", raising=False)
+        assert tool_mod._relay_public_host(detect) == FAKE_IP
+        assert calls == ["called"]
+
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+        assert tool_mod._relay_public_host(detect) == "relay.example.com"
+        assert calls == ["called"], "the fallback must not run when the host is configured"
+
+    def test_android_setup_reads_the_public_host_variable_once(self, tool_mod, monkeypatch):
+        """Three reads meant three places that could disagree — and `setup` reading it
+        itself is what made F34's skip a second decision rather than the same one."""
+        reads = []
+        real_env = tool_mod._env
+
+        def counting_env(key):
+            if key == "ANDROID_RELAY_PUBLIC_HOST":
+                reads.append(key)
+            return real_env(key)
+
+        monkeypatch.setattr(tool_mod, "_env", counting_env)
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == "ws://relay.example.com:8766"
+        assert len(reads) == 1, (
+            f"ANDROID_RELAY_PUBLIC_HOST was read {len(reads)} times; one read, one decision"
+        )
+
+    def test_a_configured_host_that_is_still_an_ip_gets_the_tls_warning(
+        self, tool_mod, monkeypatch
+    ):
+        """The note is about the address being an IP, not about which variable
+        produced it. Keying it on "was ANDROID_RELAY_PUBLIC_HOST set" silently
+        dropped the warning from an operator who set the variable to a bare IP."""
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "203.0.113.9")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == "wss://203.0.113.9:8766"
+        assert "server_address_note" in result
+        assert "certificate" in result["server_address_note"].lower()
+
+    def test_a_configured_hostname_needs_no_warning(self, tool_mod, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert "server_address_note" not in result
 
     def test_the_public_host_does_not_change_where_the_relay_binds(
         self, tool_mod, monkeypatch

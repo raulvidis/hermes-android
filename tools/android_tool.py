@@ -51,6 +51,7 @@ Tools registered:
 """
 
 import atexit
+import ipaddress
 import json
 import os
 import re
@@ -58,7 +59,7 @@ import tempfile
 import time
 import warnings
 import requests
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import quote, urlparse
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -1303,20 +1304,43 @@ _RELAY_TLS_HOST_NOTE = (
 )
 
 
-def _relay_public_host(fallback_ip: str) -> str:
+def _host_is_an_ip_literal(host: str) -> bool:
+    """True when *host* is an IP address rather than a name a certificate can cover."""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _relay_public_host(fallback: Callable[[], str]) -> str:
     """The host to print in the address the phone is told to dial (review F24).
 
     `ANDROID_RELAY_PUBLIC_HOST` is the name the TLS certificate covers. It does not
     change where the relay binds — that stays `ANDROID_RELAY_HOST` — only what
     setup prints, because the phone verifies the certificate against whatever it
     dialed and a detected public IP is almost never in the certificate's SANs.
+
+    *fallback* is a callable, not a value (review F39): it is `_get_public_ip()`,
+    three external HTTPS calls at 3 s each plus a DNS lookup. Taking it eagerly meant
+    the caller had to decide whether to pay for detection *before* knowing whether
+    the answer would be used, and the way it avoided paying was to read
+    `ANDROID_RELAY_PUBLIC_HOST` itself — so the variable was read in two places that
+    had to agree, and a third time in `_relay_address_note`. One read, here, and the
+    fallback runs only if that read comes back empty.
     """
-    return _env("ANDROID_RELAY_PUBLIC_HOST") or fallback_ip
+    return _env("ANDROID_RELAY_PUBLIC_HOST") or fallback()
 
 
-def _relay_address_note(tls: bool) -> Optional[str]:
-    """The warning that goes with a TLS address that is still an IP, or None."""
-    if not tls or _env("ANDROID_RELAY_PUBLIC_HOST"):
+def _relay_address_note(tls: bool, host: str) -> Optional[str]:
+    """The warning that goes with a TLS address that is still an IP, or None.
+
+    Keyed on the address, not on which variable produced it (review F39): an
+    operator who sets `ANDROID_RELAY_PUBLIC_HOST` to a bare IP needs this warning
+    just as much as one who left it unset, and the previous check silently dropped
+    it for them.
+    """
+    if not tls or not _host_is_an_ip_literal(host):
         return None
     return _RELAY_TLS_HOST_NOTE
 
@@ -1364,12 +1388,14 @@ def android_setup(pairing_code: str) -> str:
         # clobbers their value with a default (F5: _relay_port() used to read
         # os.environ only, so a .env-only 9000 was overwritten with 8766).
         port_already_set = _env("ANDROID_RELAY_PORT") is not None
-        # F34: `_get_public_ip()` is three external HTTPS calls at 3 s each plus a
-        # DNS fallback, and when the operator has named the host — which is what
-        # ANDROID_RELAY_PUBLIC_HOST is for — every one of those answers is thrown
-        # away. Skipping them also stops setup handing this gateway's address to a
+        # F34/F39: `_get_public_ip()` is three external HTTPS calls at 3 s each
+        # plus a DNS fallback, and when the operator has named the host — which is
+        # what ANDROID_RELAY_PUBLIC_HOST is for — every one of those answers is
+        # thrown away. It is passed as a callable so it runs only when needed, and
+        # the variable is read exactly once, inside `_relay_public_host`. Skipping
+        # the detection also stops setup handing this gateway's address to a
         # third-party IP-echo service when nothing needs it.
-        public_ip = _env("ANDROID_RELAY_PUBLIC_HOST") or _get_public_ip()
+        public_host = _relay_public_host(_get_public_ip)
 
         # Save config to ~/.hermes/.env. The scheme follows the transport the
         # relay is about to serve (F19): with a certificate configured its whole
@@ -1415,9 +1441,8 @@ def android_setup(pairing_code: str) -> str:
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            public_host = _relay_public_host(public_ip)
             server_address = _relay_server_address(public_host, port, tls)
-            address_note = _relay_address_note(tls)
+            address_note = _relay_address_note(tls, public_host)
 
             if phone_connected:
                 payload = {
