@@ -640,16 +640,25 @@ object ActionExecutor {
             } else {
                 smsManager.sendTextMessage(to, null, body, sentIntents.firstOrNull(), null)
             }
-            SmsSendReport.describe(
-                report.await(timeoutMs),
-                parts.size,
-                timeoutMs,
-                // F23: read after the wait, so the tally is complete. Some
-                // segments confirmed plus one failure is "partially sent, do not
-                // resend", not the "failed, retry is safe" answer a bare failure
-                // code used to produce.
-                report.confirmedParts,
-            )
+            if (registered) {
+                SmsSendReport.describe(
+                    report.await(timeoutMs),
+                    parts.size,
+                    timeoutMs,
+                    // F23: read after the wait, so the tally is complete. Some
+                    // segments confirmed plus one failure is "partially sent, do not
+                    // resend", not the "failed, retry is safe" answer a bare failure
+                    // code used to produce.
+                    report.confirmedParts,
+                )
+            } else {
+                // F27: with no receiver no report can arrive, so waiting out the
+                // bound would spend ten seconds of the caller's budget learning
+                // nothing — and then answer with wording that claims we waited for
+                // one. The send itself still happens: an unobservable report is not
+                // a reason to withhold the message.
+                SmsSendReport.describeUnobservable(parts.size, "no send-report receiver")
+            }
         } catch (e: SecurityException) {
             ActionResult(false, "SMS permission denied: ${e.javaClass.simpleName}")
         } catch (e: IllegalArgumentException) {

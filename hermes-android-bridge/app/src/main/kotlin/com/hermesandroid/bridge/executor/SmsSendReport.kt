@@ -183,6 +183,29 @@ class SmsSendReport(private val expectedReports: Int = 1) {
             mapOf("status" to status, "parts" to parts, "delivered" to delivered)
 
         /**
+         * The outcome when the send went out but no report could ever be observed
+         * (review F27): the receiver could not be registered, so no `sentIntent` has
+         * anywhere to land.
+         *
+         * Distinct from the timeout wording on purpose. "No send report arrived
+         * within 10000ms" says the radio was given the chance to confirm and did
+         * not; here nothing was listening, and waiting out the bound would spend
+         * ten seconds of the caller's budget learning nothing. Same status, so a
+         * caller's do-not-resend rule is unchanged — the message is with the radio
+         * either way.
+         */
+        fun describeUnobservable(parts: Int, reason: String): ActionResult =
+            ActionResult(
+                true,
+                "SMS was handed to the radio but its send report cannot be observed " +
+                    "on this device ($reason); delivery is unconfirmed" +
+                    (if (parts > 1) " ($parts segments were in flight)" else "") +
+                    ". Do NOT resend: the message may already have been delivered " +
+                    "and a retry would duplicate it.",
+                outcome(STATUS_QUEUED_UNCONFIRMED, parts, 0),
+            )
+
+        /**
          * Human-readable radio reason. The `RESULT_SMS_*` names this used to be
          * written against were withdrawn from the public SDK in API 31; these are
          * the `RESULT_ERROR_*` / `RESULT_*` constants that replaced them. All are

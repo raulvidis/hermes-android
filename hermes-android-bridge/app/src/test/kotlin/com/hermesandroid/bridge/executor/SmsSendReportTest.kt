@@ -269,6 +269,34 @@ class SmsSendReportTest {
         assertEquals("failed", statusOf(result))
     }
 
+    /**
+     * Review F27: registration can fail, and then no report can arrive at all. The
+     * status stays `queued_unconfirmed` — the message is with the radio either way,
+     * so the do-not-resend rule is unchanged — but the wording must not claim we
+     * waited for a report that nothing was listening for.
+     */
+    @Test
+    fun `an unobservable report is unconfirmed and says why`() {
+        val result = SmsSendReport.describeUnobservable(parts = 3, reason = "no send-report receiver")
+
+        assertTrue(result.success)
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertEquals(0, deliveredOf(result))
+        assertTrue(
+            "the message must say nothing was listening: ${result.message}",
+            result.message.contains("cannot be observed", ignoreCase = true),
+        )
+        assertTrue(
+            "and must still forbid the retry: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
+        )
+        assertFalse(
+            "the timeout wording claims a wait that never happened: ${result.message}",
+            result.message.contains("no send report arrived within"),
+        )
+        assertTrue("the segment count is not PII: ${result.message}", result.message.contains("3"))
+    }
+
     @Test
     fun `only a definite radio report is a failure`() {
         // The line the contract turns on: a report saying the send failed is a
@@ -354,6 +382,7 @@ class SmsSendReportTest {
             SmsSendReport.describe(SmsManager.RESULT_ERROR_LIMIT_EXCEEDED, 2, 10_000L),
             SmsSendReport.describe(9_999, 1, 10_000L),
             SmsSendReport.describe(SmsManager.RESULT_ERROR_NO_SERVICE, 3, 10_000L, 2),
+            SmsSendReport.describeUnobservable(2, "no send-report receiver"),
         )
         for (outcome in outcomes) {
             assertFalse(

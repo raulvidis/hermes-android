@@ -354,6 +354,81 @@ class ActionExecutorSendSmsTest {
         verify(exactly = 1) { mockService.unregisterReceiver(receiver.captured) }
     }
 
+    // ── No receiver means no report can ever arrive (review F27) ────────────
+
+    /**
+     * Registration can fail — a `SecurityException` on a hardened ROM, an
+     * `IllegalArgumentException` from a context that cannot take a receiver — and
+     * `sendSms` correctly refused to claim success without a report. But it then
+     * waited out the *whole* bound for a report that by construction could not
+     * arrive, and answered with the timeout wording ("no send report arrived within
+     * 10000ms"), which says the radio was given the chance to confirm and did not.
+     * Ten seconds of a caller's 30 s budget spent learning nothing, plus a message
+     * that misdescribes what happened.
+     */
+    @Test
+    fun `a send with no receiver answers at once instead of waiting out the bound`() {
+        every {
+            mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>())
+        } throws SecurityException("registration refused")
+        every {
+            mockService.registerReceiver(any(), any<IntentFilter>())
+        } throws SecurityException("registration refused")
+        ActionExecutor.smsSendReportTimeoutMs = 5_000L
+
+        val started = System.nanoTime()
+        val result = ActionExecutor.sendSms(recipient, body)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+
+        assertTrue(
+            "waited ${elapsedMs}ms for a report that could never arrive",
+            elapsedMs < 1_000L,
+        )
+        assertTrue(result.success)
+        assertEquals("queued_unconfirmed", statusOf(result))
+    }
+
+    @Test
+    fun `the message says the report was unobservable, not that it timed out`() {
+        every {
+            mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>())
+        } throws SecurityException("registration refused")
+        ActionExecutor.smsSendReportTimeoutMs = 5_000L
+
+        val result = ActionExecutor.sendSms(recipient, body)
+
+        assertFalse(
+            "the timeout wording claims we waited for a report: ${result.message}",
+            result.message.contains("no send report arrived within"),
+        )
+        assertTrue(
+            "the message must say why nothing was observed: ${result.message}",
+            result.message.contains("cannot be observed", ignoreCase = true),
+        )
+        assertTrue(
+            "and must still forbid the retry: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
+        )
+    }
+
+    @Test
+    fun `the message is still sent when no report can be observed`() {
+        // An unobservable report is not a reason to withhold the send: the caller
+        // asked for an SMS, and refusing would be the one answer that is definitely
+        // wrong.
+        every {
+            mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>())
+        } throws SecurityException("registration refused")
+
+        ActionExecutor.sendSms(recipient, body)
+
+        assertNotNull(
+            "the message must still reach the radio",
+            shadowSms.lastSentTextMessageParams,
+        )
+        verify(exactly = 0) { mockService.unregisterReceiver(any<BroadcastReceiver>()) }
+    }
+
     // ── PII ──────────────────────────────────────────────────────────────────
 
     @Test
