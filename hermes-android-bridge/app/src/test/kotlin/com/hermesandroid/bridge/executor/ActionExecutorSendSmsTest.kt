@@ -3,6 +3,7 @@ package com.hermesandroid.bridge.executor
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.telephony.SmsManager
@@ -18,6 +19,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -254,6 +256,102 @@ class ActionExecutorSendSmsTest {
             "queued_unconfirmed",
             statusOf(result),
         )
+    }
+
+    // ── Report attribution (review F15) ─────────────────────────────
+
+    /**
+     * Every send used to share one broadcast action and requestCodes `0..n-1`, so
+     * the reports of two overlapping `sendSms` calls were delivered to *both*
+     * receivers — a registered receiver gets every broadcast matching its filter —
+     * and one call's segment tally was advanced by another call's radio result. A
+     * late report from a send that had already timed out landed the same way if a
+     * newer send was in flight. The action is now per call, which fixes the
+     * attribution and the `PendingIntent` identity collision at once: two calls'
+     * segment-0 intents no longer `filterEquals` each other, so `FLAG_UPDATE_CURRENT`
+     * cannot hand one call the other's PendingIntent.
+     */
+    @Test
+    fun `two overlapping sends listen on different report actions`() {
+        val actions = mutableListOf<String>()
+        every { mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>()) } answers {
+            actions += secondArg<IntentFilter>().getAction(0)
+            null
+        }
+
+        ActionExecutor.sendSms(recipient, body)
+        ActionExecutor.sendSms(recipient, body)
+
+        assertEquals(2, actions.size)
+        assertNotEquals(
+            "a shared action lets one call's report count toward another's",
+            actions[0],
+            actions[1],
+        )
+        for (action in actions) {
+            assertTrue(
+                "the action must still name this bridge: $action",
+                action.startsWith("com.hermesandroid.bridge.action.SMS_SENT_REPORT."),
+            )
+            // A UUID suffix is what makes it unique per call rather than per
+            // process, and what keeps two calls' requestCodes from colliding.
+            assertEquals("the per-call suffix must be a UUID: $action", 36, action.substringAfterLast('.').length)
+        }
+    }
+
+    @Test
+    fun `a report belonging to another call is not counted toward this one`() {
+        every { mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>()) } answers {
+            val receiver = firstArg<BroadcastReceiver>()
+            // A foreign report with a non-OK code. Under the shared action this
+            // was indistinguishable from this call's own, so a send that had
+            // never been confirmed came back as a definite radio failure.
+            receiver.onReceive(
+                context,
+                Intent("com.hermesandroid.bridge.action.SMS_SENT_REPORT.00000000-0000-0000-0000-000000000000"),
+            )
+            null
+        }
+
+        val result = ActionExecutor.sendSms(recipient, body)
+
+        assertTrue(
+            "a foreign report must not turn an unconfirmed send into a failure: ${result.message}",
+            result.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(result))
+    }
+
+    @Test
+    fun `a report on this call's own action is still counted`() {
+        // The other half: filtering must not deafen the receiver to the report it
+        // is actually waiting for.
+        every { mockService.registerReceiver(any(), any<IntentFilter>(), any<Int>()) } answers {
+            val receiver = firstArg<BroadcastReceiver>()
+            receiver.onReceive(context, Intent(secondArg<IntentFilter>().getAction(0)))
+            null
+        }
+
+        val result = ActionExecutor.sendSms(recipient, body)
+
+        assertFalse("this call's own report must reach the outcome", result.success)
+        assertEquals("failed", statusOf(result))
+    }
+
+    @Test
+    fun `the receiver is unregistered once the call has its answer`() {
+        // Already true before F15 and pinned here because it is the other half of
+        // attribution: a receiver left registered would keep counting reports
+        // belonging to a call that finished, including a late one from a send that
+        // timed out.
+        val receiver = slot<BroadcastReceiver>()
+        every {
+            mockService.registerReceiver(capture(receiver), any<IntentFilter>(), any<Int>())
+        } returns null
+
+        ActionExecutor.sendSms(recipient, body)
+
+        verify(exactly = 1) { mockService.unregisterReceiver(receiver.captured) }
     }
 
     // ── PII ──────────────────────────────────────────────────────────────────

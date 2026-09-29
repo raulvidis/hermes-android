@@ -543,8 +543,13 @@ object ActionExecutor {
         }
     }
 
-    /** Broadcast action the sentIntent PendingIntent reports the radio result on. */
-    private const val SMS_SENT_REPORT_ACTION = "com.hermesandroid.bridge.action.SMS_SENT_REPORT"
+    /**
+     * Prefix of the broadcast action the sentIntent PendingIntents report the
+     * radio result on. The action a given send listens on is this plus a per-call
+     * UUID — see [smsSentReportAction].
+     */
+    private const val SMS_SENT_REPORT_ACTION_PREFIX =
+        "com.hermesandroid.bridge.action.SMS_SENT_REPORT"
 
     /**
      * How long to wait for the radio's send report. Bounded, because a device
@@ -592,14 +597,23 @@ object ActionExecutor {
 
         val timeoutMs = smsSendReportTimeoutMs
         val report = SmsSendReport(parts.size)
+        // F15: one action per call, so this send's reports cannot be counted
+        // toward another one. A context-registered receiver gets every broadcast
+        // matching its filter, and every send used to register the same one.
+        val reportAction = smsSentReportAction(java.util.UUID.randomUUID().toString())
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
+                // The filter already scopes delivery to this call, so this is
+                // defence in depth: a report addressed to somebody else is not
+                // this call's answer, whatever resultCode it carries.
+                val intentAction = intent?.action
+                if (intentAction != null && intentAction != reportAction) return
                 // resultCode is the platform's own send-report code.
                 report.onResult(resultCode)
             }
         }
         val registered = try {
-            val filter = android.content.IntentFilter(SMS_SENT_REPORT_ACTION)
+            val filter = android.content.IntentFilter(reportAction)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 // targetSdk 34 requires the export flag. NOT_EXPORTED is correct:
                 // the platform fires our own PendingIntent, which sends with the
@@ -619,7 +633,7 @@ object ActionExecutor {
         return try {
             val sentIntents = ArrayList<android.app.PendingIntent>(parts.size)
             for (index in parts.indices) {
-                sentIntents += smsSentReportIntent(service, index)
+                sentIntents += smsSentReportIntent(service, reportAction, index)
             }
             if (parts.size > 1) {
                 smsManager.sendMultipartTextMessage(to, null, parts, sentIntents, null)
@@ -640,12 +654,38 @@ object ActionExecutor {
         }
     }
 
-    private fun smsSentReportIntent(context: Context, requestCode: Int): android.app.PendingIntent =
+    /**
+     * The broadcast action one send's reports arrive on (review F15).
+     *
+     * Every call used to share [SMS_SENT_REPORT_ACTION_PREFIX] and requestCodes
+     * `0..n-1`. Two consequences, both silent:
+     *  - two overlapping sends each registered a receiver for the same action, and
+     *    a registered receiver gets *every* matching broadcast, so each call
+     *    counted the other's segment reports — one part of a two-part send could
+     *    be confirmed by an unrelated message, or failed by one;
+     *  - `PendingIntent` identity is `requestCode` plus `Intent.filterEquals`, and
+     *    `filterEquals` ignores extras, so call B's segment-0 PendingIntent *was*
+     *    call A's. With `FLAG_IMMUTABLE` the extras cannot be updated, so B would
+     *    have been handed A's intent outright.
+     *
+     * A UUID in the action closes both: the filter matches only this call's
+     * reports, and the intents no longer compare equal across calls. Internal for
+     * `ActionExecutorSendSmsTest`, which asserts the uniqueness and the shape.
+     */
+    internal fun smsSentReportAction(callId: String): String =
+        "$SMS_SENT_REPORT_ACTION_PREFIX.$callId"
+
+    private fun smsSentReportIntent(
+        context: Context,
+        action: String,
+        requestCode: Int,
+    ): android.app.PendingIntent =
         android.app.PendingIntent.getBroadcast(
             context,
-            // One per segment, so each part's report is distinct.
+            // One per segment, so each part's report is distinct. Safe to restart
+            // at 0 for every call now that the action carries the call's identity.
             requestCode,
-            Intent(SMS_SENT_REPORT_ACTION).setPackage(context.packageName),
+            Intent(action).setPackage(context.packageName),
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
