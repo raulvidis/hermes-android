@@ -202,10 +202,18 @@ ones after successful finalization.
 ## Security
 
 See [SECURITY.md](SECURITY.md) for details. Key points:
-- Pairing code authentication with rate limiting
-- Phone connects out (never directly exposed)
-- Currently unencrypted (`ws://`) — use TLS proxy for production
-- Full device access once paired — only connect to trusted servers
+- Pairing code authentication with rate limiting. Rotating the code on the phone
+  drops the live relay session and re-dials with the new one; `android_setup`
+  pushes a new code to an already-running relay and closes sessions using the old
+  one
+- Phone connects out to the relay — but it also listens on `0.0.0.0:8765` for
+  direct USB/LAN use, with no toggle, so it is reachable from the local network
+- `wss://` by default for a public relay host; plaintext `ws://` allows command
+  injection, not just sniffing, so keep it to a LAN you control
+- Password fields are redacted from screen reads and events; screenshots and
+  screen recordings are pixels and are not
+- Full device access once paired (screen, input, microphone, SMS, calls, contacts,
+  location, clipboard, notifications, intents) — only connect to trusted servers
 
 ## Development
 

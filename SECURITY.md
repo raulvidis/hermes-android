@@ -10,6 +10,17 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 - **Pairing code**: A random 6-character alphanumeric code generated on the phone
 - The phone and server must share this code to establish a connection
 - Codes use characters `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no ambiguous 0/O/1/I)
+- **One code, three trust boundaries**: the same secret authenticates the relay
+  WebSocket, the phone's `:8765` LAN server, and the tool side's HTTP calls to the
+  relay. Leaking it anywhere leaks it everywhere (AUTH-3 in the audit).
+- **Rotation takes effect immediately** (AUTH-1). `PairingManager` is the single
+  source of truth on the device: tapping **Regenerate** drops the live relay
+  session and re-dials presenting the new code, and the app says which of those
+  happened. On the server, `android_setup("<new code>")` pushes the code to an
+  already-running relay and closes any session that authenticated with the old
+  one. Before the fix, rotation was cosmetic and an attacker holding the old code
+  kept full device control.
+- Stored in plaintext `SharedPreferences`, not the Keystore (AUTH-4 in the audit).
 
 ### Rate Limiting
 - Failed WebSocket authentication attempts are rate-limited per IP
@@ -37,9 +48,17 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
   screens do not set it.
 
 ### Connection Architecture
-- The phone connects **out** to the server (NAT-friendly)
-- The server relay only accepts one phone at a time
-- All tool commands are proxied through the relay — the phone is never directly exposed
+- The phone connects **out** to the relay (NAT-friendly); the relay accepts one
+  phone at a time and proxies every tool command to it
+- **The phone also listens.** `BridgeApplication.onCreate` starts a Ktor HTTP
+  server bound to `0.0.0.0:8765` for the lifetime of the app process, for USB/LAN
+  development. There is no UI toggle and no way to stop it short of disabling the
+  app, so "the phone is never directly exposed" is **not** true: anything on the
+  same Wi-Fi can reach it and attempt to authenticate. It is guarded only by the
+  same pairing code plus a per-IP throttle — and that throttle buckets the socket
+  peer, so behind the reverse proxy this document recommends every caller shares
+  one bucket (ROUTE-1 and AUTH-2 in the audit; both open product/architecture
+  decisions).
 
 ## Known Limitations (Prototype)
 
@@ -68,27 +87,77 @@ explicit scheme always wins — so `ws://` and the phone's own LAN server on
   control, and never to a public host
 
 ### Full Device Access
-Once paired, the agent has unrestricted access to:
-- Read all screen content (any app)
-- Tap, type, swipe anywhere
-- Open any app
-- Take screenshots
-- Read installed app list
+Once paired, the agent has unrestricted access to the device. The list below is
+the shipped surface, mapped to what it needs — not a subset chosen to look calm.
+Grant the permissions with this table in front of you.
 
-There is no granular permission system — the agent can access banking apps, messages, etc.
-- **Mitigation**: Only pair with trusted Hermes instances. Disconnect when not in use.
+| Capability | Endpoints | Requires |
+|---|---|---|
+| Read all screen content, in any app | `/screen` `/find_nodes` `/describe_node` `/screen_hash` `/diff_screen` `/widgets` `/wait` `/current_app` | Accessibility Service |
+| Full-frame still images and video of the screen | `/screenshot` `/screen_record` | MediaProjection prompt |
+| Inject input anywhere: tap, long-press, drag, swipe, pinch, scroll, type, hardware keys, media keys | `/tap` `/tap_text` `/long_press` `/drag` `/swipe` `/pinch` `/scroll` `/type` `/press_key` `/media` | Accessibility Service |
+| Launch any app | `/open_app` `/apps` | — |
+| **Record the microphone** and download the WAV | `/mic_start` `/mic_stop` `/mic_status` `/mic_file` | `RECORD_AUDIO` |
+| **Send SMS** | `/send_sms` | `SEND_SMS` |
+| **Place phone calls** | `/call` | `CALL_PHONE` (otherwise opens the dialler) |
+| **Read contacts** | `/contacts` | `READ_CONTACTS` |
+| **Read GPS location** | `/location` | `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` |
+| **Read and overwrite the clipboard** | `/clipboard` | Accessibility Service |
+| **Read notifications, including dismissed ones** | `/notifications` | Notification Listener |
+| Interaction history across every app | `/events` `/events/stream` | Accessibility Service |
+| **Fire arbitrary intents and broadcasts** | `/intent` `/broadcast` | — (denylist-filtered, see below) |
+| **Run Termux scripts** (opt-in revival watchdog) | RelayClient `RUN_COMMAND` | Termux → "Allow external apps" |
+| Speak via TTS | `/speak` `/stop_speaking` | — |
+| Battery state | `/battery` `/ping` | — |
+
+There is no granular permission system and no per-command confirmation on the
+device: an authenticated caller (or a relay, or anyone who can inject into a
+plaintext `ws://` session) can do all of the above, in banking apps and message
+threads included. A malicious or compromised relay is fully trusted by design
+(RELAY-1), and the destructive-action confirmation gate is an open product
+decision (CTRL-1).
+
+`/intent` and `/broadcast` are denylist-filtered rather than allowlisted:
+- `/intent` rejects package install/uninstall, factory reset and shutdown,
+  direct-dial telephony actions (`CALL`, `CALL_PRIVILEGED`), every
+  `android.settings.*` and `android.provider.action.*` action, the
+  `tel:`/`sms:`/`smsto:`/`mms:`/`mmsto:`/`market:`/`intent:` URI schemes, and
+  personal `content://` providers (SMS, MMS, MMS-SMS, call log, telephony,
+  contacts, ICC, settings). The URI is trimmed and lower-cased before the check,
+  so leading whitespace and mixed case are not bypasses.
+- `/broadcast` rejects the media/package/storage state broadcasts plus shutdown,
+  master clear and factory reset.
+
+`packageOverride` on `/intent` is **not** constrained, and a denylist can always
+be gapped — an allowlist is the only shape that cannot be.
+
+- **Mitigation**: only pair with Hermes instances you trust; disconnect (or force
+  stop the app) when not in use; rotate the pairing code if it may have leaked —
+  rotation now actually invalidates the old one; keep the status overlay on so you
+  can see when the bridge is active.
 
 ### No Command Audit Log
-There is no persistent log of what commands the agent executed on the phone.
-- **Mitigation**: The relay logs commands to stdout when run with INFO logging.
+There is no persistent log on the phone of what commands the agent executed.
+- The relay does log: `contrib/hermes-relay-daemon.py` runs it at INFO, so
+  commands (method + path, with PII-bearing body fields redacted) land in
+  journald/stdout on the server. That is a server-side trail, not a device-side
+  one, and it disappears with the relay's journal.
+- **Mitigation**: keep relay INFO logging on and retain the journal if you need an
+  audit trail; the phone itself keeps none.
 
 ## Recommendations for Production Use
 
-1. **Add TLS**: Put the relay behind a reverse proxy (nginx/caddy) with Let's Encrypt certificates
+1. **Add TLS**: give the relay `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY`, or put it
+   behind a reverse proxy (nginx/caddy) with Let's Encrypt certificates. Note that
+   a reverse proxy collapses the per-IP auth throttle into one bucket unless you
+   forward and honour `X-Forwarded-For` (AUTH-2).
 2. **Use a strong pairing code**: Don't share your code publicly
 3. **Disconnect when idle**: Tap Disconnect in the app when you're not actively using it
 4. **Monitor the phone**: Keep the status overlay enabled to see when the bridge is active
-5. **Don't pair on public WiFi**: The unencrypted connection is vulnerable to interception
+5. **Don't pair on public WiFi**: an unencrypted connection can be read *and
+   injected into*, and a rogue AP can harvest the pairing code from the handshake
+6. **Assume `:8765` is open** on any network the phone joins, until there is a
+   toggle for it (ROUTE-1)
 
 ## Reporting Security Issues
 
