@@ -95,11 +95,11 @@ class TestHermeticHome:
         monkeypatch.setattr(relay, "start_relay", lambda pairing_code, port: None)
         monkeypatch.setattr(relay, "is_phone_connected", lambda: False)
 
-        tool_mod.android_setup("PAIRCODE")
+        tool_mod.android_setup("PA2RCDE")
 
         written = hermetic_home / ".env"
         assert written.is_file()
-        assert "ANDROID_BRIDGE_TOKEN=PAIRCODE" in written.read_text(encoding="utf-8")
+        assert "ANDROID_BRIDGE_TOKEN=PA2RCDE" in written.read_text(encoding="utf-8")
 
     def test_the_redirect_survives_home_being_unset(
         self, tool_mod, hermetic_home, monkeypatch
@@ -562,22 +562,22 @@ class TestAndroidSetup:
     def test_starts_the_relay_with_the_pairing_code_and_port(self, tool_mod, monkeypatch):
         monkeypatch.setenv("ANDROID_RELAY_PORT", "9100")
 
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
-        assert self.started == [("PAIRCODE", 9100)]
+        assert self.started == [("PA2RCDE", 9100)]
 
     def test_waits_before_checking_whether_the_phone_arrived(self, tool_mod):
         """The phone connects asynchronously, so setup gives it a second; the
         wait is asserted because removing it makes the 'connected' answer a coin
         flip on a slow network."""
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert self.slept == [1]
 
     def test_reports_a_phone_that_is_already_connected(self, tool_mod):
         self.connected = True
 
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result["status"] == "ok"
         assert result["phone_connected"] is True
@@ -586,25 +586,25 @@ class TestAndroidSetup:
         assert "user_instructions" not in result
 
     def test_tells_the_user_what_to_type_when_no_phone_yet(self, tool_mod):
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result["status"] == "ok"
         assert result["phone_connected"] is False
         assert result["server_address"] == f"{FAKE_IP}:8766"
         assert FAKE_IP in result["user_instructions"]
-        assert "PAIRCODE" in result["user_instructions"]
+        assert "PA2RCDE" in result["user_instructions"]
 
     def test_exports_the_url_and_token_into_the_process(self, tool_mod):
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
-        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "PAIRCODE"
+        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "PA2RCDE"
         assert os.environ["ANDROID_BRIDGE_URL"] == "http://localhost:8766"
 
     def test_the_exported_url_is_immediately_usable(self, tool_mod, bridge):
         """The point of the export: the next tool call in the same process must
         reach the relay that was just started, not a stale URL."""
         rsps, _ = bridge
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
         rsps.add(responses.GET, "http://localhost:8766/ping", json={"phone_connected": True})
 
         assert as_json(tool_mod.android_ping())["status"] == "ok"
@@ -612,11 +612,11 @@ class TestAndroidSetup:
     def test_uses_hermes_cli_config_when_available(self, tool_mod, hermes_cli, monkeypatch):
         monkeypatch.setenv("ANDROID_RELAY_PORT", "9100")
 
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert hermes_cli == [
             ("ANDROID_BRIDGE_URL", "http://localhost:9100"),
-            ("ANDROID_BRIDGE_TOKEN", "PAIRCODE"),
+            ("ANDROID_BRIDGE_TOKEN", "PA2RCDE"),
             ("ANDROID_RELAY_PORT", "9100"),
         ]
 
@@ -626,34 +626,34 @@ class TestAndroidSetup:
             "exercising the fallback"
         )
 
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
         written = (hermetic_home / ".env").read_text(encoding="utf-8")
         assert "ANDROID_BRIDGE_URL=http://localhost:8766" in written
-        assert "ANDROID_BRIDGE_TOKEN=PAIRCODE" in written
+        assert "ANDROID_BRIDGE_TOKEN=PA2RCDE" in written
         assert "ANDROID_RELAY_PORT=8766" in written
 
     def test_the_written_env_file_is_owner_only(self, tool_mod, hermetic_home):
-        as_json(tool_mod.android_setup("PAIRCODE"))
+        as_json(tool_mod.android_setup("PA2RCDE"))
 
         mode = (hermetic_home / ".env").stat().st_mode & 0o777
         assert oct(mode) == "0o600"
 
     def test_repairing_replaces_the_previous_token(self, tool_mod, hermetic_home):
-        as_json(tool_mod.android_setup("OLDCODE"))
-        as_json(tool_mod.android_setup("NEWCODE"))
+        as_json(tool_mod.android_setup("PREVCDE"))
+        as_json(tool_mod.android_setup("NEWCDE"))
 
         written = (hermetic_home / ".env").read_text(encoding="utf-8")
-        assert "OLDCODE" not in written
+        assert "PREVCDE" not in written
         assert written.count("ANDROID_BRIDGE_TOKEN=") == 1
-        assert "ANDROID_BRIDGE_TOKEN=NEWCODE" in written
+        assert "ANDROID_BRIDGE_TOKEN=NEWCDE" in written
 
     def test_a_missing_relay_module_is_reported(self, tool_mod, monkeypatch):
         """The plugin ships android_relay next to android_tool; if the import
         still fails the agent needs to hear 'not installed', not a traceback."""
         monkeypatch.setitem(sys.modules, f"{tool_mod.__package__}.android_relay", None)
 
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result["status"] == "error"
         assert "android_relay module not found" in result["message"]
@@ -664,7 +664,7 @@ class TestAndroidSetup:
 
         monkeypatch.setattr(self.relay, "start_relay", refuse)
 
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result == {"status": "error", "message": "Relay failed to start"}
 
@@ -672,7 +672,7 @@ class TestAndroidSetup:
         (hermetic_home / ".env").unlink(missing_ok=True)
         (hermetic_home / ".env").mkdir()  # a directory: open() for write fails
 
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result["status"] == "error"
         assert not self.started, "the relay must not start when the config could not be saved"
@@ -680,7 +680,7 @@ class TestAndroidSetup:
     def test_a_bad_relay_port_is_reported(self, tool_mod, monkeypatch):
         monkeypatch.setenv("ANDROID_RELAY_PORT", "not-a-port")
 
-        result = as_json(tool_mod.android_setup("PAIRCODE"))
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
 
         assert result["status"] == "error"
         assert not self.started
@@ -690,7 +690,7 @@ class TestAndroidSetup:
         creates the connection, so requiring one would deadlock pairing."""
         rsps, _ = bridge
 
-        tool_mod.android_setup("PAIRCODE")
+        tool_mod.android_setup("PA2RCDE")
 
         assert not rsps.calls
 
@@ -698,9 +698,9 @@ class TestAndroidSetup:
         import logging
 
         with caplog.at_level(logging.DEBUG):
-            tool_mod.android_setup("PAIRCODE-DO-NOT-LOG")
+            tool_mod.android_setup("SECRET2345")
 
-        assert "PAIRCODE-DO-NOT-LOG" not in caplog.text
+        assert "SECRET2345" not in caplog.text
 
     @pytest.mark.xfail(
         strict=True,
@@ -716,7 +716,7 @@ class TestAndroidSetup:
     ):
         env_file("ANDROID_RELAY_PORT=9100\n")
 
-        tool_mod.android_setup("PAIRCODE")
+        tool_mod.android_setup("PA2RCDE")
 
-        assert self.started == [("PAIRCODE", 9100)]
+        assert self.started == [("PA2RCDE", 9100)]
         assert "ANDROID_RELAY_PORT=9100" in env_file.read()

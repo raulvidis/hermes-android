@@ -63,6 +63,28 @@ def hermetic_home(monkeypatch, tmp_path):
     _reset_module_caches()
 
 
+@pytest.fixture(autouse=True)
+def no_lingering_relay():
+    """Never let a test leave a relay thread (and its port) behind.
+
+    `android_setup()` starts a real relay, and nothing in test_android_tool.py
+    stopped it — the thread and port 8766 outlived the test for the rest of the
+    session. `stop_relay()` is idempotent, so this is safe for the tests in
+    test_android_relay.py that manage the relay themselves.
+
+    The import is guarded because one test parks `None` in `sys.modules` to
+    simulate an unimportable relay module; there is nothing to stop then, and a
+    teardown `ModuleNotFoundError` would mask the test's own result.
+    """
+    yield
+    try:
+        from tools.android_relay import stop_relay
+    except ImportError:
+        return
+
+    stop_relay()
+
+
 def _redirect_home_lookups(monkeypatch, home):
     """Make ``~`` resolve inside the throwaway home even when HOME is unset.
 

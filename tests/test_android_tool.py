@@ -370,12 +370,22 @@ class TestCurrentApp:
 class TestSetup:
     @responses.activate
     def test_setup_saves_config(self, monkeypatch):
-        """android_setup saves pairing code and sets env vars."""
-        from tools.android_tool import _get_public_ip
+        """android_setup saves pairing code and sets env vars.
+
+        The relay is stubbed: binding a real port made this fail on a loaded
+        machine ("Relay failed to start within 10 seconds"), and relay lifecycle
+        is covered by test_android_relay.py.
+        """
+        import tools.android_relay as relay
 
         monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
-        result = json.loads(android_setup("ABC123"))
-        assert os.environ.get("ANDROID_BRIDGE_TOKEN") == "ABC123"
+        monkeypatch.setattr(relay, "start_relay", lambda **kw: None)
+        monkeypatch.setattr(relay, "set_pairing_code", lambda code: None)
+        monkeypatch.setattr(relay, "is_phone_connected", lambda: False)
+
+        result = json.loads(android_setup("ABC234"))
+        assert result["status"] == "ok"
+        assert os.environ.get("ANDROID_BRIDGE_TOKEN") == "ABC234"
         assert "localhost" in os.environ.get("ANDROID_BRIDGE_URL", "")
 
 
@@ -1508,3 +1518,210 @@ class TestMicFetchErrorRedaction:
         assert "192.168.7.42" not in result["error"]
         assert "8766" not in result["error"]
         assert result["error"] == "Could not download microphone recording from the bridge"
+
+
+# ── PY-1: pairing-code validation and .env write hardening ────────────────────
+
+import stat as _stat
+from pathlib import Path as _Path
+
+from tools.android_tool import _pairing_code_error, _update_env_file
+
+
+class TestPairingCodeValidation:
+    """PY-1: `pairing_code` is written into ~/.hermes/.env verbatim.
+
+    That file is parsed as `key=value` lines and `_bridge_url()` reads
+    ANDROID_BRIDGE_URL back out of it, so a crafted value can re-point every
+    later tool call at an attacker host — with the real Bearer token attached by
+    `_auth_headers()`. Validation is the fix; these pin the accepted shape to
+    exactly what `PairingManager.regenerateCode()` can produce.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "ABC234\nANDROID_BRIDGE_URL=http://attacker.example:8766",
+            "ABC234\r\nANDROID_BRIDGE_TOKEN=stolen",
+            "ABC234\n",
+            "\nABC234",
+            "ABC234 # comment",
+            "#ABC234",
+            "abc234",
+            "Abc234",
+            " ABC234",
+            "ABC234 ",
+            "ABC23",
+            "A2345",
+            "",
+            "ABC01I",  # 0, 1 and I are not in the generated alphabet
+            "ABC23O",
+            'ABC234"',
+            "ABC234'",
+            "ABC234;rm -rf /",
+            "ABC234`id`",
+            "$(id)ABC",
+            "ANDROID_BRIDGE_URL=http://evil.example",
+            "ABC-234",
+            "ABC.234",
+            "ABC234\x00",
+            "A" * 33,
+        ],
+    )
+    def test_rejected(self, code):
+        assert _pairing_code_error(code) is not None, f"{code!r} must be rejected"
+
+    @pytest.mark.parametrize("code", [123456, None, ["ABC234"], {"code": "ABC234"}])
+    def test_non_string_rejected(self, code):
+        assert _pairing_code_error(code) is not None
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "ABC234",
+            "K7V3NP",
+            "ZZZZZZ",
+            "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",  # the full generated alphabet
+            "A" * 32,
+        ],
+    )
+    def test_accepted(self, code):
+        assert _pairing_code_error(code) is None, f"{code!r} must be accepted"
+
+    def test_rejection_never_echoes_the_value(self):
+        """The code is a credential; an error message must not carry it."""
+        message = _pairing_code_error("ABC234\nANDROID_BRIDGE_URL=http://attacker.example")
+        assert "ABC234" not in message
+        assert "attacker" not in message
+
+
+class TestSetupRejectsMalformedPairingCode:
+    """End-to-end: android_setup must refuse before anything is written."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_relay(self, monkeypatch):
+        import tools.android_relay as relay
+
+        self.calls = []
+        monkeypatch.setattr(
+            relay, "start_relay", lambda **kw: self.calls.append(("start_relay", kw))
+        )
+        monkeypatch.setattr(
+            relay, "set_pairing_code", lambda code: self.calls.append(("set_pairing_code", code))
+        )
+        monkeypatch.setattr(relay, "is_phone_connected", lambda: False)
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "PRE-EXISTING")
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "http://localhost:8766")
+        yield
+
+    def _env_file(self):
+        return _Path(os.environ["HERMES_HOME"]) / ".env"
+
+    def test_injection_attempt_is_refused_and_writes_nothing(self):
+        injected = "ABC234\nANDROID_BRIDGE_URL=http://attacker.example:8766"
+
+        result = json.loads(android_setup(injected))
+
+        assert result["status"] == "error"
+        assert "Invalid pairing code" in result["message"]
+        assert injected not in result["message"], "the credential must not be echoed"
+        assert "attacker" not in result["message"]
+        assert not self.calls, "no relay may be started for a rejected code"
+        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "PRE-EXISTING"
+        assert os.environ["ANDROID_BRIDGE_URL"] == "http://localhost:8766"
+        assert not self._env_file().exists(), "a rejected code must not touch .env"
+
+    def test_non_string_code_is_refused(self):
+        result = json.loads(android_setup(123456))
+        assert result["status"] == "error"
+        assert not self.calls
+        assert not self._env_file().exists()
+
+    def test_a_real_code_still_sets_up(self):
+        result = json.loads(android_setup("K7V3NP"))
+
+        assert result["status"] == "ok"
+        assert os.environ["ANDROID_BRIDGE_TOKEN"] == "K7V3NP"
+        assert ("set_pairing_code", "K7V3NP") in self.calls
+        env_text = self._env_file().read_text()
+        assert "ANDROID_BRIDGE_TOKEN=K7V3NP" in env_text
+        assert len(env_text.splitlines()) == 3, env_text
+
+    def test_setup_writes_to_hermes_home_not_the_real_home(self):
+        """The .env that `_bridge_token()` reads is the one setup must write."""
+        android_setup("K7V3NP")
+
+        assert self._env_file().exists()
+        assert _Path(os.environ["HERMES_HOME"]) == _Path.home() / ".hermes"
+
+
+class TestUpdateEnvFileHardening:
+    """PY-1 defence in depth: the writer itself refuses multi-line values."""
+
+    @pytest.fixture
+    def env(self, tmp_path):
+        """Its own directory: tmp_path also holds conftest's fake home."""
+        directory = tmp_path / "cfg"
+        directory.mkdir()
+        return directory / ".env"
+
+    def test_refuses_a_value_with_a_newline(self, env):
+        with pytest.raises(ValueError):
+            _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234\nEVIL=1")
+        assert not env.exists()
+
+    def test_refuses_a_value_with_a_carriage_return(self, env):
+        with pytest.raises(ValueError):
+            _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234\rEVIL=1")
+        assert not env.exists()
+
+    @pytest.mark.parametrize("key", ["A B", "KEY=1", "", "1KEY", "KEY\nOTHER", "a.b"])
+    def test_refuses_a_key_that_could_forge_a_line(self, env, key):
+        with pytest.raises(ValueError):
+            _update_env_file(env, key, "ABC234")
+
+    def test_new_file_is_created_at_0600(self, env):
+        _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234")
+        assert _stat.S_IMODE(env.stat().st_mode) == 0o600
+
+    def test_a_pre_existing_world_readable_file_is_tightened(self, env):
+        """write-then-chmod left the token readable in between; this must not."""
+        env.write_text("ANDROID_BRIDGE_TOKEN=OLD\n")
+        env.chmod(0o644)
+
+        _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234")
+
+        assert _stat.S_IMODE(env.stat().st_mode) == 0o600
+        assert env.read_text() == "ANDROID_BRIDGE_TOKEN=ABC234\n"
+
+    def test_updates_in_place_and_keeps_other_keys(self, env):
+        env.write_text("# comment\nOTHER=keep\nANDROID_BRIDGE_TOKEN=OLD\nTRAILING=1\n")
+
+        _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234")
+
+        assert env.read_text() == (
+            "# comment\nOTHER=keep\nANDROID_BRIDGE_TOKEN=ABC234\nTRAILING=1\n"
+        )
+
+    def test_appends_a_missing_key_and_fixes_a_missing_final_newline(self, env):
+        env.write_text("OTHER=keep")
+
+        _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234")
+
+        assert env.read_text() == "OTHER=keep\nANDROID_BRIDGE_TOKEN=ABC234\n"
+
+    def test_leaves_no_temp_file_behind(self, env):
+        _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "ABC234")
+        _update_env_file(env, "ANDROID_BRIDGE_URL", "http://localhost:8766")
+        assert sorted(p.name for p in env.parent.iterdir()) == [".env"]
+
+    def test_a_rejected_write_leaves_the_previous_file_intact(self, env):
+        env.write_text("ANDROID_BRIDGE_TOKEN=GOOD\n")
+        env.chmod(0o600)
+
+        with pytest.raises(ValueError):
+            _update_env_file(env, "ANDROID_BRIDGE_TOKEN", "BAD\nVALUE")
+
+        assert env.read_text() == "ANDROID_BRIDGE_TOKEN=GOOD\n"
+        assert sorted(p.name for p in env.parent.iterdir()) == [".env"]
