@@ -25,6 +25,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * the message is only confirmed when every part reports, and a single failure
  * wins immediately rather than waiting out the timeout for the rest.
  *
+ * An absent report is *not* a failure. The message was handed to the radio and
+ * the report merely did not arrive inside the bound, so [describe] answers
+ * `queued_unconfirmed` and tells the caller not to resend (review F14);
+ * `success = false` is reserved for a report that definitively says the send
+ * failed.
+ *
  * @param expectedReports how many send reports to wait for — the segment count.
  */
 class SmsSendReport(private val expectedReports: Int = 1) {
@@ -46,7 +52,8 @@ class SmsSendReport(private val expectedReports: Int = 1) {
 
     /**
      * The outcome, or `null` when no conclusive report arrived within
-     * [timeoutMs]. `null` is a failure to confirm, never a success.
+     * [timeoutMs]. `null` means "unconfirmed" — see [describe], which reports it
+     * as `queued_unconfirmed` rather than as a failure a caller would retry.
      */
     fun await(timeoutMs: Long): Int? {
         val completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
@@ -58,6 +65,15 @@ class SmsSendReport(private val expectedReports: Int = 1) {
     companion object {
         private const val NOT_YET = Int.MIN_VALUE
 
+        /** Every segment reported `RESULT_OK`. */
+        const val STATUS_SENT = "sent"
+
+        /** Handed to the radio, no report inside the window. Do not resend. */
+        const val STATUS_QUEUED_UNCONFIRMED = "queued_unconfirmed"
+
+        /** A report arrived and said the send failed. A retry is safe. */
+        const val STATUS_FAILED = "failed"
+
         /**
          * Turn the outcome into what the tool reports.
          *
@@ -65,19 +81,42 @@ class SmsSendReport(private val expectedReports: Int = 1) {
          * builds can echo them — AGENTS.md requires phone numbers, recipients
          * and message content to be stripped from tool responses, and the
          * segment count is the only send detail that is safe to surface.
+         *
+         * Three outcomes, and the line between them is whether the radio *said*
+         * something:
+         *  - [STATUS_SENT] — every segment reported `RESULT_OK`;
+         *  - [STATUS_FAILED] — a report arrived and was not `RESULT_OK`, so the
+         *    send definitively did not happen and a retry is safe;
+         *  - [STATUS_QUEUED_UNCONFIRMED] — no report inside the window. Reported
+         *    as `success = true` (review F14): the message was handed to the
+         *    radio, and `success = false` read to the caller as "try again", so
+         *    the recipient got the same SMS twice whenever the first one was
+         *    merely slow. The message says not to resend and why.
          */
         fun describe(reportedCode: Int?, parts: Int, timeoutMs: Long): ActionResult =
             when (reportedCode) {
                 null -> ActionResult(
-                    false,
+                    true,
                     "SMS was handed to the radio but no send report arrived within " +
-                        "${timeoutMs}ms; delivery is unconfirmed",
+                        "${timeoutMs}ms; delivery is unconfirmed" +
+                        (if (parts > 1) " ($parts segments were in flight)" else "") +
+                        ". Do NOT resend: the message may already have been " +
+                        "delivered and a retry would duplicate it.",
+                    mapOf("status" to STATUS_QUEUED_UNCONFIRMED, "parts" to parts),
                 )
 
                 Activity.RESULT_OK ->
-                    ActionResult(true, if (parts > 1) "SMS sent ($parts parts)" else "SMS sent")
+                    ActionResult(
+                        true,
+                        if (parts > 1) "SMS sent ($parts parts)" else "SMS sent",
+                        mapOf("status" to STATUS_SENT, "parts" to parts),
+                    )
 
-                else -> ActionResult(false, "SMS send failed: ${reason(reportedCode)}")
+                else -> ActionResult(
+                    false,
+                    "SMS send failed: ${reason(reportedCode)}",
+                    mapOf("status" to STATUS_FAILED, "parts" to parts),
+                )
             }
 
         /**

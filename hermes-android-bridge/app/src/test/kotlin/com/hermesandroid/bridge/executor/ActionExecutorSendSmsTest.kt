@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.telephony.SmsManager
+import com.hermesandroid.bridge.model.ActionResult
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import io.mockk.every
 import io.mockk.mockk
@@ -54,6 +55,11 @@ import org.robolectric.shadows.ShadowSmsManager
  * mapping (`RESULT_OK` -> "SMS sent") is pinned one layer down in
  * [SmsSendReportTest], and here the delivered-report case asserts the plumbing:
  * a report that is not `RESULT_OK` must reach the caller as `success: false`.
+ *
+ * Review F14 changed what an *absent* report means: the message was handed to the
+ * radio, so "no report inside the window" is `success: true` with status
+ * `queued_unconfirmed` and an explicit do-not-resend, not a failure the agent is
+ * invited to retry. The assertions below follow that contract.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -142,17 +148,32 @@ class ActionExecutorSendSmsTest {
         // sendSms claimed success regardless.
         assertNotNull("a sentIntent must be supplied", params.sentIntent)
         assertEquals(recipient, params.destinationAddress)
-        assertFalse("with no report the send must not be claimed as successful", result.success)
+        assertEquals(
+            "with no report the outcome must be the unconfirmed one, not a claimed send",
+            "queued_unconfirmed",
+            statusOf(result),
+        )
     }
 
     @Test
     fun `no send report within the bound is reported as unconfirmed`() {
         val result = ActionExecutor.sendSms(recipient, body)
 
-        assertFalse(result.success)
+        // F14: `success = false` here is what made the recipient get the message
+        // twice — the radio has it, the report merely did not arrive in time, and
+        // an agent that reads "failed" sends it again.
+        assertTrue(
+            "a missing report is not a definite failure: ${result.message}",
+            result.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(result))
         assertTrue(
             "must say delivery is unconfirmed: ${result.message}",
             result.message.contains("unconfirmed", ignoreCase = true),
+        )
+        assertTrue(
+            "and must forbid the retry that would duplicate it: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
         )
     }
 
@@ -228,7 +249,11 @@ class ActionExecutorSendSmsTest {
         val result = ActionExecutor.sendSms(recipient, body)
 
         verify(exactly = 1) { smsManager.sendTextMessage(recipient, null, body, any(), null) }
-        assertFalse("an unconfirmed send is never a success", result.success)
+        assertEquals(
+            "an unconfirmed send is reported as unconfirmed, never as a claimed success",
+            "queued_unconfirmed",
+            statusOf(result),
+        )
     }
 
     // ── PII ──────────────────────────────────────────────────────────────────
@@ -282,5 +307,12 @@ class ActionExecutorSendSmsTest {
         assertEquals("SMS sent", confirmed.message)
         assertTrue(confirmedMultipart.success)
         assertEquals("SMS sent (3 parts)", confirmedMultipart.message)
+    }
+
+    /** The machine-readable outcome F14 added, or a failure naming the result. */
+    private fun statusOf(result: ActionResult): String {
+        val data = result.data as? Map<*, *>
+        assertNotNull("the outcome carries no status: $result", data)
+        return data!!["status"] as String
     }
 }

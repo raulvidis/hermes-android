@@ -192,6 +192,14 @@ and the exact text, get an explicit yes, then call `android_send_sms(to, body)`
 once. `android_send_sms` sends immediately and must be confirmed with the user
 first.
 
+Call it **once**, whatever comes back. The response carries a `status`: `sent`
+means the radio confirmed every segment; `failed` means the radio reported an
+error, so the message did not go out and a retry is safe; `queued_unconfirmed`
+means the message was handed to the radio but no send report arrived inside the
+10 s window — **do not resend**. It is reported as a success precisely so a caller
+does not retry and deliver the same SMS twice. Say it could not be confirmed and
+stop.
+
 **Contact lookup:** `android_search_contacts("<name>")` returns numbers directly — don't navigate the Contacts app.
 
 **Pitfalls:** Default SMS app package varies (`com.google.android.apps.messaging` on Pixel, `com.samsung.android.messaging` on Samsung) — check `android_get_apps()` if open_app fails. Notification previews may be truncated; open the thread for full text.

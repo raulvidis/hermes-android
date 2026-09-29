@@ -558,8 +558,11 @@ object ActionExecutor {
      *
      * `sendTextMessage` returns once the message is queued, so this divides the
      * body, passes a `sentIntent` per segment, and waits — bounded — for the
-     * reports. An unconfirmed send is reported as a failure, never as success.
-     * The recipient and the body are never echoed back (AGENTS.md PII rule).
+     * reports. A report that says the send failed is `success: false`; no report
+     * inside the bound is `success: true` with status `queued_unconfirmed` and an
+     * explicit do-not-resend (review F14), because the alternative read as "try
+     * again" and the recipient got the message twice. The recipient and the body
+     * are never echoed back (AGENTS.md PII rule).
      */
     fun sendSms(to: String, body: String): ActionResult {
         val service = BridgeAccessibilityService.instance
@@ -608,8 +611,8 @@ object ActionExecutor {
             }
             true
         } catch (e: Exception) {
-            // Without a receiver there is no report, and "unconfirmed" is the
-            // honest answer rather than a claimed success.
+            // Without a receiver there is no report at all, so the outcome is the
+            // unconfirmed one — never a claimed success.
             false
         }
 

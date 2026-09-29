@@ -2,8 +2,10 @@ package com.hermesandroid.bridge.executor
 
 import android.app.Activity
 import android.telephony.SmsManager
+import com.hermesandroid.bridge.model.ActionResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -107,15 +109,91 @@ class SmsSendReportTest {
 
     // ── Mapping to what the tool says ────────────────────────────────────────
 
+    /**
+     * Review F14: an absent send report used to be `success = false`, which is the
+     * one answer guaranteed to cause a duplicate. The message *was* handed to the
+     * radio — `sendTextMessage` returned without throwing — and the report simply
+     * did not arrive inside the window, which is what a device on one bar of signal
+     * does routinely. An agent reading `success: false` retries, and the recipient
+     * gets the same SMS twice (or three times, when the retry also times out).
+     * "I cannot confirm it" is not "it failed", and the two must not share a flag
+     * the caller treats as "do it again".
+     */
     @Test
-    fun `an absent report is a failure, not a silent success`() {
+    fun `an absent report is queued-unconfirmed, not a retryable failure`() {
         val result = SmsSendReport.describe(null, parts = 1, timeoutMs = 10_000L)
 
-        assertFalse(result.success)
         assertTrue(
-            "the message must say delivery is unconfirmed, got: ${result.message}",
+            "success=false invites a retry, and the recipient gets the message twice",
+            result.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertTrue(
+            "the message must still say it is unconfirmed, got: ${result.message}",
             result.message.contains("unconfirmed", ignoreCase = true),
         )
+    }
+
+    @Test
+    fun `the unconfirmed message forbids resending and says why`() {
+        val message = SmsSendReport.describe(null, parts = 1, timeoutMs = 10_000L).message
+
+        assertTrue(
+            "an agent must be told not to retry, got: $message",
+            message.contains("do not resend", ignoreCase = true),
+        )
+        assertTrue(
+            "and told what a retry would do, got: $message",
+            message.contains("duplicate", ignoreCase = true),
+        )
+    }
+
+    @Test
+    fun `a partly reported multipart send is unconfirmed too, not failed`() {
+        // Two of three segments confirmed, the third never reported. Resending
+        // would duplicate the two that definitely went out.
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(Activity.RESULT_OK)
+
+        val result = SmsSendReport.describe(report.await(timeout), parts = 3, timeoutMs = timeout)
+
+        assertTrue(result.success)
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertTrue(
+            "the segment count is not PII and says what is in flight: ${result.message}",
+            result.message.contains("3"),
+        )
+    }
+
+    @Test
+    fun `only a definite radio report is a failure`() {
+        // The line the contract turns on: a report saying the send failed is a
+        // failure; the absence of a report is not.
+        val definite = listOf(
+            SmsManager.RESULT_ERROR_GENERIC_FAILURE,
+            SmsManager.RESULT_ERROR_RADIO_OFF,
+            SmsManager.RESULT_ERROR_NULL_PDU,
+            SmsManager.RESULT_ERROR_NO_SERVICE,
+            SmsManager.RESULT_ERROR_LIMIT_EXCEEDED,
+            SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE,
+            SmsManager.RESULT_ENCODING_ERROR,
+            SmsManager.RESULT_NETWORK_ERROR,
+            SmsManager.RESULT_MODEM_ERROR,
+            SmsManager.RESULT_SYSTEM_ERROR,
+            SmsManager.RESULT_NO_MEMORY,
+            SmsManager.RESULT_SMS_BLOCKED_DURING_EMERGENCY,
+            9_999, // an unknown non-OK code is still a definite report
+        )
+        for (code in definite) {
+            val result = SmsSendReport.describe(code, parts = 1, timeoutMs = 10_000L)
+            assertFalse("code $code is a definite failure", result.success)
+            assertEquals("failed", statusOf(result))
+        }
+
+        val sent = SmsSendReport.describe(Activity.RESULT_OK, parts = 1, timeoutMs = 10_000L)
+        assertTrue(sent.success)
+        assertEquals("sent", statusOf(sent))
     }
 
     @Test
@@ -178,6 +256,17 @@ class SmsSendReportTest {
                 "a phone-number-shaped string leaked into '${outcome.message}'",
                 Regex("""\+?\d{6,}""").containsMatchIn(outcome.message),
             )
+            assertTrue(
+                "every outcome carries a machine-readable status",
+                statusOf(outcome) in setOf("sent", "queued_unconfirmed", "failed"),
+            )
         }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun statusOf(result: ActionResult): String {
+        val data = result.data as? Map<String, Any?>
+        assertNotNull("the outcome carries no status: $result", data)
+        return data!!["status"] as String
     }
 }

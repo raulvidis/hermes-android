@@ -718,6 +718,12 @@ def android_send_sms(to: str, body: str) -> str:
     Send an SMS message directly without navigating the UI.
     Requires SMS permission on the phone.
     Destructive action — confirm recipient and message with the user first.
+
+    Call it once. The response carries a status: "sent" (the radio confirmed every
+    segment), "failed" (the radio reported an error — the message did not go out,
+    so a retry is safe), or "queued_unconfirmed" (handed to the radio but no send
+    report arrived in time). Never resend on "queued_unconfirmed": the recipient
+    may already have it and a retry delivers it twice.
     """
     try:
         data = _post("/send_sms", {"to": to, "body": body})
@@ -1621,7 +1627,7 @@ _SCHEMAS = {
     },
     "android_send_sms": {
         "name": "android_send_sms",
-        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission.",
+        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission. Call it once: a response status of 'queued_unconfirmed' means the radio has the message but never confirmed it, and resending would deliver it twice. Only 'failed' is safe to retry.",
         "parameters": {
             "type": "object",
             "properties": {
