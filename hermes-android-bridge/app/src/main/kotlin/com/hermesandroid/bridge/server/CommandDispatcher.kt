@@ -14,6 +14,7 @@ import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.executor.ScreenReader
 import com.hermesandroid.bridge.media.ScreenRecorder
+import com.hermesandroid.bridge.model.ActionResult
 import com.hermesandroid.bridge.model.DeviceCapabilities
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.notification.NotificationStore
@@ -48,6 +49,21 @@ object CommandDispatcher {
      * nothing else replaces it.
      */
     internal var batteryContext: () -> Context = { BridgeApplication.instance }
+
+    /**
+     * Where the SMS send happens (review F13).
+     *
+     * A seam for the same reason as [batteryContext]: `ActionExecutor.sendSms`
+     * blocks a thread on a `CountDownLatch` for up to
+     * `ActionExecutor.smsSendReportTimeoutMs` (10 s) waiting for the radio's send
+     * report, and `dispatch` is a suspend function — so "call it inline" means
+     * "block whichever thread the transport handed us". The route runs it on
+     * [Dispatchers.IO]; tests use the seam to observe which thread that actually
+     * is, and to answer a send without a radio.
+     */
+    internal var smsSender: (to: String, body: String) -> ActionResult = { to, body ->
+        ActionExecutor.sendSms(to, body)
+    }
 
     // RES-1: `/wait` polled the accessibility tree on the main thread for as long
     // as the caller asked. An unclamped timeoutMs let a relay — or an on-path
@@ -399,7 +415,12 @@ object CommandDispatcher {
                 if (smsBody.isNullOrBlank()) {
                     return mapOf("error" to "Missing or blank 'body'") to 400
                 }
-                val result = ActionExecutor.sendSms(to, smsBody)
+                // F13: sendSms blocks on a CountDownLatch for up to 10 s waiting
+                // for the radio's send report. `dispatch` is suspend, so calling it
+                // inline would block the transport's own thread — over direct HTTP
+                // a Netty event-loop thread that every other connection shares.
+                // Same shape as /contacts and /screen_record.
+                val result = withContext(Dispatchers.IO) { smsSender(to, smsBody) }
                 result to 200
             }
 

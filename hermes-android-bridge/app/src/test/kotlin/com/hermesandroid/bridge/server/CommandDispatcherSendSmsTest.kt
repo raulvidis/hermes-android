@@ -37,9 +37,12 @@ import org.robolectric.annotation.Config
 @Config(sdk = [33])
 class CommandDispatcherSendSmsTest {
 
+    private lateinit var originalSmsSender: (String, String) -> ActionResult
+
     @Before
     fun setup() {
         setTelephony(true)
+        originalSmsSender = CommandDispatcher.smsSender
     }
 
     @After
@@ -47,6 +50,7 @@ class CommandDispatcherSendSmsTest {
         // DeviceCapabilities is a process-wide singleton with a private setter;
         // leaving it true would change what later test classes see.
         setTelephony(false)
+        CommandDispatcher.smsSender = originalSmsSender
         unmockkAll()
     }
 
@@ -158,5 +162,56 @@ class CommandDispatcherSendSmsTest {
         val action = result as ActionResult
         assertFalse(action.success)
         assertTrue(action.message.contains("Accessibility service not running"))
+    }
+
+    /**
+     * Review F13: `ActionExecutor.sendSms` blocks a thread on a `CountDownLatch`
+     * for up to `ActionExecutor.smsSendReportTimeoutMs` (10 s) waiting for the
+     * radio's send report, and `dispatch` called it inline. `dispatch` is a
+     * suspend function, so "inline" means on whatever thread the transport is
+     * running: over direct HTTP that is a Netty event-loop thread, which every
+     * other connection on that loop shares — one SMS with no signal parks the
+     * loop for ten seconds and `/ping`, `/screen` and the event stream all stall
+     * with it. Over the relay it is a `Dispatchers.IO` worker, which is the right
+     * kind of thread but still one the caller gave up.
+     *
+     * The seam records the thread the blocking call actually runs on; without the
+     * `withContext(Dispatchers.IO)` it is the caller's.
+     */
+    @Test
+    fun `the blocking send runs off the caller's thread`() = bridgeTest {
+        val callerThread = Thread.currentThread().name
+        val seen = mutableListOf<String>()
+        CommandDispatcher.smsSender = { _, _ ->
+            seen += Thread.currentThread().name
+            ActionResult(true, "SMS sent")
+        }
+
+        val (result, status) = sendSms(smsBody("+15551234567", "hello"))
+
+        assertEquals(200, status)
+        assertEquals(true, (result as ActionResult).success)
+        assertEquals("the send must happen exactly once", 1, seen.size)
+        assertTrue(
+            "the 10 s latch wait ran on the caller's thread ($callerThread)",
+            seen[0] != callerThread,
+        )
+        assertTrue(
+            "expected a Dispatchers.IO worker, got ${seen[0]}",
+            seen[0].startsWith("DefaultDispatcher-worker"),
+        )
+    }
+
+    @Test
+    fun `the recipient and body still reach the sender unchanged`() = bridgeTest {
+        val seen = mutableListOf<Pair<String, String>>()
+        CommandDispatcher.smsSender = { to, body ->
+            seen += to to body
+            ActionResult(true, "SMS sent")
+        }
+
+        sendSms(smsBody("+15551234567", "on my way"))
+
+        assertEquals(listOf("+15551234567" to "on my way"), seen)
     }
 }
