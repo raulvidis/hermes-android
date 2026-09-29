@@ -706,22 +706,72 @@ class TestMacro:
 
         assert result["results"][0]["result"] == {"success": True}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: android_macro raises instead of returning a JSON error when a "
-            "step is not a dict. The loop reads step.get('tool') *outside* the "
-            "try/except that turns handler failures into "
-            '{"error": "Step N ... raised: ..."}, so a model that sends '
-            '["android_tap"] or [null] gets an AttributeError out of the tool '
-            "call — an unhandled exception in the agent turn instead of a "
-            "readable step failure. android_macro(None) raises TypeError the "
-            "same way."
-        ),
-    )
     def test_a_malformed_step_does_not_escape_as_an_exception(self, tool_mod):
-        result = tool_mod.android_macro(["android_tap"])
-        assert is_error(result), f"macro raised or returned {result!r} for a malformed step"
+        """A model that sends ["android_tap"] instead of [{"tool": "android_tap"}]
+        must get a readable step failure. An AttributeError out of the tool call
+        aborts the agent turn, which is the one outcome a tool must never have."""
+        result = as_json(tool_mod.android_macro(["android_tap"]))
+
+        assert is_error(json.dumps(result)), f"macro raised or returned {result!r}"
+        assert result["error"].startswith("Step 0")
+        assert result["completed"] == 0
+        assert result["results"] == []
+
+    @pytest.mark.parametrize(
+        "steps,expected",
+        [
+            pytest.param([None], "Step 0", id="null_step"),
+            pytest.param([["android_tap"]], "Step 0", id="list_step"),
+            pytest.param(
+                [{"tool": "android_ping"}, "android_tap"], "Step 1", id="second_step"
+            ),
+            pytest.param([{"tool": []}], "Step 0", id="unhashable_tool_name"),
+            pytest.param([{"tool": 7}], "Step 0", id="non_string_tool_name"),
+            pytest.param(
+                [{"tool": "android_ping", "args": "x"}], "Step 0", id="non_object_args"
+            ),
+        ],
+    )
+    def test_every_malformed_step_shape_is_reported_not_raised(
+        self, tool_mod, steps, expected
+    ):
+        result = as_json(tool_mod.android_macro(steps))
+
+        assert is_error(json.dumps(result)), f"macro raised or returned {result!r}"
+        assert result["error"].startswith(expected), result["error"]
+
+    def test_a_good_step_before_a_bad_one_is_kept_in_the_results(self, tool_mod, bridge):
+        """The malformed step must be reported with the same shape as every other
+        step failure — index, completed count and the results so far."""
+        rsps, url = bridge
+        rsps.add(responses.GET, f"{url}/ping", json={"status": "ok"})
+
+        result = as_json(tool_mod.android_macro([{"tool": "android_ping"}, None]))
+
+        assert result["error"].startswith("Step 1")
+        assert result["completed"] == 1
+        assert [entry["step"] for entry in result["results"]] == [0]
+
+    @pytest.mark.parametrize(
+        "steps",
+        [
+            pytest.param(None, id="none"),
+            pytest.param("android_tap", id="bare_string"),
+            pytest.param({"tool": "android_ping"}, id="single_step_not_wrapped"),
+            pytest.param(7, id="int"),
+        ],
+    )
+    def test_a_steps_argument_that_is_not_a_list_is_reported_not_raised(
+        self, tool_mod, steps
+    ):
+        """enumerate(None) raises TypeError outside the loop, where no per-step
+        handling can reach it. A bare string is worse: it iterates, so every
+        character is reported as a malformed step."""
+        result = as_json(tool_mod.android_macro(steps))
+
+        assert is_error(json.dumps(result)), f"macro raised or returned {result!r}"
+        assert "steps must be a list" in result["error"]
+        assert result == {"error": result["error"], "completed": 0, "results": []}
 
 
 class TestErrorRedaction:

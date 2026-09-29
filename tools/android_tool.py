@@ -554,10 +554,50 @@ def android_macro(steps: list, name: str = "unnamed") -> str:
     """
     import time as _time
 
+    # `steps` is model-authored JSON, so it can arrive as anything at all.
+    # enumerate(None) raises TypeError out here where no per-step handling can
+    # reach it, and a bare string iterates — every character becoming a
+    # "malformed step" instead of one clear complaint about the argument.
+    if not isinstance(steps, (list, tuple)):
+        return json.dumps(
+            {
+                "error": (
+                    "steps must be a list of {'tool': ..., 'args': {...}} objects, "
+                    f"got {type(steps).__name__}"
+                ),
+                "completed": 0,
+                "results": [],
+            }
+        )
+
     results = []
     for i, step in enumerate(steps):
-        tool_name = step.get("tool", "")
-        args = step.get("args", {})
+        try:
+            # Validated inside the per-step error handling on purpose: reading
+            # step.get("tool") outside it let an AttributeError escape the tool
+            # call when a model sent ["android_tap"] or [null], aborting the
+            # agent turn instead of reporting a step failure.
+            if not isinstance(step, dict):
+                raise TypeError(
+                    "expected an object with 'tool' and 'args', "
+                    f"got {type(step).__name__}"
+                )
+            tool_name = step.get("tool", "")
+            if not isinstance(tool_name, str):
+                raise TypeError(
+                    f"'tool' must be a tool name string, got {type(tool_name).__name__}"
+                )
+            args = step.get("args", {})
+            if not isinstance(args, dict):
+                raise TypeError(f"'args' must be an object, got {type(args).__name__}")
+        except TypeError as e:
+            return json.dumps(
+                {
+                    "error": f"Step {i} is malformed: {e}",
+                    "completed": i,
+                    "results": results,
+                }
+            )
 
         handler = _HANDLERS.get(tool_name)
         if handler is None:
