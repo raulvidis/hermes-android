@@ -23,7 +23,8 @@ import org.robolectric.annotation.Config
 
 /**
  * The post-revival delayed reconnect must run on a scope that survives
- * `disconnect()` (review F9).
+ * `disconnect()` (review F9), **and** must be cancellable by the user (review
+ * F11).
  *
  * `fireTermuxRestart()` calls `reconnectDelayed()`, which used to launch on the
  * per-connection `scope`. When that coroutine fired 30 s later it called
@@ -35,6 +36,16 @@ import org.robolectric.annotation.Config
  * added to either function turns "fires but never reconnects" back into the live
  * bug the call site's comment claims was fixed.
  *
+ * F9's remedy — an object-level `revivalScope` nobody cancels — over-corrected:
+ * `disconnect()` sets `shouldReconnect = false` and tears the session down, but
+ * the pending reconnect survived it, so a user who tapped **Disconnect** (or
+ * **Connect** against a different relay) was silently overridden 30 s later by a
+ * dial they had already cancelled. The scope stays; the *job* is now tracked and
+ * cancelled by `disconnect()` and by `connect()`, and the coroutine re-checks
+ * `shouldReconnect` before dialling. Clearing its own handle before calling the
+ * connector is what keeps F9's intent: the reconnect is never cancelled by the
+ * `connect()` it makes.
+ *
  * These tests drive virtual time through the `revivalScope` seam. The URL is
  * loopback so nothing leaves the machine and no device is touched.
  */
@@ -43,6 +54,7 @@ import org.robolectric.annotation.Config
 class RelayClientRevivalReconnectTest {
 
     private lateinit var context: Context
+    private lateinit var originalConnector: (String, String) -> Unit
 
     @Before
     fun setup() {
@@ -50,6 +62,9 @@ class RelayClientRevivalReconnectTest {
         RelayClient.init(context)
         RelayClient.onStatusChanged = null
         RelayClient.serverUrl = null
+        // Saved rather than reconstructed: the production default closes over
+        // the private doConnect, and one test here needs exactly that.
+        originalConnector = RelayClient.connector
         setPairingCode(null)
     }
 
@@ -74,12 +89,46 @@ class RelayClientRevivalReconnectTest {
         RelayClient.onStatusChanged = null
         RelayClient.serverUrl = null
         setPairingCode(null)
+        RelayClient.connector = originalConnector
         RelayClient.revivalConnector = { url, code -> RelayClient.connect(url, code) }
         RelayClient.revivalScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     }
 
+    /**
+     * F11: the reconnect is *wanted* when the watchdog schedules it, and
+     * unwanted from then on if the user says so. `reconnectDelayed()` is reached
+     * only from the retry-budget-exhausted path, which has just set
+     * `shouldReconnect = false` — so scheduling re-arms it, and the guard inside
+     * the coroutine is what a later `disconnect()` trips.
+     */
     @Test
-    fun `the scheduled reconnect still runs after disconnect`() {
+    fun `the scheduled reconnect fires when the retry budget was already exhausted`() {
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        val connected = mutableListOf<Pair<String, String>>()
+        RelayClient.revivalConnector = { url, code -> connected += url to code }
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
+
+        // Exhaustion (or any earlier teardown) leaves the flag cleared; the
+        // watchdog then schedules the attempt it wants to make.
+        RelayClient.disconnect()
+        RelayClient.reconnectDelayed()
+        testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS)
+        testScope.runCurrent()
+
+        assertEquals(
+            listOf("http://127.0.0.1:1" to "CODE123"),
+            connected,
+        )
+    }
+
+    @Test
+    fun `a user disconnect cancels a pending revival reconnect`() {
+        // The bug F9's fix introduced: disconnect() set shouldReconnect = false
+        // and tore the session down, but the coroutine on revivalScope was
+        // nobody's to cancel, so it dialled 30 s later anyway — resurrecting a
+        // connection the user had just refused.
         val testScope = TestScope()
         RelayClient.revivalScope = testScope
         val connected = mutableListOf<Pair<String, String>>()
@@ -88,15 +137,36 @@ class RelayClientRevivalReconnectTest {
         setPairingCode("CODE123")
 
         RelayClient.reconnectDelayed()
-        // The relay is dead when the watchdog fires, and tearing it down is the
-        // first thing the reconnect itself does.
         RelayClient.disconnect()
-        testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS)
+        testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS * 2)
         testScope.runCurrent()
 
+        assertEquals("the user disconnected; nothing may dial", emptyList<Pair<String, String>>(), connected)
+    }
+
+    @Test
+    fun `a newer manual connect supersedes a pending revival reconnect`() {
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        val revived = mutableListOf<Pair<String, String>>()
+        val dialled = mutableListOf<Pair<String, String>>()
+        RelayClient.revivalConnector = { url, code -> revived += url to code }
+        RelayClient.connector = { url, code -> dialled += url to code }
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
+
+        RelayClient.reconnectDelayed()
+        // The user taps Connect against a different relay while the watchdog's
+        // 30 s timer is still running.
+        RelayClient.connect("http://127.0.0.1:2", "CODE123")
+        testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS * 2)
+        testScope.runCurrent()
+
+        assertEquals("the manual connect is the only dial", listOf("http://127.0.0.1:2" to "CODE123"), dialled)
         assertEquals(
-            listOf("http://127.0.0.1:1" to "CODE123"),
-            connected,
+            "the stale reconnect must not override the newer manual connect",
+            emptyList<Pair<String, String>>(),
+            revived,
         )
     }
 
@@ -115,8 +185,8 @@ class RelayClientRevivalReconnectTest {
 
     @Test
     fun `connect from inside the revival coroutine completes doConnect`() {
-        // The review's case: not just "the connector was called", but that the
-        // real connect() — which cancels its own caller's scope on the way in —
+        // F9's case, kept: not just "the connector was called", but that the
+        // real connect() — which cancels its own caller's job on the way in —
         // still runs doConnect to completion. Observed through the status
         // callback doConnect publishes, with no network assertion.
         val testScope = TestScope()
@@ -127,7 +197,6 @@ class RelayClientRevivalReconnectTest {
         setPairingCode("CODE123")
 
         RelayClient.reconnectDelayed()
-        RelayClient.disconnect()
         testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS)
         testScope.runCurrent()
         // notifyStatus posts to the main looper.

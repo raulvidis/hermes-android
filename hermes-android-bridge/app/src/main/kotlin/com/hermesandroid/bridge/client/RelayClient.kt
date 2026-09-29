@@ -74,8 +74,29 @@ object RelayClient {
      * `await` on DNS — the first one throws `CancellationException`, the
      * reconnect aborts silently, and the watchdog fires the script but never
      * reconnects: exactly the bug the comment at the call site claims was fixed.
+     *
+     * The scope outliving `disconnect()` is the point, and the reason the job has
+     * to be tracked separately: see [revivalReconnectJob] (review F11).
      */
     internal var revivalScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Handle for the one pending post-revival reconnect (review F11).
+     *
+     * F9's remedy was a scope nobody cancels, which over-corrected: `disconnect()`
+     * cleared `shouldReconnect` and tore the session down, but the coroutine
+     * waiting out its 30 s was nobody's to stop, so a user who tapped
+     * **Disconnect** — or **Connect** against a different relay — was silently
+     * overridden by a dial they had already cancelled. The scope still outlives
+     * the session; the job does not.
+     *
+     * The coroutine clears this handle itself, under the same monitor, before it
+     * calls the connector: `connect()` cancels [revivalReconnectJob], and
+     * cancelling the coroutine that is making the call would reintroduce exactly
+     * F9's "fires but never reconnects".
+     */
+    @Volatile
+    private var revivalReconnectJob: Job? = null
 
     /** Seam so a test can observe the reconnect without opening a real WebSocket. */
     internal var revivalConnector: (url: String, code: String) -> Unit = { url, code ->
@@ -197,6 +218,11 @@ object RelayClient {
     // coroutine left to clear it, killing auto-reconnect for the process.
     @Synchronized
     fun connect(serverUrl: String, pairingCode: String = "") {
+        // F11: an explicit connect supersedes a pending post-revival reconnect.
+        // Before the code check, not only via disconnect() below — a connect that
+        // bails out on a missing pairing code must still cancel the stale dial,
+        // otherwise the watchdog reconnects to a URL the user just walked away from.
+        cancelRevivalReconnect()
         // AUTH-1: the code always comes from PairingManager; the argument is only
         // a fallback for a manager that has no code yet (pre-init / unit tests).
         val code = effectivePairingCode(pairingCode)
@@ -222,6 +248,13 @@ object RelayClient {
     private fun effectivePairingCode(requested: String?): String? =
         PairingManager.getCode().takeIf { it.isNotBlank() }
             ?: requested?.takeIf { it.isNotBlank() }
+
+    /** F11: drop a reconnect the watchdog scheduled but the user has overtaken. */
+    @Synchronized
+    private fun cancelRevivalReconnect() {
+        revivalReconnectJob?.cancel()
+        revivalReconnectJob = null
+    }
 
     /**
      * AUTH-1: called after [PairingManager.regenerateCode]. Any session that was
@@ -250,6 +283,7 @@ object RelayClient {
     @Synchronized
     fun disconnect() {
         shouldReconnect = false
+        cancelRevivalReconnect()
         reconnectJob?.cancel()
         reconnectJob = null
         reconnectPending = false
@@ -530,12 +564,38 @@ object RelayClient {
                 Log.w(TAG, "Delayed reconnect skipped: no saved server/code")
                 return
             }
-            // revivalScope, not scope: see its doc. Launching on the
-            // per-connection scope made this coroutine cancel itself the instant
-            // it called connect().
-            revivalScope.launch {
-                kotlinx.coroutines.delay(REVIVAL_RECONNECT_DELAY_MS)
-                revivalConnector(url, code)
+            synchronized(this) {
+                // A second watchdog fire supersedes the reconnect already waiting.
+                revivalReconnectJob?.cancel()
+                // The only caller is the exhausted-budget path, which has just set
+                // shouldReconnect = false. The watchdog is deliberately scheduling
+                // another attempt, so re-arm the flag the guard below reads;
+                // otherwise F11's own check would cancel the reconnect the revival
+                // just asked for. disconnect() and connect() clear it again, which
+                // is what makes the guard mean "the user still wants this".
+                shouldReconnect = true
+                // revivalScope, not scope: see its doc. Launching on the
+                // per-connection scope made this coroutine cancel itself the instant
+                // it called connect().
+                revivalReconnectJob = revivalScope.launch {
+                    kotlinx.coroutines.delay(REVIVAL_RECONNECT_DELAY_MS)
+                    val wanted = synchronized(this@RelayClient) {
+                        if (!shouldReconnect) {
+                            false
+                        } else {
+                            // Clear our own handle before dialling: connect() cancels
+                            // revivalReconnectJob, and the reconnect must not be
+                            // cancelled by the connect() it makes (F9).
+                            revivalReconnectJob = null
+                            true
+                        }
+                    }
+                    if (!wanted) {
+                        Log.i(TAG, "Delayed reconnect skipped: disconnected since the watchdog fired")
+                    } else {
+                        revivalConnector(url, code)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Delayed reconnect not scheduled: $e")
