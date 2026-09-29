@@ -172,11 +172,17 @@ object RelayClient {
     @Volatile
     private var sessionStartedNs: Long = 0L
 
-    /** HTTP status from the most recent onFailure, or 0 for a transport-level
-     *  failure. The watchdog needs it: a 401/403 is a credential problem that
-     *  restarting Termux cannot fix, so it must not spend the fire budget. */
+    /**
+     * HTTP status from the most recent failure **of the attempt now in flight**, or
+     * 0 for a transport-level failure. The watchdog needs it: a 401/403 is a
+     * credential problem that restarting Termux cannot fix, so it must not spend
+     * the fire budget.
+     *
+     * Internal (test seam): `RelayClientFailureClassificationTest` pins that the
+     * value describes one attempt — see [recordFailureHttpCode].
+     */
     @Volatile
-    private var lastFailureHttpCode: Int = 0
+    internal var lastFailureHttpCode: Int = 0
 
     /** Guards the "watchdog gave up" status so it is reported once, not on every
      *  failure after the budget is spent. */
@@ -236,6 +242,11 @@ object RelayClient {
         this.serverUrl = serverUrl
         shouldReconnect = true
         reconnectPolicy.reset()
+        // F12: the auth classification is per attempt. A code left over from a
+        // previous connect cycle must not be read as this one's credential
+        // failure — exhaustion can be reached through onClosed, which writes
+        // nothing, so whatever is sitting here is what the watchdog believes.
+        lastFailureHttpCode = 0
         // A manual Connect is the user re-arming, so the "gave up" notice is
         // allowed to be shown again if this attempt exhausts the budget too.
         // The fire budget itself is only refilled by a session that opens.
@@ -255,6 +266,30 @@ object RelayClient {
         revivalReconnectJob?.cancel()
         revivalReconnectJob = null
     }
+
+    /**
+     * Record the HTTP status a failed attempt reported (review F12).
+     *
+     * The generation check and the write have to be one step. `onFailure` runs on
+     * an OkHttp callback thread, and an inline `if (myGeneration != generation)`
+     * followed by an assignment let a socket that had already been superseded pass
+     * the check, be descheduled, and write *after* the attempt that replaced it had
+     * connected and reset the field. The stale 401 then sat there until exhaustion
+     * was reached through a clean `onClosed` — which writes nothing — and
+     * `maybeFireTermuxRevival` read it as "a credential problem, do not spend the
+     * fire budget": a wrong value does not just mislabel a log, it switches the
+     * recovery path off for that whole cycle.
+     *
+     * Internal (test seam) so the guard can be pinned without opening a socket.
+     */
+    @Synchronized
+    internal fun recordFailureHttpCode(attemptGeneration: Int, httpCode: Int) {
+        if (attemptGeneration != generation) return
+        lastFailureHttpCode = httpCode
+    }
+
+    /** Test seam: the attempt counter, so a test can hold a stale generation. */
+    internal fun currentGeneration(): Int = generation
 
     /**
      * AUTH-1: called after [PairingManager.regenerateCode]. Any session that was
@@ -370,9 +405,10 @@ object RelayClient {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (myGeneration != generation) return
                 val httpCode = response?.code ?: 0
-                lastFailureHttpCode = httpCode
+                // Guarded write, before the early return: see recordFailureHttpCode.
+                recordFailureHttpCode(myGeneration, httpCode)
+                if (myGeneration != generation) return
                 val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
                 Log.e(TAG, "WebSocket failure: $errorDetail", t)
                 isConnected = false
@@ -452,6 +488,8 @@ object RelayClient {
         // Retired listener => no endSession() for it; drop the clock so the
         // next session is measured from its own start, not this one's.
         sessionStartedNs = 0L
+        // F12: this attempt starts unclassified, exactly as connect() does.
+        lastFailureHttpCode = 0
         // Cancel the previous WebSocket before opening a new one, otherwise its
         // listener stays active and can fire out-of-order callbacks
         // (onOpen/onFailure) that set isConnected or push duplicate statuses.
