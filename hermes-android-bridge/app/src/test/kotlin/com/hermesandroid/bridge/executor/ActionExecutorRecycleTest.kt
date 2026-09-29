@@ -7,7 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import io.mockk.*
-import kotlinx.coroutines.test.runTest
+import com.hermesandroid.bridge.bridgeTest
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -41,7 +41,7 @@ class ActionExecutorRecycleTest {
     }
 
     @Test
-    fun `typeText recycles focused node on success`() = runTest {
+    fun `typeText recycles focused node on success`() = bridgeTest {
         val node = mockk<AccessibilityNodeInfo>(relaxed = true)
         every { node.text } returns "old text"
         every { node.performAction(any(), any<Bundle>()) } returns true
@@ -60,7 +60,7 @@ class ActionExecutorRecycleTest {
     }
 
     @Test
-    fun `typeText recycles focused node even when performAction fails`() = runTest {
+    fun `typeText recycles focused node even when performAction fails`() = bridgeTest {
         val node = mockk<AccessibilityNodeInfo>(relaxed = true)
         every { node.text } returns ""
         every { node.performAction(any(), any<Bundle>()) } returns false
@@ -74,7 +74,7 @@ class ActionExecutorRecycleTest {
     }
 
     @Test
-    fun `typeText handles null focused node gracefully`() = runTest {
+    fun `typeText handles null focused node gracefully`() = bridgeTest {
         every { mockService.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) } returns null
 
         val result = ActionExecutor.typeText("hello")
@@ -85,7 +85,7 @@ class ActionExecutorRecycleTest {
     }
 
     @Test
-    fun `typeText with clearFirst recycles node`() = runTest {
+    fun `typeText with clearFirst recycles node`() = bridgeTest {
         val node = mockk<AccessibilityNodeInfo>(relaxed = true)
         every { node.text } returns "existing"
         every { node.performAction(any(), any<Bundle>()) } returns true
@@ -99,7 +99,7 @@ class ActionExecutorRecycleTest {
     }
 
     @Test
-    fun `tapText recycles node after successful click`() = runTest {
+    fun `tapText recycles node after successful click`() = bridgeTest {
         val node = mockk<AccessibilityNodeInfo>(relaxed = true)
         every { node.isClickable } returns true
         every { node.performAction(AccessibilityNodeInfo.ACTION_CLICK) } returns true

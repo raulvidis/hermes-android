@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.BatteryManager
 import com.google.gson.JsonObject
 import com.hermesandroid.bridge.BridgeApplication
-import kotlinx.coroutines.test.runTest
+import com.hermesandroid.bridge.bridgeTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -63,7 +63,7 @@ class CommandDispatcherBatteryTest {
     private fun fields(rawResult: Any): Map<String, Any> = rawResult as Map<String, Any>
 
     @Test
-    fun `battery reports the system percentage and charge state`() = runTest {
+    fun `battery reports the system percentage and charge state`() = bridgeTest {
         shadowBattery.setIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY, 87)
         shadowBattery.setIsCharging(true)
 
@@ -76,7 +76,7 @@ class CommandDispatcherBatteryTest {
     }
 
     @Test
-    fun `battery reports a flat charge state with exactly the same keys`() = runTest {
+    fun `battery reports a flat charge state with exactly the same keys`() = bridgeTest {
         shadowBattery.setIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY, 42)
         shadowBattery.setIsCharging(false)
 
@@ -91,7 +91,7 @@ class CommandDispatcherBatteryTest {
     }
 
     @Test
-    fun `battery is unavailable when the platform reports no level`() = runTest {
+    fun `battery is unavailable when the platform reports no level`() = bridgeTest {
         // Nothing set. The shadow answers Integer.MIN_VALUE for an unset
         // property, which is exactly what the real getIntProperty reports on
         // failure when targetSdkVersion >= P — and this app targets 34.
@@ -104,7 +104,7 @@ class CommandDispatcherBatteryTest {
     }
 
     @Test
-    fun `battery rejects an out-of-range level instead of reporting it`() = runTest {
+    fun `battery rejects an out-of-range level instead of reporting it`() = bridgeTest {
         shadowBattery.setIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY, 999)
         shadowBattery.setIsCharging(false)
 
@@ -114,7 +114,7 @@ class CommandDispatcherBatteryTest {
     }
 
     @Test
-    fun `battery works without the accessibility service running`() = runTest {
+    fun `battery works without the accessibility service running`() = bridgeTest {
         // The whole point of reading BatteryManager instead of the status-bar
         // node: no accessibility dependency to be missing. Nothing in this
         // test brings the service up, and the call still succeeds.
