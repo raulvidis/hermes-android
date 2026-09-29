@@ -1,10 +1,21 @@
 package com.hermesandroid.bridge.executor
 
 import com.hermesandroid.bridge.model.ActionResult
-import com.hermesandroid.bridge.service.BridgeAccessibilityService
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
 
+/**
+ * Stable facade for bridge actions: one public object, one public method per
+ * action, unchanged signatures — defaults included. Call sites
+ * ([com.hermesandroid.bridge.server.CommandDispatcher], the accessibility
+ * service, and the tests) only ever talk to this object; the implementations
+ * live in the focused domain executors in this package —
+ * [GestureExecutor], [NodeLookup], [TextEntryExecutor], [SystemKeyExecutor],
+ * [ScreenshotExecutor], [AppIntentExecutor], [DeviceServicesExecutor],
+ * [ScreenQueryExecutor] and [TtsExecutor].
+ *
+ * The two `internal` members are not actions but test seams, kept here at the
+ * names their callers already use while their storage lives beside the code
+ * they control.
+ */
 object ActionExecutor {
 
     suspend fun tap(x: Int? = null, y: Int? = null, nodeId: String? = null): ActionResult =
@@ -114,40 +125,11 @@ object ActionExecutor {
     suspend fun readWidgets(): ActionResult =
         ScreenQueryExecutor.readWidgets()
 
-    @Volatile private var tts: android.speech.tts.TextToSpeech? = null
-    @Volatile private var ttsReady = false
+    suspend fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult =
+        TtsExecutor.speak(text, queue)
 
-    private suspend fun ensureTts(): Boolean {
-        val service = BridgeAccessibilityService.instance ?: return false
-        if (tts == null || !ttsReady) {
-            ttsReady = suspendCancellableCoroutine { cont ->
-                tts = android.speech.tts.TextToSpeech(service.applicationContext, android.speech.tts.TextToSpeech.OnInitListener { status ->
-                    val ready = status == android.speech.tts.TextToSpeech.SUCCESS
-                    ttsReady = ready
-                    cont.resume(ready)
-                })
-            }
-        }
-        return ttsReady
-    }
+    fun stopSpeaking(): ActionResult =
+        TtsExecutor.stopSpeaking()
 
-    suspend fun speak(text: String, queue: Int = android.speech.tts.TextToSpeech.QUEUE_ADD): ActionResult {
-        if (!ensureTts()) {
-            return ActionResult(false, "TTS not available")
-        }
-        tts?.speak(text, queue, null, "hermes_speak_${System.currentTimeMillis()}")
-        return ActionResult(true, "Speaking: ${text.take(50)}")
-    }
-
-    fun stopSpeaking(): ActionResult {
-        tts?.stop()
-        return ActionResult(true, "Stopped speaking")
-    }
-
-    fun shutdownTts() {
-        tts?.shutdown()
-        tts = null
-        ttsReady = false
-    }
-
+    fun shutdownTts() = TtsExecutor.shutdownTts()
 }
