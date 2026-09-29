@@ -18,6 +18,16 @@ object ScreenRecorder {
         "No MediaProjection. Grant Screen Recording in the app before each capture on Android 16."
     private const val MAX_DURATION_MS = 30_000L
 
+    /**
+     * Testability seam, same pattern as CommandDispatcher.batteryContext.
+     *
+     * The recording cap is otherwise only observable by waiting for a full
+     * capped recording (record() sleeps for the clamped duration on the
+     * handler thread), which makes it untestable in a JVM unit test.
+     * Production never assigns it, so the cap stays [MAX_DURATION_MS].
+     */
+    @Volatile internal var maxDurationMs: Long = MAX_DURATION_MS
+
     @Volatile private var projectionResultCode: Int? = null
     @Volatile private var projectionData: Intent? = null
     @Volatile private var recorder: MediaRecorder? = null
@@ -44,7 +54,7 @@ object ScreenRecorder {
      * that created the VirtualDisplay callback handler — NOT on Dispatchers.IO.
      */
     fun record(durationMs: Long = 5000): Map<String, Any?> {
-        val safeDuration = durationMs.coerceAtMost(MAX_DURATION_MS)
+        val safeDuration = durationMs.coerceAtMost(maxDurationMs)
         val service = BridgeAccessibilityService.instance
             ?: return mapOf("success" to false, "message" to "Accessibility service not running")
         val resultCode = projectionResultCode

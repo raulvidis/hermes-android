@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Format based on [Keep a
 ## [Unreleased]
 
 ### Added
+- JVM unit coverage for previously untested bridge classes: `EventStore` (ring-buffer eviction and orientation, newest-first ordering, the `since` cursor, streaming-flag semantics, concurrent add/read), `BatteryMonitor` (an unreadable, out-of-range or throwing battery service must read as `null` — never a guessed number), `ScreenRecorder` (precondition ordering, single-use projection-token handling, the 30 s duration cap, temp-file cleanup, serialised handler-thread state machine), `BridgeNotificationListener` (instance publication on connect/disconnect, the 300-entry cap, parse-or-drop on post, mark-not-delete on remove) and `ScreenNode`/`NodeBounds.computeHash`. 117 tests.
+- Three latent defects surfaced by that coverage, deliberately **not** fixed here — each carries an `@Ignore("BUG: ...")` test with the assertion the fix should satisfy:
+  - `EventStore.add()` calls `removeLast()` on an empty deque when `maxCapacity <= 0`, so the first event after such an assignment throws `NoSuchElementException` out of `onAccessibilityEvent` instead of being dropped. Not reachable today (nothing in the app writes `maxCapacity`), but the knob is public.
+  - `ScreenRecorder.record()` never releases the `MediaRecorder` when its configuration or `prepare()` throws: `recorder = mr` is assigned only after the `apply {}` block returns, so `cleanupRecording()` in the catch sees a null field and the native recorder (encoder + projection client) leaks. Reachable whenever `prepare()` fails — codec unavailable, storage full, invalid surface.
+  - `computeHash()` joins fields with `|` without escaping the separator, so field content containing `|` shifts the layout and two genuinely different nodes hash identically — a hole in the value `/screen_diff` uses to decide nothing changed. Any fix changes every hash, so it needs its own decision.
+- `ScreenRecorder` gained an `internal maxDurationMs` testability seam (default unchanged at 30 s), same pattern as `CommandDispatcher.batteryContext`: the cap is otherwise only observable by waiting out a full capped recording.
+
+### Added
 - `GET /battery` — battery percentage and charge state straight from `BatteryManager` (`getIntProperty(BATTERY_PROPERTY_CAPACITY)`, API 21; `isCharging()`, API 23) instead of scraping the status-bar accessibility node, which mis-reads across OEM skins and device languages. Neither value depends on the accessibility service running, and at `minSdk 26` neither needs a version gate. Fixed response shape — `batteryPercentage` and `charging`, both always present — because the HTTP and relay transports serialise nulls differently (#103).
 
 ### Fixed
