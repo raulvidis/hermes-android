@@ -1009,6 +1009,65 @@ class TestBridgeTlsVerification:
         assert len(seen) == 3, f"expected three HTTP calls, saw {seen}"
         assert seen == [False, False, False]
 
+    # ── F33: the suppression must not outlive the call that needed it ─────────
+
+    def test_the_process_warning_filters_are_left_alone(self, tool_mod, monkeypatch, bridge):
+        """`urllib3.disable_warnings()` rewrites the process-wide filter list and
+        never restores it. This module runs inside a long-lived gateway, so calling
+        it here silenced `InsecureRequestWarning` for every other library in the
+        process that makes an unverified HTTPS call — including one that never
+        decided to, and would have wanted to hear about it."""
+        import warnings
+
+        from urllib3.exceptions import InsecureRequestWarning
+
+        rsps, _ = bridge
+        rsps.add(responses.GET, "https://localhost:8766/ping", json={"status": "ok"})
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "https://localhost:8766")
+        # Force the path even if an earlier test in the session already took it.
+        monkeypatch.setattr(tool_mod, "_insecure_warning_silenced", False, raising=False)
+        before = list(warnings.filters)
+
+        tool_mod.android_ping()
+
+        assert warnings.filters == before, (
+            "a tool call changed the gateway's process-wide warning filters"
+        )
+        assert not any(
+            f[0] == "ignore" and f[2] is InsecureRequestWarning for f in warnings.filters
+        ), "InsecureRequestWarning was silenced process-wide"
+
+    def test_the_suppression_is_scoped_to_one_call(self, tool_mod):
+        import warnings
+
+        from urllib3.exceptions import InsecureRequestWarning
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with tool_mod._loopback_tls_warnings_suppressed():
+                warnings.warn(InsecureRequestWarning("inside"), InsecureRequestWarning)
+            warnings.warn(InsecureRequestWarning("outside"), InsecureRequestWarning)
+
+        messages = [str(w.message) for w in caught]
+        assert "inside" not in messages, "the context did not suppress the warning"
+        assert "outside" in messages, "the suppression outlived the context"
+
+    def test_a_verified_bridge_call_does_not_touch_the_filters(
+        self, tool_mod, monkeypatch, bridge
+    ):
+        """The common case — plaintext or a public https relay — must not enter the
+        suppression path at all."""
+        import warnings
+
+        rsps, _ = bridge
+        rsps.add(responses.GET, "http://localhost:8766/ping", json={"status": "ok"})
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "http://localhost:8766")
+        before = list(warnings.filters)
+
+        tool_mod.android_ping()
+
+        assert warnings.filters == before
+
     def test_a_public_https_bridge_stays_fully_verified(self, tool_mod, monkeypatch, bridge):
         rsps, _ = bridge
         rsps.add(responses.GET, "https://relay.example.com:8766/ping", json={"status": "ok"})

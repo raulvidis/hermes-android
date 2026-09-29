@@ -10,11 +10,13 @@ via ctx.register_tool().
 """
 
 import atexit
+import contextlib
 import json
 import os
 import re
 import tempfile
 import time
+import warnings
 import requests
 from typing import Optional
 from urllib.parse import quote, urlparse
@@ -102,10 +104,51 @@ def _auth_headers() -> dict:
     return {}
 
 
+def _bridge_request(verb: str, url: str, **kwargs):
+    """One HTTP call to the bridge, with the TLS decision and its warning scope.
+
+    Every bridge call site goes through here, so a new one cannot forget `verify`
+    (F19) or leak the loopback warning suppression into the rest of the process
+    (F33). **Never** point this at a non-bridge URL: it attaches the pairing token,
+    which is why `_get_public_ip()`'s calls to third-party IP-echo services do not
+    use it.
+    """
+    kwargs.setdefault("headers", _auth_headers())
+    kwargs.setdefault("timeout", _timeout())
+    verify = _bridge_tls_verify()
+    kwargs["verify"] = verify
+    send = getattr(requests, verb)
+    if verify:
+        return send(url, **kwargs)
+    with _loopback_tls_warnings_suppressed():
+        return send(url, **kwargs)
+
+
 # Hosts that mean "this machine". An https:// bridge URL aimed at one of these is
 # the relay's own loopback listener, which is the case _bridge_tls_verify relaxes.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_insecure_warning_silenced = False
+
+
+@contextlib.contextmanager
+def _loopback_tls_warnings_suppressed():
+    """Silence urllib3's insecure-request warning for ONE bridge call (review F33).
+
+    `urllib3.disable_warnings()` rewrites the process-wide warning filter list and
+    never puts it back. This module runs inside a long-lived gateway, so calling it
+    here silenced `InsecureRequestWarning` for every other library in the process
+    that makes an unverified HTTPS call — including one that never made the decision
+    `_bridge_tls_verify()` made and would have wanted to hear about it.
+    `warnings.catch_warnings()` saves and restores the filter list around the single
+    request instead, so the scope is exactly the call that asked for it.
+    """
+    with warnings.catch_warnings():
+        try:
+            from urllib3.exceptions import InsecureRequestWarning
+
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+        except Exception:
+            pass
+        yield
 
 
 def _bridge_tls_verify() -> bool:
@@ -133,17 +176,9 @@ def _bridge_tls_verify() -> bool:
     host = urlparse(url).hostname
     if host is None or host.strip("[]").lower() not in _LOOPBACK_HOSTS:
         return True
-    global _insecure_warning_silenced
-    if not _insecure_warning_silenced:
-        # urllib3 warns per request otherwise, which would bury the gateway log in
-        # a warning about a decision this function made deliberately.
-        _insecure_warning_silenced = True
-        try:
-            import urllib3
-
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:
-            pass
+    # The warning this decision provokes is suppressed per call, by
+    # _loopback_tls_warnings_suppressed() in _bridge_request — never process-wide
+    # (review F33).
     return False
 
 
@@ -281,12 +316,7 @@ def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS)
 def _check_requirements() -> bool:
     """Returns True if the relay is running and a phone is connected."""
     try:
-        r = requests.get(
-            f"{_bridge_url()}/ping",
-            headers=_auth_headers(),
-            timeout=2,
-            verify=_bridge_tls_verify(),
-        )
+        r = _bridge_request("get", f"{_bridge_url()}/ping", timeout=2)
         if r.status_code == 200:
             data = r.json()
             return data.get("phone_connected", False) or data.get(
@@ -362,23 +392,12 @@ def _safe_error(exc: Exception) -> str:
 
 
 def _post(path: str, payload: dict) -> dict:
-    r = requests.post(
-        f"{_bridge_url()}{path}",
-        json=payload,
-        headers=_auth_headers(),
-        timeout=_timeout(),
-        verify=_bridge_tls_verify(),
-    )
+    r = _bridge_request("post", f"{_bridge_url()}{path}", json=payload)
     return _extract_response(r)
 
 
 def _get(path: str) -> dict:
-    r = requests.get(
-        f"{_bridge_url()}{path}",
-        headers=_auth_headers(),
-        timeout=_timeout(),
-        verify=_bridge_tls_verify(),
-    )
+    r = _bridge_request("get", f"{_bridge_url()}{path}")
     return _extract_response(r)
 
 
@@ -982,13 +1001,11 @@ def android_mic_fetch(remote_path: str = "") -> str:
     temp_path = None
     try:
         params = {"name": remote_path} if remote_path else None
-        with requests.get(
+        with _bridge_request(
+            "get",
             f"{_bridge_url()}/mic_file",
             params=params,
-            headers=_auth_headers(),
-            timeout=_timeout(),
             stream=True,
-            verify=_bridge_tls_verify(),
         ) as response:
             if response.status_code >= 400:
                 try:
