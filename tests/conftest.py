@@ -1,4 +1,5 @@
 import os
+import pathlib
 
 import pytest
 import responses
@@ -36,6 +37,11 @@ def hermetic_home(monkeypatch, tmp_path):
     ANDROID_BRIDGE_TOKEN, which also meant a test run could pick up a real
     pairing token from the machine it happened to run on.
 
+    Setting the two variables is not enough on its own, so
+    ``_redirect_home_lookups`` patches the ``~`` lookups as well: without HOME
+    in the environment they fall through to ``pwd`` and the real home comes
+    back.
+
     Restoring ANDROID_* afterwards matters for the same reason: android_setup()
     assigns to os.environ directly, so a token it wrote would otherwise stay
     visible to every later test in the session.
@@ -45,6 +51,7 @@ def hermetic_home(monkeypatch, tmp_path):
     hermes_home.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    _redirect_home_lookups(monkeypatch, home)
 
     android_vars = {k: v for k, v in os.environ.items() if k.startswith("ANDROID_")}
     yield hermes_home
@@ -54,6 +61,45 @@ def hermetic_home(monkeypatch, tmp_path):
         else:
             os.environ.pop(key, None)
     _reset_module_caches()
+
+
+def _redirect_home_lookups(monkeypatch, home):
+    """Make ``~`` resolve inside the throwaway home even when HOME is unset.
+
+    ``os.path.expanduser("~")`` — and so ``Path.home()``, which is
+    ``Path("~").expanduser()`` — falls back to
+    ``pwd.getpwuid(os.getuid()).pw_dir`` whenever HOME is missing from
+    ``os.environ``. That is the *real* home, so redirecting only the environment
+    variable left ``android_setup()``'s ``Path.home() / ".hermes" / ".env"`` one
+    ``delenv`` away from overwriting the developer's credentials file, and
+    ``_env_file_vars()`` one ``delenv`` away from reading a real pairing token.
+
+    This replaces the ``pwd`` fallback and nothing else: a HOME that *is* set
+    still wins, which is what lets a test point the fallback at a directory of
+    its own.
+    """
+    throwaway = str(home)
+    real_expanduser = os.path.expanduser
+
+    def expanduser(path):
+        try:
+            text = os.fspath(path)
+        except TypeError:
+            return real_expanduser(path)
+        if isinstance(text, bytes):
+            return real_expanduser(path)
+        if text == "~":
+            return os.environ.get("HOME") or throwaway
+        if text.startswith("~/"):
+            return (os.environ.get("HOME") or throwaway) + text[1:]
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", expanduser)
+    monkeypatch.setattr(
+        pathlib.Path,
+        "home",
+        classmethod(lambda cls: cls(expanduser("~"))),
+    )
 
 
 def _reset_module_caches():

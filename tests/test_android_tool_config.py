@@ -101,6 +101,53 @@ class TestHermeticHome:
         assert written.is_file()
         assert "ANDROID_BRIDGE_TOKEN=PAIRCODE" in written.read_text(encoding="utf-8")
 
+    def test_the_redirect_survives_home_being_unset(
+        self, tool_mod, hermetic_home, monkeypatch
+    ):
+        """The redirect must not depend on the environment cooperating.
+
+        ``Path.home()`` and ``os.path.expanduser("~")`` fall back to
+        ``pwd.getpwuid(os.getuid()).pw_dir`` — the *real* home — whenever HOME is
+        absent from os.environ. Redirecting only $HOME therefore leaves
+        android_setup's ``Path.home() / ".hermes" / ".env"`` one ``delenv`` away
+        from rewriting the developer's real credentials file, and
+        _env_file_vars()'s token fallback reading it. Patching Path.home and
+        expanduser themselves is what closes that.
+        """
+        pwd = pytest.importorskip("pwd")
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        throwaway_home = hermetic_home.parent.resolve()
+
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+
+        for label, resolved in (
+            ("Path.home()", Path.home().resolve()),
+            ("os.path.expanduser('~')", Path(os.path.expanduser("~")).resolve()),
+            (
+                "android_setup's .env",
+                (Path.home() / ".hermes" / ".env").resolve(),
+            ),
+            (
+                "_env_file_vars()'s .env",
+                Path(
+                    os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+                    ".env",
+                ).resolve(),
+            ),
+        ):
+            assert not resolved.is_relative_to(real_home), (
+                f"{label} escaped into the real home: {resolved}"
+            )
+            assert resolved.is_relative_to(throwaway_home), (
+                f"{label} is not inside the throwaway home: {resolved}"
+            )
+
+        (hermetic_home / ".env").write_text(
+            "ANDROID_BRIDGE_TOKEN=THROWAWAYTOKEN\n", encoding="utf-8"
+        )
+        assert tool_mod._env_file_vars()["ANDROID_BRIDGE_TOKEN"] == "THROWAWAYTOKEN"
+
 
 class TestEnvFileParsing:
     def test_reads_keys_and_values(self, tool_mod, env_file, no_os_environ):
