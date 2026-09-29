@@ -18,6 +18,7 @@ import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.BuildConfig
 import com.hermesandroid.bridge.client.PairingRotationPolicy
 import com.hermesandroid.bridge.client.RelayClient
+import com.hermesandroid.bridge.client.RelayUrl
 import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.overlay.StatusOverlay
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
@@ -27,6 +28,14 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE_SCREEN_RECORD = 1001
+
+        /**
+         * TRANS-1: a plaintext WebSocket is not just readable by anyone on the
+         * path, it is *injectable* — the phone dispatches every frame that
+         * arrives as an authenticated command. Say so in those words.
+         */
+        private const val PLAINTEXT_WARNING =
+            "\u26a0 Plaintext ws:// to a public host \u2014 anyone on the network path can read AND inject commands. Use wss:// (see SECURITY.md)."
     }
 
     private lateinit var tvA11yStatus: TextView
@@ -49,6 +58,9 @@ class MainActivity : Activity() {
     private lateinit var btnDisconnect: Button
     private lateinit var tvAddress: TextView
     private lateinit var tvVersion: TextView
+
+    /** Non-null while the configured relay URL means plaintext to a public host. */
+    private var plaintextWarning: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -212,12 +224,18 @@ class MainActivity : Activity() {
         val savedUrl = RelayClient.serverUrl
         if (!savedUrl.isNullOrBlank()) {
             etServerUrl.setText(savedUrl)
+            plaintextWarning = warningFor(savedUrl)
         }
 
         RelayClient.onStatusChanged = { connected, message ->
-            tvRelayStatus.text = message
+            val warning = plaintextWarning
+            tvRelayStatus.text = if (warning != null) "$message\n$warning" else message
             tvRelayStatus.setTextColor(
-                if (connected) 0xFF4CAF50.toInt() else 0xFF888888.toInt()
+                when {
+                    warning != null -> 0xFFFF5252.toInt()
+                    connected -> 0xFF4CAF50.toInt()
+                    else -> 0xFF888888.toInt()
+                }
             )
             btnDisconnect.visibility = if (connected || RelayClient.isConnected) View.VISIBLE else View.GONE
             btnConnect.text = if (RelayClient.isConnected) "CONNECTED" else "CONNECT"
@@ -238,6 +256,10 @@ class MainActivity : Activity() {
                 return@setOnClickListener
             }
             val code = PairingManager.getCode()
+            // TRANS-1: warn before dialling, not after — and keep the warning on
+            // the status line, since a Toast disappears.
+            plaintextWarning = warningFor(url)
+            plaintextWarning?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
             RelayClient.connect(url, code)
         }
 
@@ -259,8 +281,15 @@ class MainActivity : Activity() {
             btnConnect.text = "CONNECTED"
             btnConnect.background = getDrawable(R.drawable.bg_input_dark)
             btnConnect.setTextColor(0xFF4CAF50.toInt())
-            tvRelayStatus.text = "Connected to ${RelayClient.serverUrl}"
-            tvRelayStatus.setTextColor(0xFF4CAF50.toInt())
+            val warning = plaintextWarning
+            tvRelayStatus.text = if (warning != null) {
+                "Connected to ${RelayClient.serverUrl}\n$warning"
+            } else {
+                "Connected to ${RelayClient.serverUrl}"
+            }
+            tvRelayStatus.setTextColor(
+                if (warning != null) 0xFFFF5252.toInt() else 0xFF4CAF50.toInt()
+            )
         } else {
             btnDisconnect.visibility = View.GONE
             btnConnect.text = "CONNECT"
@@ -268,6 +297,10 @@ class MainActivity : Activity() {
             btnConnect.setTextColor(0xFF1A1A1A.toInt())
         }
     }
+
+    /** TRANS-1: null when the URL is TLS or private/LAN, the warning when it is not. */
+    private fun warningFor(url: String): String? =
+        if (RelayUrl.isPlaintextToPublicHost(url)) PLAINTEXT_WARNING else null
 
     private fun updateConnectionInfo() {
         val ip = getLocalIpAddress()

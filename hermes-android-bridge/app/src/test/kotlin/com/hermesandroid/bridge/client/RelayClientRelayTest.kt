@@ -5,6 +5,7 @@ import android.os.BatteryManager
 import android.os.Looper
 import com.google.gson.JsonParser
 import com.hermesandroid.bridge.BridgeApplication
+import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.server.CommandDispatcher
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -60,6 +61,9 @@ class RelayClientRelayTest {
     private val statuses = CopyOnWriteArrayList<Pair<Boolean, String>>()
     private val backoffs = CopyOnWriteArrayList<Long>()
 
+    /** The code PairingManager holds for this test — the one the relay is shown. */
+    private var savedCode: String = ""
+
     @Before
     fun setUp() {
         server = MockWebServer().apply { start() }
@@ -67,15 +71,37 @@ class RelayClientRelayTest {
         // an earlier test left behind before wiring this test's observers.
         RelayClient.onStatusChanged = null
         RelayClient.disconnect()
+        resetPairingManager()
+        // AUTH-1: PairingManager is the single source of the code, and
+        // scheduleReconnect/autoConnect read it back — so model production and
+        // give it one, otherwise a reconnect has no credentials to dial with.
+        PairingManager.init(RuntimeEnvironment.getApplication())
+        savedCode = PairingManager.getCode()
         RelayClient.init(RuntimeEnvironment.getApplication())
         RelayClient.onStatusChanged = { connected, message -> statuses += connected to message }
         RelayClient.backoffDelay = { backoffs += it }
+    }
+
+    /**
+     * AUTH-1 hygiene: PairingManager is a process-wide object whose `prefs` and
+     * `cachedCode` statics outlive the Robolectric application that created
+     * them, so a code left behind by another test class would still be sitting
+     * there when this class starts. Clearing both keeps `setUp` the only place
+     * that decides what the manager holds.
+     */
+    private fun resetPairingManager() {
+        for (name in listOf("cachedCode", "prefs")) {
+            val field = PairingManager::class.java.getDeclaredField(name)
+            field.isAccessible = true
+            field.set(PairingManager, null)
+        }
     }
 
     @After
     fun tearDown() {
         RelayClient.onStatusChanged = null
         RelayClient.disconnect()
+        resetPairingManager()
         // Restore the production seam: the next test class must wait for real
         // time like production does.
         RelayClient.backoffDelay = { delay(it) }
@@ -152,7 +178,7 @@ class RelayClientRelayTest {
         fail(desc)
     }
 
-    private fun connectToRelay(code: String = "TESTCODE") {
+    private fun connectToRelay(code: String = savedCode) {
         RelayClient.connect("http://localhost:${server.port}", code)
     }
 
@@ -163,7 +189,7 @@ class RelayClientRelayTest {
         val relay = RelayPeer()
         server.enqueue(MockResponse().withWebSocketUpgrade(relay))
 
-        connectToRelay("TESTCODE")
+        connectToRelay()
 
         assertTrue("relay should see the WebSocket open", relay.awaitOpen())
         awaitCondition("client must report itself connected after the handshake") { RelayClient.isConnected }
@@ -172,10 +198,10 @@ class RelayClientRelayTest {
         val upgrade = server.takeRequest(10, TimeUnit.SECONDS)
         assertNotNull("the upgrade request should have been recorded", upgrade)
         assertEquals("must dial the relay's /ws route", "/ws", upgrade!!.path)
-        assertEquals("Bearer TESTCODE", upgrade.getHeader("Authorization"))
+        assertEquals("Bearer $savedCode", upgrade.getHeader("Authorization"))
         // The pairing code must ride the header, never the URL — query
         // strings end up verbatim in reverse-proxy access logs.
-        assertFalse("token leaked into the request line: ${upgrade.requestLine}", upgrade.requestLine.contains("TESTCODE"))
+        assertFalse("token leaked into the request line: ${upgrade.requestLine}", upgrade.requestLine.contains(savedCode))
     }
 
     // ------------------------------------------------------ message framing
@@ -327,10 +353,11 @@ class RelayClientRelayTest {
 
     @Test
     fun `an unreachable relay stops after the retry cap instead of looping forever`() {
-        // More rejections than the budget could ever consume.
+        // The relay refuses the handshake (a 401 is what a wrong or rotated
+        // code produces). More rejections than the budget could ever consume.
         repeat(8) { server.enqueue(MockResponse().setResponseCode(401)) }
 
-        connectToRelay("WRONGCODE")
+        connectToRelay()
 
         awaitStatus("Failed to connect after 5 attempts")
 
@@ -372,13 +399,18 @@ class RelayClientRelayTest {
         val relay = RelayPeer()
         server.enqueue(MockResponse().withWebSocketUpgrade(relay))
 
+        // AUTH-1: the saved code lives in PairingManager, which is the single
+        // source autoConnect() reads — RelayClient keeps no copy of its own.
+        // Rotating here also proves autoConnect dials with the code the manager
+        // holds *now*, not one captured at connect() time.
+        val rotatedCode = PairingManager.regenerateCode()
+
         RelayClient.serverUrl = "http://localhost:${server.port}"
-        RelayClient.pairingCode = "SAVEDCODE"
         RelayClient.autoConnect()
 
         assertTrue(relay.awaitOpen())
         awaitCondition("client must report itself connected after autoConnect") { RelayClient.isConnected }
         val upgrade = server.takeRequest(10, TimeUnit.SECONDS)
-        assertEquals("Bearer SAVEDCODE", upgrade!!.getHeader("Authorization"))
+        assertEquals("Bearer $rotatedCode", upgrade!!.getHeader("Authorization"))
     }
 }

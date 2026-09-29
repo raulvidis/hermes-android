@@ -43,11 +43,29 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 
 ## Known Limitations (Prototype)
 
-### No Encryption
-WebSocket connections use `ws://` (plaintext), not `wss://` (TLS). This means:
-- Commands, screen content, and screenshots travel unencrypted
-- Anyone on the network path between phone and server can intercept traffic
-- **Mitigation**: Use over a trusted network, or set up a reverse proxy with TLS (nginx/caddy)
+### Plaintext transports allow command injection, not just sniffing
+A bare relay host typed into the app now defaults to `wss://` unless it is
+private (RFC1918, `127/8`, `169.254/16`, `::1`, `fe80::/10`, `*.local`,
+`*.internal`, or a single-label name), where `ws://` stays the default. An
+explicit scheme always wins — so `ws://` and the phone's own LAN server on
+`:8765` are still plaintext when you ask for them. Plaintext means:
+- Commands, screen content, and screenshots travel unencrypted and can be read by
+  anyone on the network path
+- **A plaintext WebSocket has no integrity protection.** An on-path attacker does
+  not need the pairing code and does not need to break anything: they can append
+  server→client frames to the established TCP stream, and the phone dispatches
+  every arriving frame as an already-authenticated command. Reading the traffic is
+  the lesser problem — injecting `/send_sms`, `/call` or `/intent` is the real one
+- **There is no server authentication on `ws://`.** The phone sends its long-lived
+  pairing code to whatever host the name resolves to, so DNS spoofing or a rogue
+  access point harvests the credential — and because that one code is shared by
+  the relay and the `:8765` server, it works against both
+- The app shows a persistent red warning on the relay status line (and a toast)
+  when you connect over `ws://` to a non-private host
+- **Mitigation**: use `wss://`. The relay can terminate TLS itself
+  (`ANDROID_RELAY_CERT` / `ANDROID_RELAY_KEY`), or sit behind a reverse proxy with
+  Let's Encrypt (nginx/caddy). Restrict `ws://` to a LAN/loopback address you
+  control, and never to a public host
 
 ### Full Device Access
 Once paired, the agent has unrestricted access to:

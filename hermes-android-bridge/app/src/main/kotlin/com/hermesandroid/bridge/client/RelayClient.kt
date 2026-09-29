@@ -424,19 +424,17 @@ object RelayClient {
         }
     }
 
-    /** Internal (test seam): pure URL rewrite, unit-tested directly. */
+    /**
+     * TRANS-1: the scheme decision lives in [RelayUrl] so it can be tested as a
+     * table. A bare public host now defaults to `wss://`; private/LAN hosts and
+     * explicit schemes keep the old behaviour.
+     *
+     * Internal (test seam): `RelayClientBuildWsUrlTest` pins the delegation.
+     */
     internal fun buildWsUrl(serverUrl: String): String {
-        val trimmed = serverUrl.trim().trimEnd('/')
-        val useTls = trimmed.startsWith("https://") || trimmed.startsWith("wss://")
-        var base = trimmed
-            .removePrefix("http://").removePrefix("https://")
-            .removePrefix("ws://").removePrefix("wss://")
-        if (!base.contains(":")) {
-            base = "$base:8766"
-        }
-        val scheme = if (useTls) "wss" else "ws"
-        if (BuildConfig.DEBUG) Log.d(TAG, "Built WebSocket URL: $scheme://$base/ws")
-        return "$scheme://$base/ws"
+        val wsUrl = RelayUrl.build(serverUrl)
+        if (BuildConfig.DEBUG) Log.d(TAG, "Built WebSocket URL: $wsUrl")
+        return wsUrl
     }
 
     private suspend fun handleMessage(ws: WebSocket, text: String) {

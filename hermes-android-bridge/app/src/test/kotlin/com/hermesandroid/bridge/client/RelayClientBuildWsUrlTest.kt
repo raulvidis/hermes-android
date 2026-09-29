@@ -11,7 +11,10 @@ import org.junit.Test
  * The relay is the DEFAULT transport, so a wrong rewrite here is not a corner
  * case: it is "the bridge never connects". Three contracts matter:
  *  - scheme mapping: http→ws, https→wss, ws and wss kept (a TLS URL must
- *    never be downgraded to plaintext by the rewrite);
+ *    never be downgraded to plaintext by the rewrite), and — TRANS-1 — a bare
+ *    host with no scheme defaults to wss unless it is a private/LAN name, so
+ *    the pairing code never travels in plaintext to a public relay. The rule
+ *    table itself is pinned in [RelayUrlTest]; these cases pin the delegation;
  *  - the default relay port 8766 is appended only when the URL carries no
  *    port (a URL that names a port is left alone — custom relays and direct
  *    USB/LAN setups both depend on that);
@@ -68,10 +71,18 @@ class RelayClientBuildWsUrlTest {
     }
 
     @Test
-    fun `a bare host gets the ws scheme and the default relay port`() {
+    fun `a bare public host defaults to wss on the default relay port`() {
         assertEquals(
-            "ws://relay.example.com:8766/ws",
+            "wss://relay.example.com:8766/ws",
             RelayClient.buildWsUrl("relay.example.com"),
+        )
+    }
+
+    @Test
+    fun `a bare LAN host keeps the ws scheme and the default relay port`() {
+        assertEquals(
+            "ws://192.168.1.20:8766/ws",
+            RelayClient.buildWsUrl("192.168.1.20"),
         )
     }
 
