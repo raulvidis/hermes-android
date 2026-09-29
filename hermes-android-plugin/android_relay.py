@@ -115,6 +115,10 @@ class _RelayState:
 
         # The single connected phone WebSocket (or None)
         self.phone_ws: Optional[web.WebSocketResponse] = None
+        # The pairing code that session authenticated with (F21). Rotation has to
+        # be able to tell a session that proved a now-dead code from one that
+        # proved the current one, and it cannot do that from the socket alone.
+        self.phone_ws_code: Optional[str] = None
         self.phone_ws_lock = asyncio.Lock()  # created lazily in the event loop
 
         # Pending requests: request_id -> asyncio.Future
@@ -254,12 +258,6 @@ def set_pairing_code(code: str) -> None:
         previous = s.pairing_code
         s.pairing_code = code
         loop = s.loop
-        # Captured here, under the lock, and not read later by the coroutine: the
-        # drop is scheduled onto the relay's loop, and by the time it runs the
-        # phone may already have reconnected and authenticated with the NEW code
-        # (which is exactly what RelayClient.onPairingCodeRotated() does). Closing
-        # "whatever phone_ws is then" tore down that legitimate session.
-        stale_ws = s.phone_ws
 
     if previous == code:
         # Re-running setup with the same code must not drop a healthy session.
@@ -269,36 +267,40 @@ def set_pairing_code(code: str) -> None:
     # Never log the code itself: it grants full device control.
     logger.info("Pairing code updated — closing sessions authenticated with the old code")
     if loop is not None and loop.is_running():
-        asyncio.run_coroutine_threadsafe(_drop_phone_after_rotation(s, stale_ws), loop)
+        asyncio.run_coroutine_threadsafe(_drop_phone_after_rotation(s), loop)
 
 
-async def _drop_phone_after_rotation(
-    state: "_RelayState",
-    stale_ws: Optional[web.WebSocketResponse],
-) -> None:
-    """Close the phone session that was authenticated with a now-rotated code.
+async def _drop_phone_after_rotation(state: "_RelayState") -> None:
+    """Close any phone session that authenticated with a now-rotated code.
 
-    *stale_ws* is the socket that was current when the code changed, captured by
-    `set_pairing_code()` under `_relay_lock`. Passing it to `_cleanup_phone()` as
-    `expected_ws` is what makes the drop targeted: a session that reconnected and
-    authenticated with the NEW code in the meantime is left alone.
+    Decided by the code each session *proved* — recorded in `state.phone_ws_code`
+    when it was published — rather than by which socket happened to be current when
+    `set_pairing_code()` ran. Two reviews drove that:
 
-    A `None` *stale_ws* means nothing was connected at rotation time, so there is
-    no old-code session to drop and nothing at all to do. It must not be forwarded
-    as `expected_ws` — `_cleanup_phone()` skips its identity guard for a `None`,
-    which would close whichever phone connected afterwards — and it must not fail
-    in-flight requests either (review F20). Every pending request at that point
-    belongs to a session that authenticated with the **new** code: the phone
-    re-dials the moment its code rotates, and its first tool call can be in flight
-    before this coroutine runs. `_fail_inflight()` used to answer those with
-    `ConnectionError("Phone disconnected (pairing code rotated)")`, so a rotation
-    with nothing to drop still broke a healthy session. A future whose phone really
-    is gone is failed by `_cleanup_phone()` on the disconnect path, which is where
-    that belongs.
+    * F17: an identity check against a socket captured at rotation time tore down
+      the session that reconnected with the NEW code in the meantime, because
+      `RelayClient.onPairingCodeRotated()` re-dials immediately.
+    * F21: a capture cannot cover a handshake that was still in flight, since it
+      had not published its socket yet — that one survived rotation entirely.
+
+    Comparing codes covers both, needs nothing captured, and is a no-op whenever
+    the live session is already on the current code — which also keeps F20's
+    guarantee that a rotation with nothing to drop does not fail a healthy
+    session's in-flight requests.
+
+    A session whose code was never recorded is dropped: failing closed is the safe
+    answer when the alternative is leaving a possibly-stale session holding full
+    device control.
     """
-    if stale_ws is None:
-        return
-    await _cleanup_phone(state, reason="pairing code rotated", expected_ws=stale_ws)
+    async with state.phone_ws_lock:
+        ws = state.phone_ws
+        proved = state.phone_ws_code
+        if ws is None or ws.closed:
+            return
+        if proved is not None and _tokens_equal(proved, state.pairing_code):
+            return
+
+    await _cleanup_phone(state, reason="pairing code rotated", expected_ws=ws)
 
 
 # ── Background event-loop entry point ─────────────────────────────────────────
@@ -628,11 +630,28 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
         )
         raise web.HTTPForbidden(text="Invalid pairing code")
 
+    # The code this handshake proved. Captured before the await below: F21 — the
+    # code can rotate while prepare() is in flight, because set_pairing_code() runs
+    # on the caller's thread and needs only _relay_lock, which this handler never
+    # holds.
+    authenticated_with = state.pairing_code
+
     ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
 
     # Only one phone at a time — kick previous if any
     async with state.phone_ws_lock:
+        if not _tokens_equal(authenticated_with, state.pairing_code):
+            # Rotated between the token check and here. Publishing anyway would
+            # hand full device control to a code that no longer exists — the exact
+            # thing rotation is for — and the drop that already ran could not catch
+            # it, because it saw no socket to close.
+            logger.info("Phone WS closed — pairing code rotated during the handshake")
+            await ws.close(
+                code=aiohttp.WSCloseCode.POLICY_VIOLATION,
+                message=b"pairing code rotated",
+            )
+            return ws
         if state.phone_ws is not None and not state.phone_ws.closed:
             logger.info("Replacing previous phone connection")
             await _fail_inflight(state, reason="phone connection replaced")
@@ -640,6 +659,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
                 code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced"
             )
         state.phone_ws = ws
+        state.phone_ws_code = authenticated_with
 
     logger.info("Phone connected from %s", request.remote)
 
@@ -732,6 +752,9 @@ async def _cleanup_phone(
             return
         ws = state.phone_ws
         state.phone_ws = None
+        # Cleared with the socket: a code left behind would make the next rotation
+        # judge a session it knows nothing about (F21).
+        state.phone_ws_code = None
 
     if ws is not None and not ws.closed:
         await ws.close()

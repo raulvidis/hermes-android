@@ -450,124 +450,193 @@ class TestSslContext:
             relay_mod._ssl_context()
 
 
-class TestPairingRotationDrop:
-    """Review F17: rotation must close the session that authenticated with the OLD
-    code, not whatever socket is current when the coroutine gets to run.
+class TestRotationDuringHandshake:
+    """Review F21: a handshake accepted with a code that rotates mid-flight.
 
-    `set_pairing_code()` schedules `_drop_phone_after_rotation()` on the relay's
-    loop with `run_coroutine_threadsafe`, so there is a window between deciding to
-    drop and dropping. `RelayClient.onPairingCodeRotated()` re-dials in exactly
-    that window — it is the behaviour AUTH-1 exists to produce — and a phone that
-    reconnects and authenticates with the NEW code before the coroutine runs was
-    closed anyway, because `_cleanup_phone()` was called without `expected_ws`.
-    Rotation then looked like it broke the connection, and the phone had to retry.
+    `_handle_ws` validates the token, then `await ws.prepare(request)`, and only
+    afterwards publishes `state.phone_ws`. `set_pairing_code()` runs on the
+    caller's thread and needs only `_relay_lock`, which `_handle_ws` never holds —
+    so the code can change inside that await. F17's drop targeted the socket that
+    was current *when the code changed*, and a handshake in flight was not current
+    yet, so it published afterwards and survived: a session holding full device
+    control on a pairing code that no longer exists, which is precisely what
+    AUTH-1's rotation exists to end.
     """
 
-    def test_the_old_code_session_is_closed_when_it_is_still_current(self, relay_mod):
-        """The behaviour rotation exists for — pinned so the targeting fix cannot
-        quietly turn into "never close anything"."""
+    @pytest.fixture
+    def hookable_websocket(self, relay_mod, monkeypatch):
+        """A fake WebSocketResponse whose prepare() runs a test hook — the seam a
+        concurrent rotation lands in."""
+        created = []
+        self.messages = []
+        self.on_prepare = None
+        outer = self
+
+        def factory(**kwargs):
+            class Hooked(FakeWebSocket):
+                async def prepare(self, request):
+                    await super().prepare(request)
+                    if outer.on_prepare is not None:
+                        outer.on_prepare()
+
+            socket = Hooked(messages=outer.messages, **kwargs)
+            created.append(socket)
+            return socket
+
+        monkeypatch.setattr(
+            relay_mod, "web", WebShim(aiohttp.web, WebSocketResponse=factory)
+        )
+        return created
+
+    def test_a_handshake_accepted_with_a_rotated_code_is_closed_not_published(
+        self, relay_mod, hookable_websocket, caplog
+    ):
         async def scenario():
             state = make_relay_state(relay_mod, pairing_code="OLDCODE")
-            stale = FakePhoneSocket()
-            state.phone_ws = stale
-            await relay_mod._drop_phone_after_rotation(state, stale)
+            # The rotation lands between the token check and publication.
+            self.on_prepare = lambda: setattr(state, "pairing_code", "NEWCODE")
+            request = FakeRequest(headers={"Authorization": "Bearer OLDCODE"})
+            with caplog.at_level(logging.INFO, logger=LOGGER):
+                returned = await relay_mod._handle_ws(request, state)
+            return state, returned
+
+        state, returned = run(scenario())
+
+        assert state.phone_ws is None, "a session on a dead code must never be published"
+        assert returned.closed is True, "and the socket must be closed, not left half-open"
+        assert "rotated" in caplog.text
+        # The code is a credential: it grants full device control.
+        assert "OLDCODE" not in caplog.text
+        assert "NEWCODE" not in caplog.text
+
+    def test_an_unchanged_code_still_publishes_and_records_it(
+        self, relay_mod, hookable_websocket, monkeypatch
+    ):
+        seen = {}
+
+        async def spy(state, raw):
+            # The message loop is the only window in which the session is
+            # published, so it is where the recorded code can be observed.
+            seen["ws"] = state.phone_ws
+            seen["code"] = state.phone_ws_code
+
+        monkeypatch.setattr(relay_mod, "_on_phone_message", spy)
+        self.messages = [ws_message(aiohttp.WSMsgType.TEXT, '{"request_id":"r1"}')]
+
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="PAIRCODE")
+            returned = await relay_mod._handle_ws(FakeRequest(headers=AUTH), state)
+            return state, returned
+
+        state, returned = run(scenario())
+
+        assert seen["code"] == "PAIRCODE", "the session must record the code it proved"
+        assert seen["ws"] is returned
+
+    def test_a_rejected_handshake_never_reaches_the_recheck(self, relay_mod, hookable_websocket):
+        """The re-check is not a second authentication: a wrong code is still
+        refused up front, and the hook never runs because prepare() is not
+        reached."""
+        calls = []
+
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="PAIRCODE")
+            self.on_prepare = lambda: calls.append("prepared")
+            with pytest.raises(Exception):
+                await relay_mod._handle_ws(
+                    FakeRequest(headers={"Authorization": "Bearer WRONGCODE"}), state
+                )
+            return state
+
+        state = run(scenario())
+
+        assert calls == []
+        assert state.phone_ws is None
+
+
+class TestPairingRotationDrop:
+    """The rotation drop, decided by the code each session authenticated with.
+
+    F17 made the drop target a socket captured when the code changed, so a session
+    that re-authenticated with the NEW code in the meantime survived. F21 showed
+    the capture is not enough on its own — a handshake in flight is not captured at
+    all — so the rule is now "close whatever proved a code that is no longer
+    current", which needs no capture and covers both.
+    """
+
+    def test_a_session_on_the_old_code_is_closed(self, relay_mod):
+        async def scenario():
+            state = make_relay_state(
+                relay_mod,
+                pairing_code="NEWCODE",
+                socket=FakePhoneSocket(),
+                socket_code="OLDCODE",
+            )
+            stale = state.phone_ws
+            await relay_mod._drop_phone_after_rotation(state)
             return state, stale
 
         state, stale = run(scenario())
 
-        assert stale.closed is True, "the session authenticated with the old code must go"
+        assert stale.closed is True, "the session that proved the dead code must go"
         assert state.phone_ws is None
+        assert state.phone_ws_code is None
 
-    def test_a_session_that_reauthenticated_with_the_new_code_survives(self, relay_mod):
+    def test_a_session_on_the_current_code_survives_with_its_inflight_work(self, relay_mod):
+        """F17 and F20 in one: a session that proved the live code keeps its socket,
+        stays registered, and keeps its pending request."""
         async def scenario():
-            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
-            stale = FakePhoneSocket()
-            state.phone_ws = stale
-            # The phone reconnects with the NEW code before the drop runs. _handle_ws
-            # closes the superseded socket itself and publishes the replacement.
-            replacement = FakePhoneSocket()
-            state.phone_ws = replacement
-            await relay_mod._drop_phone_after_rotation(state, stale)
-            return state, stale, replacement
-
-        state, stale, replacement = run(scenario())
-
-        assert replacement.closed is False, (
-            "a session authenticated with the NEW code must survive rotation"
-        )
-        assert state.phone_ws is replacement, "the live session must not be unregistered"
-        assert stale.closed is False, (
-            "the drop targets the socket it was given; the reconnect path owns the "
-            "superseded one"
-        )
-
-    def test_a_phone_that_arrives_after_a_rotation_survives(
-        self, relay_mod
-    ):
-        """The other half: `expected_ws=None` must mean "there was nothing to
-        drop", not "drop whatever turns up" — `_cleanup_phone`'s guard is skipped
-        for a None `expected_ws`, so passing one through unchanged would still
-        close the newcomer."""
-        async def scenario():
-            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
-            state.phone_ws = None
-            newcomer = FakePhoneSocket()
-            state.phone_ws = newcomer
-            await relay_mod._drop_phone_after_rotation(state, None)
-            return state, newcomer
-
-        state, newcomer = run(scenario())
-
-        assert newcomer.closed is False
-        assert state.phone_ws is newcomer
-
-    def test_no_session_at_rotation_leaves_a_new_session_in_flight_alone(self, relay_mod):
-        """Review F20: the `stale_ws is None` branch called `_fail_inflight()`
-        unconditionally. Nothing was connected when the code rotated, so any
-        request pending at that point belongs to a session that authenticated with
-        the **new** code — the phone re-dials immediately, and its first tool call
-        can easily be in flight before the scheduled drop runs. Failing those
-        futures answered a live, correctly authenticated session with
-        `ConnectionError("Phone disconnected (pairing code rotated)")`, and the
-        `android_ping()` an agent runs straight after `android_setup` is exactly
-        the call that lands there."""
-        async def scenario():
-            state = make_relay_state(relay_mod, pairing_code="NEWCODE")
-            newcomer = FakePhoneSocket()
-            state.phone_ws = newcomer
+            state = make_relay_state(
+                relay_mod, pairing_code="NEWCODE", socket=FakePhoneSocket(), socket_code="NEWCODE"
+            )
             future = state.loop.create_future()
             async with state.pending_lock:
-                state.pending["rid-new"] = future
-            await relay_mod._drop_phone_after_rotation(state, None)
+                state.pending["rid-live"] = future
+            await relay_mod._drop_phone_after_rotation(state)
             async with state.pending_lock:
                 still_pending = dict(state.pending)
-            return state, newcomer, future, still_pending
+            return state, future, still_pending
 
-        state, newcomer, future, still_pending = run(scenario())
+        state, future, still_pending = run(scenario())
 
-        assert newcomer.closed is False
-        assert state.phone_ws is newcomer
-        assert not future.done(), (
-            "a NEW-code session's in-flight request must not be failed by a "
-            "rotation that had nothing to drop"
-        )
-        assert list(still_pending) == ["rid-new"]
+        assert state.phone_ws.closed is False
+        assert state.phone_ws is not None
+        assert not future.done(), "a live session's in-flight request must not be failed"
+        assert list(still_pending) == ["rid-live"]
         future.cancel()
 
-    def test_set_pairing_code_captures_the_socket_it_saw(self, relay_mod, monkeypatch):
-        """The capture has to happen inside `set_pairing_code`, under `_relay_lock`.
-        Reading `state.phone_ws` later — from the coroutine, on the relay's loop —
-        is the bug: by then it may be a different socket."""
+    def test_a_session_of_unknown_provenance_is_closed(self, relay_mod):
+        """Fail closed. If the code a session proved was never recorded, dropping
+        it is the safe answer: the alternative is leaving a possibly-stale session
+        with full device control."""
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="NEWCODE")
+            state.phone_ws = FakePhoneSocket()  # published without a recorded code
+            await relay_mod._drop_phone_after_rotation(state)
+            return state
+
+        assert run(scenario()).phone_ws is None
+
+    def test_nothing_connected_is_a_noop(self, relay_mod):
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="NEWCODE")
+            await relay_mod._drop_phone_after_rotation(state)
+            return state
+
+        state = run(scenario())
+
+        assert state.phone_ws is None
+        assert state.phone_ws_code is None
+
+    def test_set_pairing_code_schedules_the_drop(self, relay_mod, monkeypatch):
         dropped = []
 
-        async def fake_drop(state, stale_ws):
-            dropped.append(stale_ws)
+        async def fake_drop(state):
+            dropped.append(state)
 
         monkeypatch.setattr(relay_mod, "_drop_phone_after_rotation", fake_drop)
-
-        seen = FakePhoneSocket()
         state = relay_mod._RelayState(pairing_code="OLDCODE", port=1)
-        state.phone_ws = seen
+        state.phone_ws = FakePhoneSocket()
 
         class RunningLoop:
             def is_running(self):
@@ -584,24 +653,17 @@ class TestPairingRotationDrop:
 
         relay_mod.set_pairing_code("NEWCODE")
 
+        assert state.pairing_code == "NEWCODE"
         assert len(scheduled) == 1
         run(scheduled[0])
-        assert dropped == [seen], (
-            "the coroutine must be bound to the socket that was current at "
-            f"rotation time, got {dropped}"
-        )
+        assert dropped == [state]
 
     def test_an_unchanged_code_still_drops_nothing(self, relay_mod, monkeypatch):
         """Re-running setup with the same code must not touch a healthy session —
-        the early return has to survive the capture being added."""
-        dropped = []
-
-        async def fake_drop(state, stale_ws):
-            dropped.append(stale_ws)
-
-        monkeypatch.setattr(relay_mod, "_drop_phone_after_rotation", fake_drop)
+        the early return has to survive every restructuring of the drop."""
         state = relay_mod._RelayState(pairing_code="SAMECODE", port=1)
         state.phone_ws = FakePhoneSocket()
+        state.phone_ws_code = "SAMECODE"
 
         class RunningLoop:
             def is_running(self):
@@ -617,7 +679,6 @@ class TestPairingRotationDrop:
 
         relay_mod.set_pairing_code("SAMECODE")
 
-        assert dropped == []
         assert state.phone_ws.closed is False
 
 

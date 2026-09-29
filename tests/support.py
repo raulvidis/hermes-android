@@ -525,7 +525,7 @@ def stream_frame(request_id: str, payload: bytes) -> bytes:
     return len(encoded).to_bytes(2, "big") + encoded + payload
 
 
-def make_relay_state(module, pairing_code="PAIRCODE", port=19999, socket=None):
+def make_relay_state(module, pairing_code="PAIRCODE", port=19999, socket=None, socket_code=None):
     """Build a _RelayState wired for in-loop use (locks + no real server).
 
     Must be called from inside the running event loop: ``_handle_http`` creates
@@ -541,6 +541,12 @@ def make_relay_state(module, pairing_code="PAIRCODE", port=19999, socket=None):
     state.shutdown_event = asyncio.Event()
     state.loop = asyncio.get_running_loop()
     state.phone_ws = socket
+    # F21: the relay records the pairing code each session authenticated with, so
+    # a rotation can tell a stale session from a current one. A socket handed in
+    # without an explicit code is a session that proved the current one.
+    if socket is not None and socket_code is None:
+        socket_code = pairing_code
+    state.phone_ws_code = socket_code
     return state
 
 
