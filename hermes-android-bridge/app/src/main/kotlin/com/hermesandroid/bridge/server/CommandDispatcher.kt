@@ -154,42 +154,13 @@ object CommandDispatcher {
 
             method == "GET" && path == "/screen" -> ScreenCommands.screen(params)
 
-            method == "POST" && path == "/tap" -> {
-                val x = body.get("x")?.asInt
-                val y = body.get("y")?.asInt
-                val nodeId = body.get("nodeId")?.asString
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.tap(x, y, nodeId)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/tap" -> InputCommands.tap(body)
 
-            method == "POST" && path == "/tap_text" -> {
-                val text = body.get("text")?.asString ?: ""
-                val exact = body.get("exact")?.asBoolean ?: false
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.tapText(text, exact)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/tap_text" -> InputCommands.tapText(body)
 
-            method == "POST" && path == "/type" -> {
-                val text = body.get("text")?.asString ?: ""
-                val clearFirst = body.get("clearFirst")?.asBoolean ?: false
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.typeText(text, clearFirst)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/type" -> InputCommands.type(body)
 
-            method == "POST" && path == "/swipe" -> {
-                val direction = body.get("direction")?.asString ?: ""
-                val distance = body.get("distance")?.asString ?: "medium"
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.swipe(direction, distance)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/swipe" -> InputCommands.swipe(body)
 
             method == "POST" && path == "/open_app" -> {
                 val pkg = body.get("package")?.asString
@@ -198,22 +169,11 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "POST" && path == "/press_key" -> {
-                val key = body.get("key")?.asString ?: ""
-                val result = ActionExecutor.pressKey(key)
-                result to 200
-            }
+            method == "POST" && path == "/press_key" -> InputCommands.pressKey(body)
 
             method == "GET" && path == "/screenshot" -> ScreenCommands.screenshot()
 
-            method == "POST" && path == "/scroll" -> {
-                val direction = body.get("direction")?.asString ?: ""
-                val nodeId = body.get("nodeId")?.asString
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.scroll(direction, nodeId)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/scroll" -> InputCommands.scroll(body)
 
             method == "POST" && path == "/wait" -> ScreenCommands.wait(body)
 
@@ -224,16 +184,9 @@ object CommandDispatcher {
 
             method == "GET" && path == "/current_app" -> ScreenCommands.currentApp()
 
-            method == "GET" && path == "/clipboard" -> {
-                val result = ActionExecutor.clipboardRead()
-                result to 200
-            }
+            method == "GET" && path == "/clipboard" -> InputCommands.clipboardRead()
 
-            method == "POST" && path == "/clipboard" -> {
-                val text = body.get("text")?.asString ?: ""
-                val result = ActionExecutor.clipboardWrite(text)
-                result to 200
-            }
+            method == "POST" && path == "/clipboard" -> InputCommands.clipboardWrite(body)
 
             method == "GET" && path == "/notifications" -> {
                 val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
@@ -257,28 +210,9 @@ object CommandDispatcher {
                 ) to 200
             }
 
-            method == "POST" && path == "/long_press" -> {
-                val x = body.get("x")?.asInt
-                val y = body.get("y")?.asInt
-                val nodeId = body.get("nodeId")?.asString
-                val duration = body.get("duration")?.asLong ?: 500L
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.longPress(x, y, nodeId, duration)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/long_press" -> InputCommands.longPress(body)
 
-            method == "POST" && path == "/drag" -> {
-                val startX = body.get("startX")?.asInt ?: 0
-                val startY = body.get("startY")?.asInt ?: 0
-                val endX = body.get("endX")?.asInt ?: 0
-                val endY = body.get("endY")?.asInt ?: 0
-                val duration = body.get("duration")?.asLong ?: 500L
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.drag(startX, startY, endX, endY, duration)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/drag" -> InputCommands.drag(body)
 
             method == "POST" && path == "/describe_node" -> ScreenCommands.describeNode(body)
 
@@ -286,16 +220,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/diff_screen" -> ScreenCommands.diffScreen(body)
 
-            method == "POST" && path == "/pinch" -> {
-                val x = body.get("x")?.asInt ?: 0
-                val y = body.get("y")?.asInt ?: 0
-                val scale = body.get("scale")?.asFloat ?: 1.5f
-                val duration = body.get("duration")?.asLong ?: 300L
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.pinch(x, y, scale, duration)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/pinch" -> InputCommands.pinch(body)
 
             method == "GET" && path == "/screen_hash" -> ScreenCommands.screenHash()
 
