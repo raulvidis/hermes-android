@@ -40,8 +40,8 @@ already set, in either the environment or the file.
 
 ## Connection modes
 
-- **Relay (default):** phone connects out to `ws://server:8766/ws`. No `.env` config needed; `android_setup` configures it.
-- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts, then enter `https://server:8766` in the app — it upgrades the socket to `wss://server:8766/ws`. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
+- **Relay (default):** phone connects out to the relay's `/ws` route — `wss://server:8766/ws` for a public host, `ws://server:8766/ws` for a LAN/private one (see [Transport security](#transport-security) below). No `.env` config needed; `android_setup` configures it.
+- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts. A public host then needs no scheme typed in the app — it already defaults to `wss://server:8766/ws` — and an explicit `https://server:8766` upgrades the same way. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
 - **Same WiFi (direct):** `ANDROID_BRIDGE_URL=http://192.168.x.x:8765`.
 - **USB (direct):** `adb forward tcp:8765 tcp:8765` then `ANDROID_BRIDGE_URL=http://localhost:8765`.
 - **Persistent relay:** `contrib/hermes-android-relay.service` runs `contrib/hermes-relay-daemon.py` under systemd; it reads `ANDROID_BRIDGE_TOKEN` and `ANDROID_RELAY_PORT` and exits if the token is missing.
