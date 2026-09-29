@@ -10,13 +10,10 @@ import com.hermesandroid.bridge.BridgeApplication
 import com.hermesandroid.bridge.audio.MicrophoneRecorderService
 import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
 import com.hermesandroid.bridge.audio.MicrophoneRecordingState
-import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.model.ActionResult
-import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
-import com.hermesandroid.bridge.service.BridgeNotificationListener
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -178,27 +175,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/clipboard" -> InputCommands.clipboardWrite(body)
 
-            method == "GET" && path == "/notifications" -> {
-                val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
-                val since = params.get("since")?.asString?.toLongOrNull() ?: 0L
-                // Dismissed notifications are retained on-device but only
-                // served on explicit opt-in — cleared notifications can hold
-                // PII the user has already dealt with (#100 follow-up).
-                val includeRemoved = params.get("include_removed")?.asString
-                    ?.equals("true", ignoreCase = true) == true
-                val entries = if (since > 0) {
-                    NotificationStore.getSince(since, limit, includeRemoved)
-                } else {
-                    NotificationStore.getAll(limit, includeRemoved)
-                }
-                val mapped = entries.map { NotificationStore.toMap(it) }
-                val listenerRunning = BridgeNotificationListener.instance != null
-                mapOf(
-                    "notifications" to mapped,
-                    "count" to mapped.size,
-                    "listenerActive" to listenerRunning
-                ) to 200
-            }
+            method == "GET" && path == "/notifications" -> NotificationCommands.notifications(params)
 
             method == "POST" && path == "/long_press" -> InputCommands.longPress(body)
 
@@ -224,34 +201,9 @@ object CommandDispatcher {
 
             method == "POST" && path == "/media" -> DeviceCommands.media(body)
 
-            method == "GET" && path == "/events" -> {
-                // DROID-4: belt and braces behind the gate in EventStore.add — a
-                // disabled switch must never serve events, whatever is in the
-                // buffer or whatever filled it.
-                if (!EventStore.streamingEnabled) {
-                    mapOf(
-                        "events" to emptyList<Map<String, Any?>>(),
-                        "count" to 0,
-                        "streaming" to false
-                    ) to 200
-                } else {
-                    val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
-                    val since = params.get("since")?.asString?.toLongOrNull() ?: 0L
-                    val entries = if (since > 0) {
-                        EventStore.getSince(since, limit)
-                    } else {
-                        EventStore.getAll(limit)
-                    }
-                    val mapped = entries.map { EventStore.toMap(it) }
-                    mapOf("events" to mapped, "count" to mapped.size, "streaming" to EventStore.streamingEnabled) to 200
-                }
-            }
+            method == "GET" && path == "/events" -> NotificationCommands.events(params)
 
-            method == "POST" && path == "/events/stream" -> {
-                val enabled = body.get("enabled")?.asBoolean ?: false
-                EventStore.setStreaming(enabled)
-                mapOf("success" to true, "streaming" to enabled) to 200
-            }
+            method == "POST" && path == "/events/stream" -> NotificationCommands.eventsStream(body)
 
             method == "GET" && path == "/contacts" -> DeviceCommands.contacts(params)
 
