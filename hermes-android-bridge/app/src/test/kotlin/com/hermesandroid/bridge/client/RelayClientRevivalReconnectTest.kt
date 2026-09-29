@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Looper
 import com.hermesandroid.bridge.auth.PairingManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
@@ -12,6 +13,8 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -220,6 +223,80 @@ class RelayClientRevivalReconnectTest {
         testScope.runCurrent()
 
         assertEquals("nothing saved, nothing to reconnect to", 0, calls)
+    }
+
+    /**
+     * Review F32: `shouldReconnect` alone is not the guard. The coroutine wakes from
+     * its delay and then has to wait for the monitor, and `disconnect()`/`connect()`
+     * are both `@Synchronized` — so a user who disconnects and reconnects while it
+     * was waiting leaves the flag **true**, because their own `connect()` set it. A
+     * flag-only guard then dials the old URL over the top of the connection the user
+     * just made. The job has to check itself as well: still uncancelled, and still
+     * the one `reconnectDelayed()` last scheduled.
+     */
+    @Test
+    fun `a user reconnect leaves the flag armed but the stale job must not dial`() {
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
+
+        RelayClient.reconnectDelayed()
+        val stale = RelayClient.revivalReconnectJob
+        assertNotNull("reconnectDelayed must publish its handle", stale)
+        assertTrue("nothing has overtaken it yet", RelayClient.revivalReconnectMayDial(stale))
+
+        // The user taps Connect against a different relay: this cancels the pending
+        // job *and* re-arms shouldReconnect, which is why the flag cannot be the
+        // guard on its own.
+        RelayClient.connect("http://127.0.0.1:2", "CODE123")
+
+        assertFalse(
+            "the flag is armed again by the user's own connect, but this job was " +
+                "cancelled and superseded",
+            RelayClient.revivalReconnectMayDial(stale),
+        )
+    }
+
+    @Test
+    fun `a job cancelled while it waited for the monitor must not dial`() {
+        RelayClient.connect("http://127.0.0.1:1", "CODE123")  // arms shouldReconnect
+        val cancelled = Job().also { it.cancel() }
+        RelayClient.revivalReconnectJob = cancelled
+
+        assertFalse(RelayClient.revivalReconnectMayDial(cancelled))
+    }
+
+    @Test
+    fun `a job superseded by a newer watchdog fire must not dial`() {
+        RelayClient.connect("http://127.0.0.1:1", "CODE123")
+        val older = Job()
+        val newer = Job()
+        RelayClient.revivalReconnectJob = newer
+
+        assertFalse(RelayClient.revivalReconnectMayDial(older))
+        assertTrue(RelayClient.revivalReconnectMayDial(newer))
+        older.cancel()
+        newer.cancel()
+    }
+
+    @Test
+    fun `a cleared handle must not dial`() {
+        RelayClient.connect("http://127.0.0.1:1", "CODE123")
+        val self = Job()
+
+        RelayClient.disconnect()   // clears the handle and the flag
+        RelayClient.revivalReconnectJob = null
+
+        assertFalse(RelayClient.revivalReconnectMayDial(self))
+        self.cancel()
+    }
+
+    @Test
+    fun `a null job must not dial`() {
+        RelayClient.connect("http://127.0.0.1:1", "CODE123")
+
+        assertFalse(RelayClient.revivalReconnectMayDial(null))
     }
 
     /**

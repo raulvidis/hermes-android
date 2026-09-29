@@ -94,9 +94,12 @@ object RelayClient {
      * calls the connector: `connect()` cancels [revivalReconnectJob], and
      * cancelling the coroutine that is making the call would reintroduce exactly
      * F9's "fires but never reconnects".
+     *
+     * Internal rather than private so `RelayClientRevivalReconnectTest` can pin
+     * [revivalReconnectMayDial] against the states this handle passes through.
      */
     @Volatile
-    private var revivalReconnectJob: Job? = null
+    internal var revivalReconnectJob: Job? = null
 
     /** Seam so a test can observe the reconnect without opening a real WebSocket. */
     internal var revivalConnector: (url: String, code: String) -> Unit = { url, code ->
@@ -259,6 +262,34 @@ object RelayClient {
     private fun effectivePairingCode(requested: String?): String? =
         PairingManager.getCode().takeIf { it.isNotBlank() }
             ?: requested?.takeIf { it.isNotBlank() }
+
+    /**
+     * Whether a woken post-revival reconnect may still dial (review F32).
+     *
+     * `shouldReconnect` alone is not enough. The coroutine wakes from its delay and
+     * then has to wait for the monitor, and `disconnect()`/`connect()` are both
+     * `@Synchronized` — so a user who disconnects and reconnects while it was waiting
+     * leaves the flag **true**, because their own `connect()` set it. A flag-only
+     * guard then dials the old URL over the top of the connection the user just
+     * made: F11 again, one lock acquisition later.
+     *
+     * So the job checks itself as well — still uncancelled, and still the one
+     * [reconnectDelayed] last scheduled. Called from inside the monitor the dial also
+     * runs under, which is what makes the answer and the dial one step (F25).
+     *
+     * `@Synchronized` so it is correct standalone; reentrant from the coroutine, which
+     * already holds the monitor.
+     */
+    @Synchronized
+    internal fun revivalReconnectMayDial(self: Job?): Boolean {
+        if (self == null) return false
+        // Cancelled while it waited for the monitor: disconnect(), connect() or a
+        // newer watchdog fire all cancel it, and only connect() re-arms the flag.
+        if (self.isCancelled) return false
+        // Superseded: a second fire replaced the handle, or a disconnect cleared it.
+        if (revivalReconnectJob !== self) return false
+        return shouldReconnect
+    }
 
     /** F11: drop a reconnect the watchdog scheduled but the user has overtaken. */
     @Synchronized
@@ -625,9 +656,11 @@ object RelayClient {
                     // anyway. The monitor is reentrant, which is also what lets the
                     // dial call connect(), and so cancel this very job, without
                     // deadlocking (F9).
+                    // F32: the guard has to cover this coroutine, not just the flag.
+                    val self = coroutineContext[kotlinx.coroutines.Job]
                     synchronized(this@RelayClient) {
-                        if (!shouldReconnect) {
-                            Log.i(TAG, "Delayed reconnect skipped: disconnected since the watchdog fired")
+                        if (!revivalReconnectMayDial(self)) {
+                            Log.i(TAG, "Delayed reconnect skipped: no longer wanted when it woke")
                         } else {
                             // Clear our own handle before dialling: connect() cancels
                             // revivalReconnectJob, and the reconnect must not be
