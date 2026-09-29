@@ -1,13 +1,10 @@
 package com.hermesandroid.bridge.executor
 
 import android.accessibilityservice.AccessibilityService
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
-import android.os.Bundle
 import android.telephony.SmsManager
 import android.util.Base64
 import android.view.Display
@@ -33,35 +30,7 @@ object ActionExecutor {
         GestureExecutor.tapText(text, exact)
 
     suspend fun typeText(text: String, clearFirst: Boolean = false): ActionResult =
-        WakeLockManager.wakeForAction {
-        val service = BridgeAccessibilityService.instance
-            ?: return@wakeForAction ActionResult(false, "Accessibility service not running")
-
-        val focusedNode = service.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-
-        try {
-            if (clearFirst) {
-                val clearArgs = Bundle().apply {
-                    putCharSequence(
-                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, ""
-                    )
-                }
-                focusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
-            }
-
-            val arguments = Bundle().apply {
-                putCharSequence(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text
-                )
-            }
-            val result = focusedNode?.performAction(
-                AccessibilityNodeInfo.ACTION_SET_TEXT, arguments
-            ) ?: false
-            ActionResult(result, if (result) "Typed text" else "No focused input found")
-        } finally {
-            focusedNode?.recycle()
-        }
-    }
+        TextEntryExecutor.typeText(text, clearFirst)
 
     suspend fun swipe(direction: String, distance: String = "medium"): ActionResult =
         GestureExecutor.swipe(direction, distance)
@@ -203,29 +172,11 @@ object ActionExecutor {
     suspend fun scroll(direction: String, nodeId: String? = null): ActionResult =
         GestureExecutor.scroll(direction, nodeId)
 
-    fun clipboardRead(): ActionResult {
-        val service = BridgeAccessibilityService.instance
-            ?: return ActionResult(false, "Accessibility service not running")
-        val cm = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        if (!cm.hasPrimaryClip()) {
-            return ActionResult(true, "Clipboard is empty", "")
-        }
-        val clip = cm.primaryClip ?: return ActionResult(true, "Clipboard is empty", "")
-        if (clip.itemCount == 0) {
-            return ActionResult(true, "Clipboard is empty", "")
-        }
-        val text = clip.getItemAt(0)?.text?.toString() ?: ""
-        return ActionResult(true, "Clipboard read", text)
-    }
+    fun clipboardRead(): ActionResult =
+        TextEntryExecutor.clipboardRead()
 
-    fun clipboardWrite(text: String): ActionResult {
-        val service = BridgeAccessibilityService.instance
-            ?: return ActionResult(false, "Accessibility service not running")
-        val cm = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("hermes", text)
-        cm.setPrimaryClip(clip)
-        return ActionResult(true, "Copied to clipboard")
-    }
+    fun clipboardWrite(text: String): ActionResult =
+        TextEntryExecutor.clipboardWrite(text)
 
     suspend fun longPress(x: Int? = null, y: Int? = null, nodeId: String? = null, duration: Long = 500): ActionResult =
         GestureExecutor.longPress(x, y, nodeId, duration)
