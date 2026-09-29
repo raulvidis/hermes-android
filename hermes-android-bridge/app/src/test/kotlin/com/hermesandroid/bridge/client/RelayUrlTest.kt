@@ -37,6 +37,8 @@ class RelayUrlTest {
             "172.31.255.254" to "ws://172.31.255.254:8766/ws",
             "127.0.0.1" to "ws://127.0.0.1:8766/ws",
             "169.254.13.1" to "ws://169.254.13.1:8766/ws",
+            "100.64.0.1" to "ws://100.64.0.1:8766/ws",
+            "100.111.22.33:8766" to "ws://100.111.22.33:8766/ws",
             "localhost" to "ws://localhost:8766/ws",
             "nas.local" to "ws://nas.local:8766/ws",
             "bridge.localdomain" to "ws://bridge.localdomain:8766/ws",
@@ -68,7 +70,6 @@ class RelayUrlTest {
             "172.32.0.1" to "ws://172.32.0.1:8766/ws",
             "192.169.1.1" to "ws://192.169.1.1:8766/ws",
             "224.0.0.1" to "ws://224.0.0.1:8766/ws",
-            "100.64.0.1" to "ws://100.64.0.1:8766/ws",
             "relay.example.com:443" to "ws://relay.example.com:443/ws",
             "[2001:db8::1]" to "ws://[2001:db8::1]/ws"
         )
@@ -184,7 +185,12 @@ class RelayUrlTest {
             "localhost", "LOCALHOST", "a.localhost", "127.0.0.1", "127.255.255.254",
             "10.1.2.3", "192.168.0.0", "172.16.0.0", "172.31.255.255",
             "169.254.0.1", "0.0.0.0", "nas.local", "x.localdomain", "y.internal",
-            "singlelabel", "::1", "fe80::abcd", "fd12:3456::1", "fc00::1", "::ffff:192.168.1.1"
+            "singlelabel", "::1", "fe80::abcd", "fd12:3456::1", "fc00::1", "::ffff:192.168.1.1",
+            // 100.64.0.0/10 — shared address space (RFC 6598), used for CGNAT and
+            // by Tailscale for every tailnet node. Neither is a public host, and
+            // neither can present a CA-trusted certificate for a 100.x name.
+            "100.64.0.0", "100.64.0.1", "100.100.100.100", "100.127.255.255",
+            "::ffff:100.64.0.1"
         )
         privateHosts.forEach { assertTrue("$it must be private", RelayUrl.isPrivateHost(it)) }
     }
@@ -195,9 +201,23 @@ class RelayUrlTest {
             "relay.example.com", "1.1.1.1", "8.8.8.8", "11.0.0.1", "9.255.255.255",
             "172.15.255.255", "172.32.0.0", "192.169.0.1", "193.168.0.1",
             "128.0.0.1", "169.255.0.1", "2001:db8::1", "2606:4700:4700::1111",
-            "notlocal.example", "fdq.example.com"
+            "notlocal.example", "fdq.example.com",
+            // Just outside 100.64.0.0/10 on both sides: the range is /10, not /8.
+            "100.63.255.255", "100.128.0.0", "100.0.0.1", "101.64.0.1"
         )
         publicHosts.forEach { assertFalse("$it must be public", RelayUrl.isPrivateHost(it)) }
+    }
+
+    /**
+     * The point of classifying 100.64.0.0/10 as private: a Tailscale relay address
+     * is a private overlay network, so dialling it over `ws://` must not draw the
+     * red "anyone on the path can inject commands" warning.
+     */
+    @Test
+    fun `plaintext to a tailnet address is not flagged`() {
+        listOf("100.64.0.1", "100.111.22.33:8766", "ws://100.127.255.254").forEach {
+            assertFalse("$it must not be flagged", RelayUrl.isPlaintextToPublicHost(it))
+        }
     }
 
     @Test

@@ -57,7 +57,10 @@ already set, in either the environment or the file.
   `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` are set, `ws://ip:port` otherwise. Type
   what it prints.
 - `ws://` to a non-private host draws a persistent red warning in the app:
-  plaintext is not only readable, it is injectable — see SECURITY.md.
+  plaintext is not only readable, it is injectable — see SECURITY.md. "Private"
+  means loopback, RFC1918, `100.64.0.0/10` (CGNAT and Tailscale), `169.254/16`,
+  `0/8`, `::1`, `fe80::/10`, `fc00::/7`, IPv4-mapped forms of the same,
+  `*.local`/`*.localdomain`/`*.internal`, `localhost` and single-label names.
 - Relay-side TLS: set `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` to PEM paths
   and the relay terminates `wss://` itself. Otherwise put it behind nginx/caddy.
 
