@@ -82,7 +82,43 @@ object CommandDispatcher {
         (raw ?: DEFAULT_RECORD_DURATION_MS)
             .coerceIn(MIN_RECORD_DURATION_MS, MAX_RECORD_DURATION_MS)
 
+    /**
+     * The body both transports answer with when a route throws (review L1).
+     *
+     * The exception's *class* name, never its message: a message can carry an SMS
+     * recipient, a file path or a host:port, which is exactly what the PII
+     * convention keeps out of responses and logs. A class name is enough to
+     * diagnose and leaks nothing.
+     */
+    internal fun errorBody(cause: Throwable): Map<String, String> =
+        mapOf("error" to cause.javaClass.simpleName.ifBlank { cause.javaClass.name })
+
+    /**
+     * Never throws for a route failure — it answers [errorBody] at 500.
+     *
+     * The contract lives here rather than in either transport so the two cannot
+     * diverge. Previously only [RelayClient] caught: an exception over HTTP
+     * escaped to Ktor's default handler as a **non-JSON** 500, so a tool that
+     * parsed the body worked over the relay and broke over direct USB/LAN for the
+     * identical request.
+     */
     suspend fun dispatch(
+        method: String,
+        path: String,
+        params: JsonObject,
+        body: JsonObject,
+        authenticated: Boolean
+    ): Pair<Any, Int> = try {
+        route(method, path, params, body, authenticated)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        // Cancellation is control flow, not a route failure. Swallowing it would
+        // strand the caller's coroutine.
+        throw cancelled
+    } catch (cause: Throwable) {
+        errorBody(cause) to 500
+    }
+
+    private suspend fun route(
         method: String,
         path: String,
         params: JsonObject,
