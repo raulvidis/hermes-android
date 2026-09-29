@@ -40,11 +40,15 @@ class EventStorePasswordRedactionTest {
 
     @Before
     fun setup() {
+        // DROID-4: collection is gated on the streaming switch, so these tests
+        // have to turn it on to store anything at all.
+        EventStore.setStreaming(true)
         EventStore.clear()
     }
 
     @After
     fun tearDown() {
+        EventStore.setStreaming(false)
         EventStore.clear()
         unmockkAll()
     }

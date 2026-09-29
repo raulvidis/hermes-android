@@ -339,15 +339,26 @@ object CommandDispatcher {
             }
 
             method == "GET" && path == "/events" -> {
-                val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
-                val since = params.get("since")?.asString?.toLongOrNull() ?: 0L
-                val entries = if (since > 0) {
-                    EventStore.getSince(since, limit)
+                // DROID-4: belt and braces behind the gate in EventStore.add — a
+                // disabled switch must never serve events, whatever is in the
+                // buffer or whatever filled it.
+                if (!EventStore.streamingEnabled) {
+                    mapOf(
+                        "events" to emptyList<Map<String, Any?>>(),
+                        "count" to 0,
+                        "streaming" to false
+                    ) to 200
                 } else {
-                    EventStore.getAll(limit)
+                    val limit = params.get("limit")?.asString?.toIntOrNull() ?: 50
+                    val since = params.get("since")?.asString?.toLongOrNull() ?: 0L
+                    val entries = if (since > 0) {
+                        EventStore.getSince(since, limit)
+                    } else {
+                        EventStore.getAll(limit)
+                    }
+                    val mapped = entries.map { EventStore.toMap(it) }
+                    mapOf("events" to mapped, "count" to mapped.size, "streaming" to EventStore.streamingEnabled) to 200
                 }
-                val mapped = entries.map { EventStore.toMap(it) }
-                mapOf("events" to mapped, "count" to mapped.size, "streaming" to EventStore.streamingEnabled) to 200
             }
 
             method == "POST" && path == "/events/stream" -> {

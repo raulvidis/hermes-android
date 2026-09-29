@@ -1784,3 +1784,54 @@ class TestSendIntentSchemaMatchesTheDevice:
             plugin["_SCHEMAS"]["android_broadcast"]
             == _SCHEMAS["android_broadcast"]
         )
+
+
+class TestEventStreamingContract:
+    """DROID-4: the streaming switch is a collection gate, and the schema says so.
+
+    `/events` used to buffer and serve accessibility events regardless of
+    `streamingEnabled` — the switch only *reported* the flag — so turning
+    streaming off did not stop the phone capturing what the user typed and
+    clicked in every app. The device now gates collection at the source; the tool
+    contract has to tell the model that capture is off until it asks.
+    """
+
+    def test_android_events_says_capture_is_off_by_default(self):
+        description = _SCHEMAS["android_events"]["description"]
+        assert "android_event_stream(True)" in description
+        assert "streaming=false" in description
+
+    def test_android_events_docstring_carries_the_same_prerequisite(self):
+        assert "android_event_stream(True)" in (android_events.__doc__ or "")
+
+    def test_event_stream_is_described_as_the_collection_switch(self):
+        description = _SCHEMAS["android_event_stream"]["description"]
+        assert "starts and stops collection" in description
+        assert "clears the buffer" in description
+
+    @responses.activate
+    def test_a_disabled_stream_is_reported_not_silently_empty(self, bridge_url):
+        responses.add(
+            responses.GET,
+            f"{bridge_url}/events",
+            json={"events": [], "count": 0, "streaming": False},
+        )
+
+        result = json.loads(android_events())
+
+        assert result["streaming"] is False
+        assert result["events"] == []
+        assert result["count"] == 0
+
+    def test_both_copies_describe_the_same_contract(self):
+        import runpy
+        from pathlib import Path
+
+        plugin = runpy.run_path(
+            str(Path(__file__).parents[1] / "hermes-android-plugin" / "android_tool.py")
+        )
+        assert plugin["_SCHEMAS"]["android_events"] == _SCHEMAS["android_events"]
+        assert (
+            plugin["_SCHEMAS"]["android_event_stream"]
+            == _SCHEMAS["android_event_stream"]
+        )

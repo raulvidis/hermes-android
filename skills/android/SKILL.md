@@ -180,7 +180,7 @@ For any task, follow this pattern and then STOP:
 **Reading messages — use the accessibility tree, NOT screenshots.**
 Screenshot + vision loops are slow and burn tokens; the tree has the text already.
 
-1. Incoming messages arrive as notifications — `android_notifications()` returns sender + preview with no UI navigation at all. Poll it (or `android_events()`) instead of opening the app.
+1. Incoming messages arrive as notifications — `android_notifications()` returns sender + preview with no UI navigation at all. Poll it (or `android_events()`, after `android_event_stream(True)` — capture is off by default) instead of opening the app.
 2. For thread history: `android_open_app("com.google.android.apps.messaging")` → `android_tap_text("<contact>")` → `android_read_screen()`. Scroll with `android_scroll("up")` and re-read for older messages.
 3. To locate a specific message or conversation, `android_find_nodes(text="<keyword>")` is much cheaper than reading the whole screen.
 

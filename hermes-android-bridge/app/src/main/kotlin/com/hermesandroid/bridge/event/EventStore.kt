@@ -20,6 +20,13 @@ object EventStore {
     @Volatile var streamingEnabled: Boolean = false
 
     fun add(event: AccessibilityEvent) {
+        // DROID-4: the streaming switch must gate *collection*, not just the
+        // `/events` report. Buffering while "disabled" meant any authenticated
+        // caller could still read what the user typed and clicked across every
+        // app — setStreaming(false) cleared the buffer once and it immediately
+        // refilled. Returning here also skips the event.source IPC entirely.
+        if (!streamingEnabled) return
+
         // PII-1: read the source node once (the caller owns it and must recycle it)
         // and use the same handle to detect a secret field. AccessibilityEvent's
         // own getText() is a different code path from node text and is not

@@ -726,6 +726,10 @@ def android_events(limit: int = 50, since: int = 0) -> str:
     Events include clicks, text changes, window transitions, scrolls, etc.
     Use since (unix ms) to get only events after a given time.
     Useful for detecting what the user is doing or what changed.
+
+    Capture is off by default: call android_event_stream(True) first, otherwise
+    this returns an empty list with "streaming": false. Password fields are
+    redacted on the device before they are ever stored.
     """
     try:
         data = _get(f"/events?limit={limit}&since={since}")
@@ -1593,7 +1597,7 @@ _SCHEMAS = {
     },
     "android_events": {
         "name": "android_events",
-        "description": "Read recent accessibility events (clicks, text changes, window transitions, scrolls) from the phone. Real-time UI change detection.",
+        "description": "Read recent accessibility events (clicks, text changes, window transitions, scrolls) from the phone. Real-time UI change detection. Capture is off by default — call android_event_stream(True) first, otherwise this returns an empty list with streaming=false. Password-field text is redacted on the device.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1613,7 +1617,7 @@ _SCHEMAS = {
     },
     "android_event_stream": {
         "name": "android_event_stream",
-        "description": "Enable/disable accessibility event streaming. When enabled, events are captured for retrieval via android_events.",
+        "description": "Enable/disable accessibility event streaming — this is what actually starts and stops collection on the device. When enabled, events are captured for retrieval via android_events; disabling stops collection and clears the buffer. Leave it off unless you need the event stream.",
         "parameters": {
             "type": "object",
             "properties": {

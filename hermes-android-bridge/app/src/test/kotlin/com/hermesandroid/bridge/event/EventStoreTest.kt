@@ -51,7 +51,12 @@ class EventStoreTest {
     fun resetStore() {
         EventStore.clear()
         EventStore.maxCapacity = DEFAULT_CAPACITY
-        EventStore.streamingEnabled = false
+        // DROID-4 made the streaming switch gate *collection* (`add` returns
+        // immediately while it is off). These tests exercise the buffer itself —
+        // capacity, eviction, ordering, the `since` cursor — so collection has to
+        // be on for them; the gate is pinned by EventStoreStreamingGateTest and by
+        // the last test in the "clear and streaming flag" block below.
+        EventStore.streamingEnabled = true
     }
 
     @After
@@ -438,15 +443,19 @@ class EventStoreTest {
     }
 
     @Test
-    fun `events are retained while the stream flag is off`() {
-        // Characterisation: the flag gates what /events/stream reports, not what
-        // onAccessibilityEvent buffers. Pinning it so a future "only record while
-        // streaming" change is a deliberate decision rather than an accident.
+    fun `events are dropped while the stream flag is off`() {
+        // Was a characterisation of the opposite: the flag gated only what
+        // /events/stream reported, while onAccessibilityEvent buffered anyway.
+        // DROID-4 made "only record while streaming" the deliberate decision —
+        // buffering UI text after the user turned the switch off left it readable
+        // by any caller holding the pairing code. EventStoreStreamingGateTest
+        // pins the same contract from the gate's side (including that the source
+        // node is never read); this keeps the store-level view honest.
         EventStore.setStreaming(false)
 
         addSequence(3)
 
-        assertEquals(3, EventStore.getAll(50).size)
+        assertTrue("nothing may be collected while the switch is off", EventStore.getAll(50).isEmpty())
         assertEquals(false, EventStore.streamingEnabled)
     }
 
