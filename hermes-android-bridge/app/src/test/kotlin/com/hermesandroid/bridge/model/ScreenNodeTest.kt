@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -322,18 +321,10 @@ class ScreenNodeTest {
     }
 
     @Test
-    @Ignore(
-        "BUG: computeHash() joins fields with '|' but does not escape the " +
-            "separator, so field content containing '|' shifts the layout and " +
-            "two different nodes hash identically. Impact is low (an app would " +
-            "need text/description literally shaped like the neighbouring " +
-            "fields) but it is a real injectivity hole in the value " +
-            "/screen_diff uses to decide nothing changed. Fixing it changes " +
-            "every hash, so it needs its own decision.",
-    )
     fun `field content containing the separator cannot forge another node hash`() {
-        // raw = "N|X|Y|null|C|false|false|false|false|null|" for BOTH nodes:
-        // the first carries it as text, the second splits it across text,
+        // Without a length prefix the raw string is
+        // "N|X|Y|null|C|false|false|false|false|null|" for BOTH nodes: the first
+        // carries it as text, the second splits it across text,
         // contentDescription and className.
         val forged = node(
             nodeId = "N",
