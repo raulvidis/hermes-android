@@ -134,19 +134,32 @@ def _safe_error(exc: Exception) -> str:
     Two kinds of message carry nothing to hide and are kept verbatim:
 
     * an ``HTTPError`` from ``_extract_response``, whose text is the bridge's
-      own serialised error body. That is the actionable half — "SEND_SMS
-      permission not granted" — and it is built from the response, never from
-      the request URL.
+      own error body. That is the actionable half — "SEND_SMS permission not
+      granted" — and it is built from the response, never from the request URL.
     * anything outside ``requests`` (a local ``OSError``, a ``ValueError``, a
       handler's ``TypeError``): the real cause, with no connection detail in it.
     """
     if isinstance(exc, requests.exceptions.HTTPError):
         message = str(exc)
-        if message:
+        if not message:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            return f"HTTPError: HTTP {status}" if status else "HTTPError: HTTP error"
+        # _extract_response serialises the bridge's error body into the exception
+        # so that it survives to here, and every caller then files it under an
+        # "error" key of its own — which lands a JSON document inside a JSON
+        # string, {"error": "{\"error\": \"not paired\"}"}. Take the one
+        # wrapper it added back off. A body that is anything but that single key
+        # is left alone, so a bridge sending {"error": ..., "code": ...} keeps
+        # both fields rather than having one dropped for tidiness.
+        try:
+            body = json.loads(message)
+        except ValueError:
             return message
-        response = getattr(exc, "response", None)
-        status = getattr(response, "status_code", None)
-        return f"HTTPError: HTTP {status}" if status else "HTTPError: HTTP error"
+        if isinstance(body, dict) and list(body) == ["error"]:
+            inner = body["error"]
+            return inner if isinstance(inner, str) else json.dumps(inner)
+        return message
     if isinstance(exc, requests.exceptions.Timeout):
         reason = "bridge request timed out"
     elif isinstance(exc, requests.exceptions.RequestException):

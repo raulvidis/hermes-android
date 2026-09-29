@@ -901,15 +901,44 @@ class TestTransportErrorMessages:
             "error": "ReadTimeout: bridge request timed out"
         }
 
-    def test_http_error_message_is_the_serialised_body(self, tool_mod, bridge):
-        """Pinned as-is, wart included: the body arrives double-encoded (a JSON
-        document inside a JSON string) because _extract_response raises
-        HTTPError(json.dumps(body)) and the caller does str(exception). Changing
-        that is a deliberate act, and this test is what makes it visible."""
+    def test_http_error_message_is_not_double_encoded(self, tool_mod, bridge):
+        """_extract_response raises HTTPError(json.dumps(body)) so the bridge's
+        own error survives; str()ing that at the call site used to land a JSON
+        document inside a JSON string — {"error": "{\\"error\\": \\"not paired\\"}"}.
+        The wrapper it added is unwrapped again, so the bridge's text arrives as
+        the error value."""
         rsps, url = bridge
         rsps.add(responses.GET, f"{url}/apps", json={"error": "not paired"}, status=401)
 
-        assert as_json(tool_mod.android_get_apps()) == {"error": '{"error": "not paired"}'}
+        assert as_json(tool_mod.android_get_apps()) == {"error": "not paired"}
+
+    def test_an_error_body_with_extra_keys_is_not_flattened(self, tool_mod, bridge):
+        """Unwrapping removes only the single key _extract_response added. A body
+        carrying a "code" next to its "error" keeps both: dropping bridge-provided
+        fields to make the response prettier is a worse trade than the extra
+        escaping."""
+        rsps, url = bridge
+        rsps.add(
+            responses.GET,
+            f"{url}/apps",
+            json={"error": "not paired", "code": "UNPAIRED"},
+            status=401,
+        )
+
+        result = as_json(tool_mod.android_get_apps())
+
+        assert json.loads(result["error"]) == {"error": "not paired", "code": "UNPAIRED"}
+
+    def test_a_wrapped_non_error_body_loses_one_layer(self, tool_mod, bridge):
+        """{"detail": "boom"} has no "error" key, so _extract_response wraps it.
+        The unwrap takes that wrapper back off, leaving the bridge's document
+        rather than a serialised copy of a serialised copy."""
+        rsps, url = bridge
+        rsps.add(responses.GET, f"{url}/apps", json={"detail": "boom"}, status=500)
+
+        result = as_json(tool_mod.android_get_apps())
+
+        assert result == {"error": '{"detail": "boom"}'}
 
     def test_ping_wraps_the_failure_under_message(self, tool_mod, bridge):
         rsps, url = bridge
@@ -918,4 +947,4 @@ class TestTransportErrorMessages:
         result = as_json(tool_mod.android_ping())
 
         assert result["status"] == "error"
-        assert json.loads(result["message"]) == {"error": "not paired"}
+        assert result["message"] == "not paired"
