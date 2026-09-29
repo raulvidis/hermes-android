@@ -55,6 +55,14 @@ object RelayClient {
     private var appContext: Context? = null
     private val reconnectPolicy = ReconnectPolicy(maxRetries = MAX_RETRIES, maxBackoffMs = MAX_BACKOFF_MS)
 
+    /**
+     * Test seam: how a scheduled reconnect waits out its backoff. Production
+     * behaviour is exactly [delay] — the default delegates to it and nothing
+     * else changes. Tests substitute an instantaneous or parkable wait so
+     * the retry cap and cancellation can be exercised without real time.
+     */
+    internal var backoffDelay: suspend (Long) -> Unit = { delay(it) }
+
     /** True between scheduling a reconnect and that attempt firing. Guards against
      *  onClosed + onFailure both scheduling for the same dead connection. */
     @Volatile
@@ -252,7 +260,7 @@ object RelayClient {
         reconnectJob = activeScope.launch {
             Log.i(TAG, "Reconnecting in ${backoff}ms... (attempt $attempt/${reconnectPolicy.limit})")
             notifyStatus(false, "Reconnecting in ${backoff / 1000}s... (attempt $attempt/${reconnectPolicy.limit})")
-            delay(backoff)
+            backoffDelay(backoff)
             beginReconnectAttempt(url, code)
         }
     }
@@ -357,7 +365,8 @@ object RelayClient {
         }
     }
 
-    private fun buildWsUrl(serverUrl: String): String {
+    /** Internal (test seam): pure URL rewrite, unit-tested directly. */
+    internal fun buildWsUrl(serverUrl: String): String {
         val trimmed = serverUrl.trim().trimEnd('/')
         val useTls = trimmed.startsWith("https://") || trimmed.startsWith("wss://")
         var base = trimmed
@@ -501,7 +510,8 @@ object RelayClient {
         }
     }
 
-    private fun buildStreamFrame(
+    /** Internal (test seam): pure binary frame builder, unit-tested directly. */
+    internal fun buildStreamFrame(
         requestId: String,
         payload: ByteArray,
         payloadLength: Int,

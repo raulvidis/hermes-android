@@ -40,6 +40,17 @@ internal class AuthRateLimiter(
     }
 
     /**
+     * Test seam: forget all recorded failures and blocks. The limiter is
+     * process-wide singleton state inside [BridgeServer], so tests need a
+     * clean slate between cases — otherwise one brute-force test locks
+     * 127.0.0.1 out for every later test in the JVM.
+     */
+    fun reset() {
+        failures.clear()
+        blocked.clear()
+    }
+
+    /**
      * Records a failed auth attempt for [ip]. Once [maxAttempts] failures
      * accumulate within [windowMs], the IP is blocked for [blockMs] and its
      * failure history is cleared.

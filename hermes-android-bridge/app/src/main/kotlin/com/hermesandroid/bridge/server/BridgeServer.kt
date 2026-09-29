@@ -60,4 +60,9 @@ object BridgeServer {
         server?.stop(1000, 2000)
         server = null
     }
+
+    /** Test seam: clears the per-IP auth throttle (process-wide singleton state). */
+    internal fun resetAuthThrottle() {
+        authRateLimiter.reset()
+    }
 }

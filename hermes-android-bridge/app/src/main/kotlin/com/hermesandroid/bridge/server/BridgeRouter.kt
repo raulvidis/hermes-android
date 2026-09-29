@@ -1,5 +1,6 @@
 package com.hermesandroid.bridge.server
 
+import android.content.Context
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.hermesandroid.bridge.BridgeApplication
@@ -10,6 +11,15 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+
+/**
+ * Test seam for the /mic_file route's Context. Production reads
+ * [BridgeApplication.instance]; Robolectric never runs Application.onCreate
+ * (and its setter is private), so tests point this at the Robolectric
+ * application — the same device as CommandDispatcher.batteryContext.
+ * Default behaviour is unchanged.
+ */
+internal var micFileContext: () -> Context = { BridgeApplication.instance }
 
 /**
  * Local HTTP server routing. This is a thin transport adapter: it parses each request
@@ -24,7 +34,7 @@ fun Application.configureRouting() {
         get("/mic_file") {
             val requestedName = call.request.queryParameters["name"]
             val file = MicrophoneRecordingFiles.resolve(
-                BridgeApplication.instance,
+                micFileContext(),
                 requestedName,
             )
             if (file == null) {
