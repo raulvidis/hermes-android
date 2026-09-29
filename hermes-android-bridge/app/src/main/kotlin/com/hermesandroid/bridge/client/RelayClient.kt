@@ -95,11 +95,17 @@ object RelayClient {
      * cancelling the coroutine that is making the call would reintroduce exactly
      * F9's "fires but never reconnects".
      *
-     * Internal rather than private so `RelayClientRevivalReconnectTest` can pin
-     * [revivalReconnectMayDial] against the states this handle passes through.
+     * Readable outside the object so `RelayClientRevivalReconnectTest` can pin
+     * [revivalReconnectMayDial] against the states this handle passes through, but
+     * **not writable** (review F40): an `internal var` let any code in the module —
+     * including a test — publish a job that `reconnectDelayed()` never scheduled,
+     * which is a state production cannot reach and a test could assert on happily.
+     * Only `reconnectDelayed()`, `cancelRevivalReconnect()` and the coroutine itself
+     * assign it, and the tests reach every state they need through those.
      */
     @Volatile
     internal var revivalReconnectJob: Job? = null
+        private set
 
     /** Seam so a test can observe the reconnect without opening a real WebSocket. */
     internal var revivalConnector: (url: String, code: String) -> Unit = { url, code ->

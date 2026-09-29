@@ -15,6 +15,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -258,38 +260,71 @@ class RelayClientRevivalReconnectTest {
         )
     }
 
+    /**
+     * The three states below are reached through the real API rather than by
+     * assigning the handle, which is now read-only outside `RelayClient` (review
+     * F40). A test that writes the field it is asserting on can put the object in a
+     * state production never reaches.
+     */
     @Test
     fun `a job cancelled while it waited for the monitor must not dial`() {
-        RelayClient.connect("http://127.0.0.1:1", "CODE123")  // arms shouldReconnect
-        val cancelled = Job().also { it.cancel() }
-        RelayClient.revivalReconnectJob = cancelled
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
 
-        assertFalse(RelayClient.revivalReconnectMayDial(cancelled))
+        RelayClient.reconnectDelayed()
+        val self = RelayClient.revivalReconnectJob
+        assertNotNull("reconnectDelayed must publish its handle", self)
+        assertTrue("armed and current, so it may dial", RelayClient.revivalReconnectMayDial(self))
+
+        // Cancel the job the way a scope teardown would, without going through
+        // disconnect() — disconnect() also clears the handle, so it would exercise
+        // the wrong branch. shouldReconnect stays armed, which is the point: the
+        // flag says "go ahead" and only the job's own state says otherwise.
+        testScope.coroutineContext[Job]?.cancel()
+
+        assertEquals("the handle was not cleared", self, RelayClient.revivalReconnectJob)
+        assertFalse(
+            "a cancelled job must not dial even with the flag still armed",
+            RelayClient.revivalReconnectMayDial(self),
+        )
     }
 
     @Test
     fun `a job superseded by a newer watchdog fire must not dial`() {
-        RelayClient.connect("http://127.0.0.1:1", "CODE123")
-        val older = Job()
-        val newer = Job()
-        RelayClient.revivalReconnectJob = newer
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
 
+        RelayClient.reconnectDelayed()
+        val older = RelayClient.revivalReconnectJob
+        RelayClient.reconnectDelayed() // a second fire supersedes the first
+        val newer = RelayClient.revivalReconnectJob
+
+        assertNotNull(older)
+        assertNotNull(newer)
+        assertNotSame("the second fire must publish a different job", older, newer)
         assertFalse(RelayClient.revivalReconnectMayDial(older))
         assertTrue(RelayClient.revivalReconnectMayDial(newer))
-        older.cancel()
-        newer.cancel()
     }
 
     @Test
     fun `a cleared handle must not dial`() {
-        RelayClient.connect("http://127.0.0.1:1", "CODE123")
-        val self = Job()
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
 
-        RelayClient.disconnect()   // clears the handle and the flag
-        RelayClient.revivalReconnectJob = null
+        RelayClient.reconnectDelayed()
+        val self = RelayClient.revivalReconnectJob
+        assertNotNull(self)
 
+        RelayClient.disconnect() // clears the handle and the flag
+
+        assertNull("disconnect must drop the handle", RelayClient.revivalReconnectJob)
         assertFalse(RelayClient.revivalReconnectMayDial(self))
-        self.cancel()
     }
 
     @Test
