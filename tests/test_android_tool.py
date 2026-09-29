@@ -1980,7 +1980,9 @@ class TestMediaTempFileRetention:
 
     The file cannot be deleted inline — the gateway reads `MEDIA:<path>` after the
     tool returns — so it is deleted at process exit, and stale leftovers from
-    earlier (possibly crashed) runs are swept once per process.
+    earlier (possibly crashed) runs are swept on a rate limit: a gateway is a
+    long-lived process, so a once-per-process sweep is a sweep that never happens
+    again.
     """
 
     @pytest.fixture(autouse=True)
@@ -1991,7 +1993,7 @@ class TestMediaTempFileRetention:
 
         self.mod = mod
         monkeypatch.setattr(mod, "_media_temp_files", set())
-        monkeypatch.setattr(mod, "_media_temp_swept", False)
+        monkeypatch.setattr(mod, "_media_temp_last_sweep", 0.0)
         monkeypatch.setattr(mod, "_media_temp_atexit_registered", False)
         # conftest already points tempfile.gettempdir() at a per-test directory.
         self.media_dir = _Path(tempfile.gettempdir())
@@ -2049,7 +2051,13 @@ class TestMediaTempFileRetention:
         assert fresh.exists(), "a file another session may still relay must survive"
         assert unrelated.exists(), "never touch files we did not create"
 
-    def test_the_sweeper_runs_at_most_once_per_process(self):
+    def test_the_sweeper_is_throttled_not_once_per_process(self):
+        """Review F18: `_media_temp_swept` made this a once-per-process event, so a
+        gateway that stays up for days — the normal case — cleaned the temp dir on
+        its first screenshot and never again, keeping every later screenshot,
+        screen recording and microphone WAV on disk until it happened to exit.
+        The sweep is bounded and age-based, so the only thing it needed was a rate
+        limit rather than a latch."""
         first = self.media_dir / "android_screenshot_a.jpg"
         first.write_bytes(b"x")
         os.utime(first, (0, 0))
@@ -2057,12 +2065,58 @@ class TestMediaTempFileRetention:
         self.mod._sweep_stale_media_temps()
         assert not first.exists()
 
+        # Inside the interval a pass is skipped: the sweep walks the whole temp
+        # dir, so it must not run for every MEDIA file created.
         second = self.media_dir / "android_screenshot_b.jpg"
         second.write_bytes(b"x")
         os.utime(second, (0, 0))
         self.mod._sweep_stale_media_temps()
+        assert second.exists(), "the sweep is rate-limited to one pass a minute"
 
-        assert second.exists(), "the sweep must not repeat within one process"
+        # ...and once the interval has passed it runs again, in the same process.
+        self.mod._media_temp_last_sweep -= (
+            self.mod._MEDIA_TEMP_SWEEP_INTERVAL_SECONDS + 1
+        )
+        self.mod._sweep_stale_media_temps()
+        assert not second.exists(), "a long-running gateway must keep sweeping"
+
+    def test_registering_a_media_file_sweeps_again_after_the_interval(self):
+        """`_register_media_temp` is what a screenshot, a screen recording and a
+        microphone fetch all call, so the throttled sweep has to hang off it rather
+        than off process start."""
+        stale = self.media_dir / "android_record_old.mp4"
+        stale.write_bytes(b"x")
+        os.utime(stale, (0, 0))
+
+        self.mod._register_media_temp(str(self.media_dir / "android_screenshot_new.jpg"))
+        assert not stale.exists()
+
+        stale_again = self.media_dir / "android_mic_old.wav"
+        stale_again.write_bytes(b"x")
+        os.utime(stale_again, (0, 0))
+        self.mod._media_temp_last_sweep -= (
+            self.mod._MEDIA_TEMP_SWEEP_INTERVAL_SECONDS + 1
+        )
+
+        self.mod._register_media_temp(str(self.media_dir / "android_screenshot_newer.jpg"))
+
+        assert not stale_again.exists(), (
+            "the second MEDIA file in a long-lived process must trigger a sweep too"
+        )
+
+    def test_the_fresh_file_a_call_just_registered_is_never_swept(self):
+        """The throttle must not turn into a licence to delete the file the caller
+        is about to hand back as MEDIA:<path>."""
+        target = self.media_dir / "android_screenshot_live.jpg"
+        target.write_bytes(b"pixels")
+
+        assert self.mod._register_media_temp(str(target)) == str(target)
+        self.mod._media_temp_last_sweep -= (
+            self.mod._MEDIA_TEMP_SWEEP_INTERVAL_SECONDS + 1
+        )
+        self.mod._register_media_temp(str(target))
+
+        assert target.exists()
 
     def test_the_sweeper_tolerates_an_unreadable_temp_dir(self, monkeypatch):
         monkeypatch.setattr(self.mod.os, "listdir", _raise_oserror)

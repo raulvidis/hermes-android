@@ -112,15 +112,19 @@ def _auth_headers() -> dict:
 # /tmp for the lifetime of the filesystem.
 #
 # The file cannot be deleted inline: the gateway reads MEDIA:<path> after the tool
-# returns. So this process deletes everything it created when it exits, and the
-# first time it creates one it sweeps stale leftovers from earlier (possibly
-# crashed) runs. Both are best-effort — a cleanup failure must never fail a tool
-# call.
+# returns. So this process deletes everything it created when it exits, and every
+# time it creates one it sweeps stale leftovers from earlier (possibly crashed)
+# runs — rate-limited, because the sweep walks the whole temp dir. Both are
+# best-effort: a cleanup failure must never fail a tool call.
 _MEDIA_TEMP_PREFIXES = ("android_screenshot_", "android_record_", "android_mic_")
 _MEDIA_TEMP_MAX_AGE_SECONDS = 60 * 60
+# How often a MEDIA file creation may trigger the stale sweep. A gateway is a
+# long-lived process, so a once-per-process latch meant it cleaned up exactly once
+# and kept every later screenshot and recording on disk until it exited.
+_MEDIA_TEMP_SWEEP_INTERVAL_SECONDS = 60
 _media_temp_files: set = set()
 _media_temp_atexit_registered = False
-_media_temp_swept = False
+_media_temp_last_sweep = 0.0
 
 
 def _register_media_temp(path: str) -> str:
@@ -148,17 +152,26 @@ def _delete_media_temp_files() -> None:
 
 
 def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS) -> None:
-    """Once per process, delete our own stale MEDIA files left in the temp dir.
+    """Delete our own stale MEDIA files left in the temp dir, at most once a minute.
 
     Only files whose name starts with one of our prefixes and whose mtime is older
     than *max_age_seconds* are touched, so a file another live session is about to
-    relay is never deleted.
+    relay is never deleted — including the one this call is registering for.
+
+    Rate-limited rather than latched. A `_media_temp_swept` flag made this a
+    once-per-process event, which is the wrong shape for the process that actually
+    runs it: a gateway stays up for days, so it swept on the first screenshot and
+    never again, and every later screenshot, screen recording and microphone WAV
+    stayed in the temp dir until the process happened to exit. The interval is what
+    keeps the sweep off the hot path — it lists the whole temp dir, so it cannot run
+    for every MEDIA file created.
     """
-    global _media_temp_swept
-    if _media_temp_swept:
+    global _media_temp_last_sweep
+    now = time.time()
+    if now - _media_temp_last_sweep < _MEDIA_TEMP_SWEEP_INTERVAL_SECONDS:
         return
-    _media_temp_swept = True
-    cutoff = time.time() - max_age_seconds
+    _media_temp_last_sweep = now
+    cutoff = now - max_age_seconds
     try:
         names = os.listdir(tempfile.gettempdir())
     except OSError:
