@@ -12,11 +12,9 @@ import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
 import com.hermesandroid.bridge.audio.MicrophoneRecordingState
 import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
-import com.hermesandroid.bridge.executor.ScreenReader
 import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.model.ActionResult
 import com.hermesandroid.bridge.model.DeviceCapabilities
-import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.notification.NotificationStore
 import com.hermesandroid.bridge.power.BatteryMonitor
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
@@ -154,14 +152,7 @@ object CommandDispatcher {
                 ) to 200
             }
 
-            method == "GET" && path == "/screen" -> {
-                val bounds = params.get("bounds")?.asString == "true"
-                val systemUi = params.get("system_ui")?.asString == "true"
-                val tree = withContext(Dispatchers.Main) {
-                    ScreenReader.readCurrentScreen(bounds, systemUi)
-                }
-                mapOf("tree" to tree, "count" to countAllNodes(tree)) to 200
-            }
+            method == "GET" && path == "/screen" -> ScreenCommands.screen(params)
 
             method == "POST" && path == "/tap" -> {
                 val x = body.get("x")?.asInt
@@ -213,12 +204,7 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "GET" && path == "/screenshot" -> {
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.takeScreenshot()
-                }
-                result to 200
-            }
+            method == "GET" && path == "/screenshot" -> ScreenCommands.screenshot()
 
             method == "POST" && path == "/scroll" -> {
                 val direction = body.get("direction")?.asString ?: ""
@@ -229,35 +215,14 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "POST" && path == "/wait" -> {
-                val text = body.get("text")?.asString
-                val className = body.get("className")?.asString
-                val timeoutMs = clampWaitTimeoutMs(body.get("timeoutMs")?.asInt)
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.waitForElement(text, className, timeoutMs)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/wait" -> ScreenCommands.wait(body)
 
             method == "GET" && path == "/apps" -> {
                 val apps = ActionExecutor.getInstalledApps()
                 mapOf("apps" to apps, "count" to apps.size) to 200
             }
 
-            method == "GET" && path == "/current_app" -> {
-                val result = withContext(Dispatchers.Main) {
-                    val service = BridgeAccessibilityService.instance
-                    val windows = service?.windows ?: emptyList()
-                    val roots = windows.mapNotNull { it.root }
-                    val firstRoot = roots.firstOrNull()
-                    val pkg = firstRoot?.packageName?.toString() ?: "unknown"
-                    val cls = firstRoot?.className?.toString() ?: "unknown"
-                    roots.forEach { it.recycle() }
-                    windows.forEach { it.recycle() }
-                    mapOf("package" to pkg, "className" to cls)
-                }
-                result to 200
-            }
+            method == "GET" && path == "/current_app" -> ScreenCommands.currentApp()
 
             method == "GET" && path == "/clipboard" -> {
                 val result = ActionExecutor.clipboardRead()
@@ -315,32 +280,11 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "POST" && path == "/describe_node" -> {
-                val nodeId = body.get("nodeId")?.asString ?: ""
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.describeNode(nodeId)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/describe_node" -> ScreenCommands.describeNode(body)
 
-            method == "POST" && path == "/find_nodes" -> {
-                val text = body.get("text")?.asString
-                val className = body.get("className")?.asString
-                val clickable = body.get("clickable")?.asBoolean
-                val limit = body.get("limit")?.asInt ?: 20
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.findNodes(text, className, clickable, limit)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/find_nodes" -> ScreenCommands.findNodes(body)
 
-            method == "POST" && path == "/diff_screen" -> {
-                val previousHash = body.get("previousHash")?.asString ?: ""
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.diffScreen(previousHash)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/diff_screen" -> ScreenCommands.diffScreen(body)
 
             method == "POST" && path == "/pinch" -> {
                 val x = body.get("x")?.asInt ?: 0
@@ -353,12 +297,7 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "GET" && path == "/screen_hash" -> {
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.screenHash()
-                }
-                result to 200
-            }
+            method == "GET" && path == "/screen_hash" -> ScreenCommands.screenHash()
 
             method == "GET" && path == "/location" -> {
                 val result = ActionExecutor.location()
@@ -598,12 +537,7 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "GET" && path == "/widgets" -> {
-                val result = withContext(Dispatchers.Main) {
-                    ActionExecutor.readWidgets()
-                }
-                result to 200
-            }
+            method == "GET" && path == "/widgets" -> ScreenCommands.widgets()
 
             else -> {
                 mapOf("error" to "Unknown command: $method $path") to 404
@@ -611,11 +545,4 @@ object CommandDispatcher {
         }
     }
 
-    private fun countAllNodes(nodes: List<ScreenNode>): Int {
-        var count = 0
-        for (node in nodes) {
-            count += 1 + countAllNodes(node.children)
-        }
-        return count
-    }
 }
