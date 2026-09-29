@@ -238,10 +238,55 @@ class RelayClientRelayTest {
 
         val json = JsonParser.parseString(relay.nextMessage()).asJsonObject
         assertEquals(500, json.get("status").asInt)
+        // Review F26: the class name, not `e.message`. This used to echo
+        // "Command is missing request_id" — an internal diagnostic string — while
+        // the HTTP transport answered `CommandDispatcher.errorBody(cause)` for the
+        // identical failure, which is the divergence L1 existed to remove.
         assertEquals(
-            "Command is missing request_id",
+            "IllegalArgumentException",
             json.getAsJsonObject("result").get("error").asString,
         )
+    }
+
+    /**
+     * The contract `CommandDispatcher.errorBody` exists to hold, asserted here
+     * because `handleMessage`'s catch is the one 500 the dispatcher does not own:
+     * it wraps the JSON parse, the request-id check and the `/mic_file` stream,
+     * none of which `dispatch` ever sees.
+     */
+    @Test
+    fun `the relay's own 500 carries no message text`() {
+        val relay = RelayPeer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(relay))
+        connectToRelay()
+        assertTrue(relay.awaitOpen())
+
+        relay.send("""{"method":"GET","path":"/ping","params":{},"body":{}}""")
+
+        val json = JsonParser.parseString(relay.nextMessage()).asJsonObject
+        val error = json.getAsJsonObject("result").get("error").asString
+        // A message here could quote a recipient, a file path or a host:port. The
+        // class name says enough to diagnose and leaks nothing.
+        assertTrue("expected a bare class name, got '$error'", error.matches(Regex("[A-Za-z0-9_\$.]+")))
+        assertTrue("the error must not read like a sentence: '$error'", !error.contains(' '))
+    }
+
+    @Test
+    fun `the relay's 500 body is exactly what errorBody produces for the same cause`() {
+        // Both transports must answer a route failure identically (L1). Asserting
+        // the envelope against `errorBody` itself, rather than against a string, is
+        // what stops the two from drifting again the next time either is touched.
+        val relay = RelayPeer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(relay))
+        connectToRelay()
+        assertTrue(relay.awaitOpen())
+
+        relay.send("""{"method":"GET","path":"/ping","params":{},"body":{}}""")
+
+        val json = JsonParser.parseString(relay.nextMessage()).asJsonObject
+        val expected = com.google.gson.Gson()
+            .toJsonTree(CommandDispatcher.errorBody(IllegalArgumentException("anything at all")))
+        assertEquals(expected, json.get("result"))
     }
 
     @Test

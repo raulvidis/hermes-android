@@ -697,7 +697,14 @@ object RelayClient {
                 val requestId = json.get("request_id")?.asString ?: ""
                 val errorResponse = JsonObject().apply {
                     addProperty("request_id", requestId)
-                    add("result", gson.toJsonTree(mapOf("error" to e.message)))
+                    // F26: the shared contract, not `e.message`. This catch is the
+                    // one 500 `dispatch` does not own — it wraps the JSON parse, the
+                    // request-id check and the /mic_file stream — and it answered
+                    // with the exception's message while BridgeRouter answered the
+                    // identical failure with errorBody(). A message can quote a
+                    // recipient, a file path or a host:port; a class name says
+                    // enough to diagnose and leaks nothing (L1).
+                    add("result", gson.toJsonTree(CommandDispatcher.errorBody(e)))
                     addProperty("status", 500)
                 }
                 ws.send(errorResponse.toString())
