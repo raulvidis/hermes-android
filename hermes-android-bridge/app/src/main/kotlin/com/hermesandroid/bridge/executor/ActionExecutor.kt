@@ -719,21 +719,49 @@ object ActionExecutor {
                 // Denylist dangerous URI schemes that can bypass the action blocklist.
                 // An attacker can use a benign action like VIEW with a malicious URI
                 // (intent:// redirects, content:// providers, market:// deep links,
-                //  tel:, smsto:, mmsto:).
-                val blockedUriSchemes = setOf("intent", "market", "smsto", "mmsto", "tel")
-                val blockedUriPrefixes = listOf("content://settings", "content://com.android.contacts")
+                //  tel:, sms:, smsto:, mms:, mmsto:).
+                //
+                // CTRL-2: normalise ONCE, before any check. Leading whitespace used
+                // to defeat scheme extraction completely (" tel:+19005550100" yields
+                // scheme " tel"), and the content:// prefix check ran against the
+                // raw input, so "  content://sms/inbox" walked straight through.
+                val normalizedUri = dataUri.trim()
+                val lowerUri = normalizedUri.lowercase()
+                val blockedUriSchemes = setOf(
+                    "intent", "market", "tel", "sms", "smsto", "mms", "mmsto"
+                )
+                // Personal-data providers. Two entries ("content://settings" and
+                // "content://com.android.contacts") do not amount to "block
+                // dangerous content providers": SMS, MMS, the call log, telephony
+                // and the other contacts authorities were all accepted.
+                val blockedUriPrefixes = listOf(
+                    "content://settings",
+                    "content://sms",
+                    "content://mms",
+                    "content://mms-sms",
+                    "content://call_log",
+                    "content://telephony",
+                    "content://contacts",
+                    "content://icc",
+                    "content://com.android.contacts",
+                    "content://com.android.calllog",
+                    "content://com.android.mms",
+                    "content://com.android.mms-sms",
+                    "content://com.android.providers.telephony",
+                    "content://com.android.providers.contacts"
+                )
                 // Handle both standard schemes (http://, intent://) and single-colon
                 // schemes (tel:, smsto:, mmsto:). substringBefore("://") alone fails
                 // for single-colon URIs because "://" is absent, returning the full
                 // string (e.g. "tel:123456") instead of just "tel".
-                val scheme = dataUri.substringBefore("://").substringBefore(":").lowercase()
+                val scheme = lowerUri.substringBefore("://").substringBefore(":").trim()
                 if (scheme in blockedUriSchemes) {
                     return ActionResult(false, "URI scheme '$scheme' is blocked for safety")
                 }
-                if (blockedUriPrefixes.any { dataUri.lowercase().startsWith(it) }) {
+                if (blockedUriPrefixes.any { lowerUri.startsWith(it) }) {
                     return ActionResult(false, "Content provider URI is blocked for safety")
                 }
-                setData(android.net.Uri.parse(dataUri))
+                setData(android.net.Uri.parse(normalizedUri))
             }
             extras?.forEach { (key, value) ->
                 putExtra(key, value)

@@ -1785,17 +1785,17 @@ _SCHEMAS = {
     },
     "android_send_intent": {
         "name": "android_send_intent",
-        "description": "Send an Android intent to start an activity. Enables deep linking, settings, and app-specific APIs.",
+        "description": "Send an Android intent to start an activity. Enables deep links and app-specific APIs. Blocked on the device: telephony (CALL, tel:/sms:/smsto:), package management, android.settings.* / android.provider.action.* actions, and personal content:// providers (sms, mms, call_log, telephony, contacts). Use android_call / android_send_sms for telephony and android_open_app for apps.",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Intent action e.g. android.settings.WIFI_SETTINGS",
+                    "description": "Intent action e.g. android.intent.action.VIEW",
                 },
                 "data_uri": {
                     "type": "string",
-                    "description": "Optional data URI e.g. tel:+1234567890",
+                    "description": "Optional data URI e.g. https://example.com/page",
                 },
                 "extras": {
                     "type": "object",
@@ -1817,7 +1817,7 @@ _SCHEMAS = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Broadcast action e.g. android.intent.action.AIRPLANE_MODE",
+                    "description": "Broadcast action e.g. com.example.app.CUSTOM_EVENT (protected system broadcasts are rejected by Android)",
                 },
                 "extras": {
                     "type": "object",

@@ -1725,3 +1725,62 @@ class TestUpdateEnvFileHardening:
 
         assert env.read_text() == "ANDROID_BRIDGE_TOKEN=GOOD\n"
         assert sorted(p.name for p in env.parent.iterdir()) == [".env"]
+
+
+class TestSendIntentSchemaMatchesTheDevice:
+    """CTRL-2: the tool schema advertised values the device denylist rejects.
+
+    `data_uri` said "e.g. tel:+1234567890" and `action` said "e.g.
+    android.settings.WIFI_SETTINGS" — both blocked on the phone — and
+    `android_broadcast` suggested `android.intent.action.AIRPLANE_MODE`, a
+    protected broadcast that throws SecurityException. Telling the model to make
+    calls that cannot succeed teaches it that a denylist exists, which is an
+    invitation to probe it.
+    """
+
+    def test_data_uri_example_is_not_a_denied_scheme(self):
+        props = _SCHEMAS["android_send_intent"]["parameters"]["properties"]
+        example = props["data_uri"]["description"]
+        for denied in ("tel:", "sms:", "smsto:", "mmsto:", "mms:", "market:", "intent:", "content://sms"):
+            assert denied not in example, f"{denied} is blocked on the device but advertised as an example"
+
+    def test_action_example_is_not_a_denied_action(self):
+        props = _SCHEMAS["android_send_intent"]["parameters"]["properties"]
+        example = props["action"]["description"]
+        assert "android.settings." not in example
+        assert "android.provider.action." not in example
+        assert "CALL" not in example
+
+    def test_broadcast_example_is_not_a_protected_broadcast(self):
+        props = _SCHEMAS["android_broadcast"]["parameters"]["properties"]
+        example = props["action"]["description"]
+        assert "AIRPLANE_MODE" not in example
+        assert "MEDIA_MOUNTED" not in example
+        assert "PACKAGE_ADDED" not in example
+
+    def test_send_intent_says_what_is_blocked(self):
+        """The model should learn the boundary from the schema, not by probing."""
+        description = _SCHEMAS["android_send_intent"]["description"]
+        assert "tel:" in description
+        assert "sms:" in description
+        assert "content://" in description
+        assert "android_call" in description and "android_send_sms" in description, (
+            "point the model at the tools that are allowed to do this"
+        )
+
+    def test_examples_survive_in_both_copies(self):
+        """tools/ and hermes-android-plugin/ must not drift apart."""
+        import runpy
+        from pathlib import Path
+
+        plugin = runpy.run_path(
+            str(Path(__file__).parents[1] / "hermes-android-plugin" / "android_tool.py")
+        )
+        assert (
+            plugin["_SCHEMAS"]["android_send_intent"]
+            == _SCHEMAS["android_send_intent"]
+        )
+        assert (
+            plugin["_SCHEMAS"]["android_broadcast"]
+            == _SCHEMAS["android_broadcast"]
+        )
