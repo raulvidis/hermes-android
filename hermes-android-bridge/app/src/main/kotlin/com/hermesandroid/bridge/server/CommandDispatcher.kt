@@ -350,8 +350,19 @@ object CommandDispatcher {
                 if (!DeviceCapabilities.hasTelephony) {
                     return mapOf("success" to false, "error" to "SMS not available on this device") to 200
                 }
-                val to = body.get("to")?.asString ?: ""
-                val smsBody = body.get("body")?.asString ?: ""
+                // Validate before the executor. AOSP's sendTextMessage throws
+                // IllegalArgumentException for an empty destination — and its
+                // message quotes the address, which is why the blank case is
+                // rejected here with a fixed string rather than surfacing the
+                // exception. /open_app already answers 400 for a missing package.
+                val to = body.get("to")?.let { if (it.isJsonPrimitive) it.asString else null }
+                if (to.isNullOrBlank()) {
+                    return mapOf("error" to "Missing or blank 'to'") to 400
+                }
+                val smsBody = body.get("body")?.let { if (it.isJsonPrimitive) it.asString else null }
+                if (smsBody.isNullOrBlank()) {
+                    return mapOf("error" to "Missing or blank 'body'") to 400
+                }
                 val result = ActionExecutor.sendSms(to, smsBody)
                 result to 200
             }

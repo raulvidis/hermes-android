@@ -543,25 +543,108 @@ object ActionExecutor {
         }
     }
 
+    /** Broadcast action the sentIntent PendingIntent reports the radio result on. */
+    private const val SMS_SENT_REPORT_ACTION = "com.hermesandroid.bridge.action.SMS_SENT_REPORT"
+
+    /**
+     * How long to wait for the radio's send report. Bounded, because a device
+     * with no signal must not hang the request. `internal` so tests can shorten
+     * it — the same seam idea as [CommandDispatcher.batteryContext].
+     */
+    internal var smsSendReportTimeoutMs: Long = 10_000L
+
+    /**
+     * Send an SMS and report what the radio actually did (review L2).
+     *
+     * `sendTextMessage` returns once the message is queued, so this divides the
+     * body, passes a `sentIntent` per segment, and waits — bounded — for the
+     * reports. An unconfirmed send is reported as a failure, never as success.
+     * The recipient and the body are never echoed back (AGENTS.md PII rule).
+     */
     fun sendSms(to: String, body: String): ActionResult {
         val service = BridgeAccessibilityService.instance
             ?: return ActionResult(false, "Accessibility service not running")
         if (!service.hasSelfPermission(android.Manifest.permission.SEND_SMS)) {
             return ActionResult(false, "SEND_SMS permission not granted. Grant it in Settings > Apps > Hermes Bridge > Permissions.")
         }
-        return try {
-            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val smsManager = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 service.getSystemService(SmsManager::class.java)
             } else {
                 @Suppress("DEPRECATION")
                 SmsManager.getDefault()
             }
-            smsManager.sendTextMessage(to, null, body, null, null)
-            ActionResult(true, "SMS sent")
+        } catch (e: Exception) {
+            return ActionResult(false, "SMS unavailable on this device (${e.javaClass.simpleName})")
+        }
+
+        // Divide first. A body over the single-segment limit passed to
+        // sendTextMessage fails at the radio layer; over the limit it must go
+        // through sendMultipartTextMessage.
+        val parts: ArrayList<String> = try {
+            smsManager.divideMessage(body) ?: arrayListOf(body)
+        } catch (e: Exception) {
+            arrayListOf(body)
+        }
+
+        val timeoutMs = smsSendReportTimeoutMs
+        val report = SmsSendReport(parts.size)
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                // resultCode is the platform's own send-report code.
+                report.onResult(resultCode)
+            }
+        }
+        val registered = try {
+            val filter = android.content.IntentFilter(SMS_SENT_REPORT_ACTION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // targetSdk 34 requires the export flag. NOT_EXPORTED is correct:
+                // the platform fires our own PendingIntent, which sends with the
+                // creator's identity, so the report still reaches us while no
+                // other app can spoof one.
+                service.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                service.registerReceiver(receiver, filter)
+            }
+            true
+        } catch (e: Exception) {
+            // Without a receiver there is no report, and "unconfirmed" is the
+            // honest answer rather than a claimed success.
+            false
+        }
+
+        return try {
+            val sentIntents = ArrayList<android.app.PendingIntent>(parts.size)
+            for (index in parts.indices) {
+                sentIntents += smsSentReportIntent(service, index)
+            }
+            if (parts.size > 1) {
+                smsManager.sendMultipartTextMessage(to, null, parts, sentIntents, null)
+            } else {
+                smsManager.sendTextMessage(to, null, body, sentIntents.firstOrNull(), null)
+            }
+            SmsSendReport.describe(report.await(timeoutMs), parts.size, timeoutMs)
         } catch (e: SecurityException) {
-            ActionResult(false, "SMS permission denied: ${e.message}")
+            ActionResult(false, "SMS permission denied: ${e.javaClass.simpleName}")
+        } catch (e: IllegalArgumentException) {
+            // AOSP throws this for an invalid destination, and its message
+            // quotes the address — so report the class and never the message.
+            ActionResult(false, "SMS rejected by the platform (${e.javaClass.simpleName})")
+        } catch (e: Exception) {
+            ActionResult(false, "SMS send failed (${e.javaClass.simpleName})")
+        } finally {
+            if (registered) runCatching { service.unregisterReceiver(receiver) }
         }
     }
+
+    private fun smsSentReportIntent(context: Context, requestCode: Int): android.app.PendingIntent =
+        android.app.PendingIntent.getBroadcast(
+            context,
+            // One per segment, so each part's report is distinct.
+            requestCode,
+            Intent(SMS_SENT_REPORT_ACTION).setPackage(context.packageName),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+        )
 
     fun makeCall(number: String): ActionResult {
         val service = BridgeAccessibilityService.instance

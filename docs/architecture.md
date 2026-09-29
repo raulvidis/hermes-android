@@ -82,7 +82,7 @@ aiohttp server in a background daemon thread, started by `android_setup()`.
 
 ### Status codes
 
-`CommandDispatcher` picks the status for anything it handles, so both transports agree: `200` for normal results (including capability errors such as "SMS not available on this device", which return `success: false` at `200`), `202` for `/mic_start` and `/mic_stop` accepted, `400` for a missing `package` or an invalid `duration`, `403` when the microphone permission is absent, `404` for `Unknown command: <METHOD> <path>`, `409` when a recording is already active, and `503` when battery state is unavailable. The relay returns the phone's `result` unwrapped with the phone's status, so a tool sees the same body either way.
+`CommandDispatcher` picks the status for anything it handles, so both transports agree: `200` for normal results (including capability errors such as "SMS not available on this device", which return `success: false` at `200`), `202` for `/mic_start` and `/mic_stop` accepted, `400` for a missing `package`, an invalid `duration`, or a blank `/send_sms` `to`/`body`, `403` when the microphone permission is absent, `404` for `Unknown command: <METHOD> <path>`, `409` when a recording is already active, and `503` when battery state is unavailable. The relay returns the phone's `result` unwrapped with the phone's status, so a tool sees the same body either way.
 
 The relay adds its own statuses before the phone is ever reached: `401` (missing or wrong Bearer token), `429` (IP blocked by the auth throttle), `503` (no phone connected), `502` (send failed or the phone connection dropped) and `504` (no reply within `_RESPONSE_TIMEOUT`, 30s). aiohttp answers `404`/`405` for a path or method that is not in `_ROUTES`.
 
