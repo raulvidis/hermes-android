@@ -16,6 +16,7 @@ from tools.android_relay import (
     _AUTH_MAX_ATTEMPTS,
     _mask_token,
     _safe_body_repr,
+    _SENSITIVE_BODY_KEYS,
     _decode_stream_frame,
     _cleanup_phone,
     _RelayState,
@@ -160,6 +161,55 @@ class TestBodyLogRedaction:
     def test_non_sensitive_fields_kept(self):
         repr_ = _safe_body_repr({"x": 100, "y": 200})
         assert "100" in repr_ and "200" in repr_
+
+    def test_send_intent_data_uri_redacted(self):
+        """Review L3: android_send_intent sends the URI under `dataUri`, which was
+        not in the redaction set, so a DEBUG body log carried the full number.
+        `extras` being covered did not help — the URI is a sibling field."""
+        repr_ = _safe_body_repr(
+            {
+                "action": "android.intent.action.SENDTO",
+                "dataUri": "smsto:+15551234567",
+            }
+        )
+        assert "+15551234567" not in repr_
+        assert "15551234567" not in repr_
+        # The action itself is not PII and stays readable, or the log is useless.
+        assert "android.intent.action.SENDTO" in repr_
+
+    def test_deep_link_token_in_data_uri_redacted(self):
+        repr_ = _safe_body_repr({"action": "android.intent.action.VIEW", "dataUri": "https://x.example/reset?t=SECRET"})
+        assert "SECRET" not in repr_
+
+    def test_every_pii_payload_key_android_send_intent_can_send_is_redacted(self, monkeypatch):
+        """Guard the guard: derive the payload from the tool itself, so a new
+        field cannot leak by default. Fails until someone classifies it."""
+        from tools import android_tool
+
+        captured = {}
+
+        def fake_post(path, payload):
+            captured.update(payload)
+            return {}
+
+        monkeypatch.setattr(android_tool, "_post", fake_post)
+        android_tool.android_send_intent(
+            "android.intent.action.SENDTO",
+            data_uri="smsto:+15551234567",
+            extras={"k": "v"},
+            package="com.example",
+        )
+
+        # `action` and `packageOverride` name an app/verb, not a person, and stay
+        # readable so the log is still useful for debugging.
+        plain = {"action", "packageOverride"}
+        sent = set(captured)
+        assert sent, "the tool sent no payload — this test is not observing anything"
+        unclassified = sent - set(_SENSITIVE_BODY_KEYS) - plain
+        assert not unclassified, (
+            f"android_send_intent payload keys with no redaction decision: "
+            f"{sorted(unclassified)} — add them to _SENSITIVE_BODY_KEYS, or to `plain` here"
+        )
 
     def test_empty_body(self):
         assert _safe_body_repr({}) == "{}"

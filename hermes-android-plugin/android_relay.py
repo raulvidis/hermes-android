@@ -467,7 +467,22 @@ def _token_bytes(value: str) -> bytes:
 # typed text incl. passwords/OTPs, clipboard content, intent extras).
 # AGENTS.md: strip phone numbers, recipients, location from tool logs.
 _SENSITIVE_BODY_KEYS = frozenset(
-    {"to", "number", "body", "text", "message", "extras", "data", "uri", "content"}
+    {
+        "to",
+        "number",
+        "body",
+        "text",
+        "message",
+        "extras",
+        "data",
+        "uri",
+        "content",
+        # android_send_intent sends the URI under `dataUri`, not `uri`/`data`:
+        # a SENDTO deep link carries the full phone number, and an https one can
+        # carry a reset token. `action` and `packageOverride` stay readable —
+        # they name a verb and an app, not a person.
+        "dataUri",
+    }
 )
 
 

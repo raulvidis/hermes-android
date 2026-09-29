@@ -218,6 +218,9 @@ class TestRelayLogRedaction:
                 "data",
                 "uri",
                 "content",
+                # android_send_intent sends the URI under `dataUri`, not `uri`:
+                # a SENDTO deep link carries the whole phone number (L3).
+                "dataUri",
             }
         ),
     )
@@ -231,7 +234,18 @@ class TestRelayLogRedaction:
         """Pinned so a new PII-bearing field cannot be added to the relay's
         request vocabulary without a matching redaction test."""
         assert relay_mod._SENSITIVE_BODY_KEYS == frozenset(
-            {"to", "number", "body", "text", "message", "extras", "data", "uri", "content"}
+            {
+                "to",
+                "number",
+                "body",
+                "text",
+                "message",
+                "extras",
+                "data",
+                "uri",
+                "content",
+                "dataUri",
+            }
         )
 
     def test_non_sensitive_fields_stay_readable(self, relay_mod, captured_command):
