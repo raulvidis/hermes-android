@@ -924,6 +924,74 @@ class TestAndroidSetup:
         assert relay._relay_host() == "0.0.0.0"
         assert tool_mod._relay_public_host(FAKE_IP) == "relay.example.com"
 
+    # ── F34: do not pay for IP detection the answer to which is discarded ─────
+
+    def test_a_configured_public_host_skips_ip_detection(self, tool_mod, monkeypatch):
+        """`_get_public_ip()` is three external HTTPS calls at 3 s each plus a DNS
+        fallback, and with `ANDROID_RELAY_PUBLIC_HOST` set every one of their answers
+        is thrown away. It also hands this gateway's address to a third-party echo
+        service on every setup, for nothing."""
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+        calls = []
+
+        def detect():
+            calls.append("called")
+            return FAKE_IP
+
+        monkeypatch.setattr(tool_mod, "_get_public_ip", detect)
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert calls == [], "IP detection ran even though the host is configured"
+        assert result["server_address"] == "ws://relay.example.com:8766"
+
+    def test_a_configured_public_host_skips_ip_detection_under_tls_too(
+        self, tool_mod, monkeypatch
+    ):
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        calls = []
+        monkeypatch.setattr(
+            tool_mod, "_get_public_ip", lambda: calls.append("called") or FAKE_IP
+        )
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert calls == []
+        assert result["server_address"] == "wss://relay.example.com:8766"
+        assert "server_address_note" not in result
+
+    def test_ip_detection_still_runs_without_a_configured_host(self, tool_mod, monkeypatch):
+        """The other half: skipping must not become "never detect"."""
+        monkeypatch.delenv("ANDROID_RELAY_PUBLIC_HOST", raising=False)
+        calls = []
+
+        def detect():
+            calls.append("called")
+            return FAKE_IP
+
+        monkeypatch.setattr(tool_mod, "_get_public_ip", detect)
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert calls == ["called"]
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
+
+    def test_an_empty_public_host_still_detects(self, tool_mod, monkeypatch):
+        """`_env()` treats an empty value as unset, so a blank variable in .env must
+        not turn the printed address into `ws://:8766`."""
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "")
+        calls = []
+        monkeypatch.setattr(
+            tool_mod, "_get_public_ip", lambda: calls.append("called") or FAKE_IP
+        )
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert calls == ["called"]
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
+
     def test_the_https_setup_still_prints_a_wss_address_for_the_phone(
         self, tool_mod, monkeypatch
     ):

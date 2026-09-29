@@ -1325,7 +1325,12 @@ def android_setup(pairing_code: str) -> str:
         # clobbers their value with a default (F5: _relay_port() used to read
         # os.environ only, so a .env-only 9000 was overwritten with 8766).
         port_already_set = _env("ANDROID_RELAY_PORT") is not None
-        public_ip = _get_public_ip()
+        # F34: `_get_public_ip()` is three external HTTPS calls at 3 s each plus a
+        # DNS fallback, and when the operator has named the host — which is what
+        # ANDROID_RELAY_PUBLIC_HOST is for — every one of those answers is thrown
+        # away. Skipping them also stops setup handing this gateway's address to a
+        # third-party IP-echo service when nothing needs it.
+        public_ip = _env("ANDROID_RELAY_PUBLIC_HOST") or _get_public_ip()
 
         # Save config to ~/.hermes/.env. The scheme follows the transport the
         # relay is about to serve (F19): with a certificate configured its whole

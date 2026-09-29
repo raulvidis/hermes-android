@@ -18,7 +18,7 @@ Config lives in `~/.hermes/.env` (only needed for direct USB/LAN; relay mode is 
 | `ANDROID_BRIDGE_TIMEOUT` | `30` | env, then `.env` | HTTP request timeout (seconds) |
 | `ANDROID_RELAY_CERT` | *(none)* | env, then `.env` | TLS certificate; relay then serves `https`/`wss` for **both** the phone and the tools |
 | `ANDROID_RELAY_KEY` | *(none)* | env, then `.env` | TLS private key — both cert and key must be set, or TLS stays off |
-| `ANDROID_RELAY_PUBLIC_HOST` | *(none)* | env, then `.env` | Hostname the TLS certificate covers. Only changes the address `android_setup` prints for the phone — the relay still binds `ANDROID_RELAY_HOST`. Required for a working `wss://` unless the certificate has an IP SAN |
+| `ANDROID_RELAY_PUBLIC_HOST` | *(none)* | env, then `.env` | Hostname the TLS certificate covers. Only changes the address `android_setup` prints for the phone — the relay still binds `ANDROID_RELAY_HOST`. Required for a working `wss://` unless the certificate has an IP SAN. Setting it also skips public-IP detection, so `android_setup` makes no external calls |
 | `HERMES_HOME` | `~/.hermes` | env only | Directory whose `.env` supplies the fallback variables |
 
 All of them fall back to `~/.hermes/.env`: `os.environ` always wins, and the parsed
