@@ -221,4 +221,34 @@ class RelayClientRevivalReconnectTest {
 
         assertEquals("nothing saved, nothing to reconnect to", 0, calls)
     }
+
+    /**
+     * Review F25: the guard and the dial have to be one step. The coroutine checked
+     * `shouldReconnect` and cleared its own handle inside `synchronized`, then
+     * called the connector *after* releasing the monitor — so a `disconnect()`
+     * landing in that gap found no job left to cancel and a flag nothing would
+     * re-read, and the reconnect went ahead anyway. That is F11 again, one
+     * instruction narrower. `disconnect()` and `connect()` are both `@Synchronized`,
+     * so dialling under the same monitor is what makes the window close; the lock is
+     * reentrant, which is also how F9's "must not cancel itself" survives.
+     */
+    @Test
+    fun `the reconnect is dialled under the monitor so a disconnect cannot slip in`() {
+        val testScope = TestScope()
+        RelayClient.revivalScope = testScope
+        var heldLock = false
+        RelayClient.revivalConnector = { _, _ -> heldLock = Thread.holdsLock(RelayClient) }
+        RelayClient.serverUrl = "http://127.0.0.1:1"
+        setPairingCode("CODE123")
+
+        RelayClient.reconnectDelayed()
+        testScope.advanceTimeBy(RelayClient.REVIVAL_RECONNECT_DELAY_MS)
+        testScope.runCurrent()
+
+        assertTrue(
+            "the connector ran without the RelayClient monitor, so disconnect() " +
+                "can land between the guard and the dial and be ignored",
+            heldLock,
+        )
+    }
 }

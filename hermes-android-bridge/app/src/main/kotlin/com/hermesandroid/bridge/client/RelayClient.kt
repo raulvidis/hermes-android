@@ -617,21 +617,24 @@ object RelayClient {
                 // it called connect().
                 revivalReconnectJob = revivalScope.launch {
                     kotlinx.coroutines.delay(REVIVAL_RECONNECT_DELAY_MS)
-                    val wanted = synchronized(this@RelayClient) {
+                    // Guard AND dial in one critical section (review F25).
+                    // disconnect() and connect() are both @Synchronized, so releasing
+                    // the monitor between checking shouldReconnect and dialling left a
+                    // window in which a user disconnect found no job left to cancel and
+                    // a flag nothing would re-read — and the reconnect went ahead
+                    // anyway. The monitor is reentrant, which is also what lets the
+                    // dial call connect(), and so cancel this very job, without
+                    // deadlocking (F9).
+                    synchronized(this@RelayClient) {
                         if (!shouldReconnect) {
-                            false
+                            Log.i(TAG, "Delayed reconnect skipped: disconnected since the watchdog fired")
                         } else {
                             // Clear our own handle before dialling: connect() cancels
                             // revivalReconnectJob, and the reconnect must not be
                             // cancelled by the connect() it makes (F9).
                             revivalReconnectJob = null
-                            true
+                            revivalConnector(url, code)
                         }
-                    }
-                    if (!wanted) {
-                        Log.i(TAG, "Delayed reconnect skipped: disconnected since the watchdog fired")
-                    } else {
-                        revivalConnector(url, code)
                     }
                 }
             }
