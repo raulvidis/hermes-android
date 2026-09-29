@@ -254,6 +254,12 @@ def set_pairing_code(code: str) -> None:
         previous = s.pairing_code
         s.pairing_code = code
         loop = s.loop
+        # Captured here, under the lock, and not read later by the coroutine: the
+        # drop is scheduled onto the relay's loop, and by the time it runs the
+        # phone may already have reconnected and authenticated with the NEW code
+        # (which is exactly what RelayClient.onPairingCodeRotated() does). Closing
+        # "whatever phone_ws is then" tore down that legitimate session.
+        stale_ws = s.phone_ws
 
     if previous == code:
         # Re-running setup with the same code must not drop a healthy session.
@@ -263,12 +269,30 @@ def set_pairing_code(code: str) -> None:
     # Never log the code itself: it grants full device control.
     logger.info("Pairing code updated — closing sessions authenticated with the old code")
     if loop is not None and loop.is_running():
-        asyncio.run_coroutine_threadsafe(_drop_phone_after_rotation(s), loop)
+        asyncio.run_coroutine_threadsafe(_drop_phone_after_rotation(s, stale_ws), loop)
 
 
-async def _drop_phone_after_rotation(state: "_RelayState") -> None:
-    """Close the phone session that was authenticated with a now-rotated code."""
-    await _cleanup_phone(state, reason="pairing code rotated")
+async def _drop_phone_after_rotation(
+    state: "_RelayState",
+    stale_ws: Optional[web.WebSocketResponse],
+) -> None:
+    """Close the phone session that was authenticated with a now-rotated code.
+
+    *stale_ws* is the socket that was current when the code changed, captured by
+    `set_pairing_code()` under `_relay_lock`. Passing it to `_cleanup_phone()` as
+    `expected_ws` is what makes the drop targeted: a session that reconnected and
+    authenticated with the NEW code in the meantime is left alone.
+
+    A `None` *stale_ws* means nothing was connected at rotation time, so there is
+    no old-code session to drop. It must not be forwarded as `expected_ws`:
+    `_cleanup_phone()` skips its identity guard for a `None`, which would close
+    whichever phone connected afterwards. In-flight requests are still failed, so
+    a caller cannot hang on a future whose phone is gone.
+    """
+    if stale_ws is None:
+        await _fail_inflight(state, "pairing code rotated")
+        return
+    await _cleanup_phone(state, reason="pairing code rotated", expected_ws=stale_ws)
 
 
 # ── Background event-loop entry point ─────────────────────────────────────────

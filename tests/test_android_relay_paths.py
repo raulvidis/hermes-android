@@ -450,6 +450,144 @@ class TestSslContext:
             relay_mod._ssl_context()
 
 
+class TestPairingRotationDrop:
+    """Review F17: rotation must close the session that authenticated with the OLD
+    code, not whatever socket is current when the coroutine gets to run.
+
+    `set_pairing_code()` schedules `_drop_phone_after_rotation()` on the relay's
+    loop with `run_coroutine_threadsafe`, so there is a window between deciding to
+    drop and dropping. `RelayClient.onPairingCodeRotated()` re-dials in exactly
+    that window — it is the behaviour AUTH-1 exists to produce — and a phone that
+    reconnects and authenticates with the NEW code before the coroutine runs was
+    closed anyway, because `_cleanup_phone()` was called without `expected_ws`.
+    Rotation then looked like it broke the connection, and the phone had to retry.
+    """
+
+    def test_the_old_code_session_is_closed_when_it_is_still_current(self, relay_mod):
+        """The behaviour rotation exists for — pinned so the targeting fix cannot
+        quietly turn into "never close anything"."""
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
+            stale = FakePhoneSocket()
+            state.phone_ws = stale
+            await relay_mod._drop_phone_after_rotation(state, stale)
+            return state, stale
+
+        state, stale = run(scenario())
+
+        assert stale.closed is True, "the session authenticated with the old code must go"
+        assert state.phone_ws is None
+
+    def test_a_session_that_reauthenticated_with_the_new_code_survives(self, relay_mod):
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
+            stale = FakePhoneSocket()
+            state.phone_ws = stale
+            # The phone reconnects with the NEW code before the drop runs. _handle_ws
+            # closes the superseded socket itself and publishes the replacement.
+            replacement = FakePhoneSocket()
+            state.phone_ws = replacement
+            await relay_mod._drop_phone_after_rotation(state, stale)
+            return state, stale, replacement
+
+        state, stale, replacement = run(scenario())
+
+        assert replacement.closed is False, (
+            "a session authenticated with the NEW code must survive rotation"
+        )
+        assert state.phone_ws is replacement, "the live session must not be unregistered"
+        assert stale.closed is False, (
+            "the drop targets the socket it was given; the reconnect path owns the "
+            "superseded one"
+        )
+
+    def test_a_phone_that_arrives_after_a_rotation_survives(
+        self, relay_mod
+    ):
+        """The other half: `expected_ws=None` must mean "there was nothing to
+        drop", not "drop whatever turns up" — `_cleanup_phone`'s guard is skipped
+        for a None `expected_ws`, so passing one through unchanged would still
+        close the newcomer."""
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
+            state.phone_ws = None
+            newcomer = FakePhoneSocket()
+            state.phone_ws = newcomer
+            await relay_mod._drop_phone_after_rotation(state, None)
+            return state, newcomer
+
+        state, newcomer = run(scenario())
+
+        assert newcomer.closed is False
+        assert state.phone_ws is newcomer
+
+    def test_set_pairing_code_captures_the_socket_it_saw(self, relay_mod, monkeypatch):
+        """The capture has to happen inside `set_pairing_code`, under `_relay_lock`.
+        Reading `state.phone_ws` later — from the coroutine, on the relay's loop —
+        is the bug: by then it may be a different socket."""
+        dropped = []
+
+        async def fake_drop(state, stale_ws):
+            dropped.append(stale_ws)
+
+        monkeypatch.setattr(relay_mod, "_drop_phone_after_rotation", fake_drop)
+
+        seen = FakePhoneSocket()
+        state = relay_mod._RelayState(pairing_code="OLDCODE", port=1)
+        state.phone_ws = seen
+
+        class RunningLoop:
+            def is_running(self):
+                return True
+
+        state.loop = RunningLoop()
+        monkeypatch.setattr(relay_mod, "_relay_instance", state)
+        scheduled = []
+        monkeypatch.setattr(
+            relay_mod.asyncio,
+            "run_coroutine_threadsafe",
+            lambda coro, loop: scheduled.append(coro),
+        )
+
+        relay_mod.set_pairing_code("NEWCODE")
+
+        assert len(scheduled) == 1
+        run(scheduled[0])
+        assert dropped == [seen], (
+            "the coroutine must be bound to the socket that was current at "
+            f"rotation time, got {dropped}"
+        )
+
+    def test_an_unchanged_code_still_drops_nothing(self, relay_mod, monkeypatch):
+        """Re-running setup with the same code must not touch a healthy session —
+        the early return has to survive the capture being added."""
+        dropped = []
+
+        async def fake_drop(state, stale_ws):
+            dropped.append(stale_ws)
+
+        monkeypatch.setattr(relay_mod, "_drop_phone_after_rotation", fake_drop)
+        state = relay_mod._RelayState(pairing_code="SAMECODE", port=1)
+        state.phone_ws = FakePhoneSocket()
+
+        class RunningLoop:
+            def is_running(self):
+                return True
+
+        state.loop = RunningLoop()
+        monkeypatch.setattr(relay_mod, "_relay_instance", state)
+        monkeypatch.setattr(
+            relay_mod.asyncio,
+            "run_coroutine_threadsafe",
+            lambda coro, loop: pytest.fail("nothing must be scheduled for an unchanged code"),
+        )
+
+        relay_mod.set_pairing_code("SAMECODE")
+
+        assert dropped == []
+        assert state.phone_ws.closed is False
+
+
 class TestRelayUrlScheme:
     """RELAY-2: get_relay_url() hardcoded http:// even when _ssl_context() is
     active, so any caller that trusted it attempted plaintext against a TLS
