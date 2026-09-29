@@ -371,14 +371,70 @@ class SmsSendReportTest {
         report.onResult(Activity.RESULT_OK)
         report.onResult(Activity.RESULT_OK)
 
-        val result = SmsSendReport.describe(report.await(timeout), parts = 3, timeoutMs = timeout)
+        val result = SmsSendReport.describe(report.awaitTally(timeout), parts = 3, timeoutMs = timeout)
 
         assertTrue(result.success)
         assertEquals("queued_unconfirmed", statusOf(result))
+        assertEquals(2, deliveredOf(result))
         assertTrue(
             "the segment count is not PII and says what is in flight: ${result.message}",
             result.message.contains("3"),
         )
+    }
+
+    /**
+     * Review F38: the `null` branch said "no send report arrived", but `null` only
+     * means the bound ran out with no failure recorded — segments may well have
+     * confirmed. The message then contradicted the `delivered` count sitting in the
+     * same response, and an agent reading "no report arrived" concludes nothing
+     * happened, which is the belief that produces a duplicate.
+     */
+    @Test
+    fun `the unconfirmed message agrees with the tally it reports`() {
+        val none = SmsSendReport.describe(
+            null,
+            parts = 3,
+            timeoutMs = 10_000L,
+            confirmedParts = 0,
+            reportedParts = 0,
+        )
+        assertEquals(0, deliveredOf(none))
+        assertTrue(
+            "with nothing confirmed, 'no report arrived' is accurate: ${none.message}",
+            none.message.contains("no send report arrived"),
+        )
+
+        val some = SmsSendReport.describe(
+            null,
+            parts = 3,
+            timeoutMs = 10_000L,
+            confirmedParts = 2,
+            reportedParts = 2,
+        )
+        assertEquals("queued_unconfirmed", statusOf(some))
+        assertEquals(2, deliveredOf(some))
+        assertFalse(
+            "two segments did report; the message must not say none did: ${some.message}",
+            some.message.contains("no send report arrived"),
+        )
+        assertTrue(
+            "and must say how much was confirmed: ${some.message}",
+            some.message.contains("2 of 3"),
+        )
+        assertTrue(
+            "and must still forbid the retry: ${some.message}",
+            some.message.contains("do not resend", ignoreCase = true),
+        )
+    }
+
+    @Test
+    fun `a single unconfirmed segment keeps the original wording`() {
+        // The common case must not regress into multipart phrasing.
+        val result = SmsSendReport.describe(null, parts = 1, timeoutMs = 10_000L)
+
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertTrue(result.message.contains("no send report arrived"))
+        assertFalse("no segment tally for a single-part send: ${result.message}", result.message.contains(" of 1 "))
     }
 
     /**

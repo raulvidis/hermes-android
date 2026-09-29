@@ -129,13 +129,17 @@ class SmsSendReport(private val expectedReports: Int = 1) {
     }
 
     /**
-     * The outcome, or `null` when no report arrived at all within [timeoutMs].
-     * `null` means "unconfirmed" — see [describe], which reports it as
-     * `queued_unconfirmed` rather than as a failure a caller would retry.
+     * The radio's answer, or `null` when the bound ran out with no failure recorded.
+     *
+     * `null` does **not** mean nothing was heard (review F38): segments may have
+     * reported `RESULT_OK` and simply not all of them. It means "unconfirmed" — see
+     * [describe], which reports it as `queued_unconfirmed` rather than as a failure a
+     * caller would retry, and which needs the tally to say how much was confirmed.
      *
      * A failure code is returned as soon as the latch is released, which is when
-     * every segment has reported *or* the bound ran out; read [reportedParts] to
-     * tell the two apart.
+     * every segment has reported *or* the bound ran out. Use [awaitTally] instead of
+     * this: it returns the completeness flag and the counts alongside the code, read
+     * as one snapshot, and without them a caller cannot tell those two apart.
      */
     fun await(timeoutMs: Long): Int? = awaitTally(timeoutMs).outcomeCode
 
@@ -188,12 +192,15 @@ class SmsSendReport(private val expectedReports: Int = 1) {
          *    segment reported** (review F30). That last clause is what makes it the
          *    only retry-safe answer: with all segments accounted for and none
          *    successful, the message definitively did not go out.
-         *  - [STATUS_QUEUED_UNCONFIRMED] — either no report at all inside the window
-         *    (review F14), or a failure with segments still unheard from. Both are
-         *    `success = true` with do-not-resend wording, because `success = false`
-         *    reads to the caller as "try again" and the recipient then gets the same
-         *    SMS twice. The failure variant still names the radio's reason and how
-         *    much of the tally is missing.
+         *  - [STATUS_QUEUED_UNCONFIRMED] — the bound ran out with something still
+         *    unknown: no report at all (review F14), some segments confirmed and the
+         *    rest silent (review F38), or a failure with segments still unheard from
+         *    (review F30). All are `success = true` with do-not-resend wording,
+         *    because `success = false` reads to the caller as "try again" and the
+         *    recipient then gets the same SMS twice. Each variant says what *is*
+         *    known — how many segments confirmed, or the radio's reason and how much
+         *    of the tally is missing — so the message never contradicts the
+         *    `delivered` count beside it.
          *
          * @param confirmedParts how many segments reported `RESULT_OK` — read
          *   [SmsSendReport.confirmedParts] after [SmsSendReport.await].
@@ -214,6 +221,21 @@ class SmsSendReport(private val expectedReports: Int = 1) {
             // the radio actually confirmed.
             val delivered = if (reportedCode == Activity.RESULT_OK) parts else confirmedParts
             return when {
+                // F38: `null` means the bound ran out with no failure recorded —
+                // not that nothing was heard. Segments may have confirmed, and the
+                // message has to agree with the `delivered` count in the same
+                // response, or the agent reads "no report arrived" as "nothing
+                // happened" and resends.
+                reportedCode == null && delivered > 0 -> ActionResult(
+                    true,
+                    "SMS was handed to the radio; $delivered of $parts segments were " +
+                        "confirmed within ${timeoutMs}ms and the rest never reported. " +
+                        "Delivery is unconfirmed. Do NOT resend: the confirmed " +
+                        "segments are already with the recipient and a retry would " +
+                        "duplicate them.",
+                    outcome(STATUS_QUEUED_UNCONFIRMED, parts, delivered),
+                )
+
                 reportedCode == null -> ActionResult(
                     true,
                     "SMS was handed to the radio but no send report arrived within " +

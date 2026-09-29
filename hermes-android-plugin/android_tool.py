@@ -891,9 +891,12 @@ def android_send_sms(to: str, body: str) -> str:
     radio confirmed every segment), "failed" (every segment reported and none
     succeeded, so the message did not go out and a retry is safe),
     "partially_sent" (some segments were confirmed and one failed), or
-    "queued_unconfirmed" (handed to the radio but no send report arrived in time).
-    Never resend on "partially_sent" or "queued_unconfirmed": the recipient already
-    has something, and a retry delivers it twice. Only "failed" is safe to retry.
+    "queued_unconfirmed" — which covers every case where something is unknown, not
+    only "the radio stayed quiet": no send report arrived in time, or only some
+    segments were confirmed before the window closed, or a segment failed while
+    others never reported at all. Never resend on "partially_sent" or
+    "queued_unconfirmed": the recipient already has something, and a retry delivers
+    it twice. Only "failed" is safe to retry.
     """
     try:
         data = _post("/send_sms", {"to": to, "body": body})

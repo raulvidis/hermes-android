@@ -1227,3 +1227,42 @@ class TestBridgeTlsVerification:
         tool_mod.android_ping()
 
         assert seen == [True]
+
+
+class TestSendSmsOutcomeDocumentation:
+    """F38: the bridge can answer `android_send_sms` with four statuses, and two of
+    them mean "do not resend". An agent only follows a rule it can read, and the
+    places it reads are the tool schema description and the handler docstring — so
+    both have to name every status and say which ones are not retryable.
+    """
+
+    STATUSES = ("sent", "failed", "partially_sent", "queued_unconfirmed")
+
+    def test_the_docstring_names_every_status_the_bridge_can_return(self, tool_mod):
+        doc = tool_mod.android_send_sms.__doc__ or ""
+        missing = [status for status in self.STATUSES if status not in doc]
+        assert not missing, f"the docstring does not mention {missing}"
+
+    def test_the_docstring_says_unconfirmed_covers_an_incomplete_tally(self, tool_mod):
+        """`queued_unconfirmed` is not only "the radio stayed quiet". It also covers
+        a segment that failed while others never reported, and a send where only some
+        segments confirmed before the window closed — both of which an agent would
+        otherwise read as a plain failure and retry."""
+        doc = tool_mod.android_send_sms.__doc__ or ""
+        assert "never reported" in doc, (
+            "the docstring must say queued_unconfirmed also covers segments that "
+            "never reported"
+        )
+
+    def test_the_docstring_says_only_failed_is_retryable(self, tool_mod):
+        doc = tool_mod.android_send_sms.__doc__ or ""
+        assert "Only \"failed\" is safe to retry" in doc
+
+    def test_the_schema_description_names_every_status(self, tool_mod):
+        description = tool_mod._SCHEMAS["android_send_sms"]["description"]
+        missing = [status for status in self.STATUSES if status not in description]
+        assert not missing, f"the schema description does not mention {missing}"
+
+    def test_the_schema_description_says_only_failed_is_retryable(self, tool_mod):
+        description = tool_mod._SCHEMAS["android_send_sms"]["description"]
+        assert "Only 'failed' is safe to retry" in description
