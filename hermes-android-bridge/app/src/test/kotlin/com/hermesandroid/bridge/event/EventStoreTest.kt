@@ -15,7 +15,6 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -333,29 +332,22 @@ class EventStoreTest {
     }
 
     @Test
-    fun `lowering the capacity does not trim the retained backlog`() {
-        // Characterisation, not an endorsement: eviction removes exactly one
-        // entry per add, so a backlog above the new cap is kept indefinitely.
-        // Bounded by the previous cap, so it is a staleness wart rather than a
-        // leak — but the field name promises something stronger than this.
+    fun `lowering the capacity trims the retained backlog on the next add`() {
+        // The field name promises a bound that holds *now*, not one that only
+        // applies once the backlog happens to drain: the next add evicts down to
+        // the new cap, so a lowered cap cannot keep serving stale entries.
         EventStore.maxCapacity = 5
         addSequence(5)
         EventStore.maxCapacity = 2
 
         addSequence(3)
 
-        assertEquals(5, EventStore.getAll(50).size)
+        val stored = EventStore.getAll(50)
+        assertEquals(2, stored.size)
+        assertEquals(listOf(3L, 2L), stored.map { it.timestamp })
     }
 
     @Test
-    @Ignore(
-        "BUG: EventStore.add() calls removeLast() on an empty ArrayDeque when " +
-            "maxCapacity <= 0, so the first event after such an assignment throws " +
-            "NoSuchElementException out of onAccessibilityEvent instead of being " +
-            "dropped. Not reachable today (nothing in the app writes maxCapacity), " +
-            "but the knob is public and the failure mode is a crash in a platform " +
-            "callback.",
-    )
     fun `a zero capacity drops events instead of throwing`() {
         EventStore.maxCapacity = 0
 

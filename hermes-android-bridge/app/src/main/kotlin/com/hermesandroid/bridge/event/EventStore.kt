@@ -48,9 +48,20 @@ object EventStore {
         )
 
         synchronized(lock) {
+            // Read the volatile knob once: a concurrent change must not make the
+            // eviction loop below disagree with this guard.
+            val capacity = maxCapacity
+            // A non-positive cap means "retain nothing", so drop the event.
+            // Without this guard the loop below would call removeLast() on an
+            // empty deque and throw NoSuchElementException out of
+            // onAccessibilityEvent.
+            if (capacity <= 0) return
             // ArrayDeque: head=newest (addFirst), tail=oldest (removeLast).
             // removeLast drops the oldest entry to make room for the new one.
-            if (events.size >= maxCapacity) {
+            // `while`, not `if`, so lowering maxCapacity trims an oversized
+            // backlog down to the new cap on the next add. capacity >= 1 here,
+            // so the deque is never empty when removeLast() runs.
+            while (events.size >= capacity) {
                 events.removeLast()
             }
             events.addFirst(entry)
