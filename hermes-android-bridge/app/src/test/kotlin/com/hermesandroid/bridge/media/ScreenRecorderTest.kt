@@ -28,7 +28,6 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -506,15 +505,6 @@ class ScreenRecorderTest {
     }
 
     @Test
-    @Ignore(
-        "BUG: a MediaRecorder whose configuration or prepare() throws is never " +
-            "released. record() assigns `recorder = mr` only after the apply{} " +
-            "block returns, so cleanupRecording() in the catch sees a null field " +
-            "and the native recorder (encoder + camera/projection client) leaks. " +
-            "Reachable on a real device whenever prepare() fails — codec " +
-            "unavailable, storage full, invalid surface — and the next capture " +
-            "then fails with the recorder still held.",
-    )
     fun `the recorder is released when prepare fails`() {
         grantPermission()
         every { anyConstructed<MediaRecorder>().prepare() } throws

@@ -87,7 +87,13 @@ object ScreenRecorder {
                 val height = metrics.heightPixels
                 val density = metrics.densityDpi
 
-                val mr = MediaRecorder(service).apply {
+                val mr = MediaRecorder(service)
+                // Published before configuring: if a setter or prepare() throws,
+                // cleanupRecording() in the catch below must already see the
+                // recorder, otherwise the native recorder (encoder + projection
+                // client) leaks and the next capture fails with it still held.
+                recorder = mr
+                mr.apply {
                     setVideoSource(MediaRecorder.VideoSource.SURFACE)
                     setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                     setOutputFile(outputFile.absolutePath)
@@ -97,7 +103,6 @@ object ScreenRecorder {
                     setVideoFrameRate(30)
                     prepare()
                 }
-                recorder = mr
 
                 val vd = projection.createVirtualDisplay(
                     "ScreenRecorder", width, height, density,
