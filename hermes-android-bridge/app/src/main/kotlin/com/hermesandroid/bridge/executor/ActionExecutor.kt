@@ -640,7 +640,16 @@ object ActionExecutor {
             } else {
                 smsManager.sendTextMessage(to, null, body, sentIntents.firstOrNull(), null)
             }
-            SmsSendReport.describe(report.await(timeoutMs), parts.size, timeoutMs)
+            SmsSendReport.describe(
+                report.await(timeoutMs),
+                parts.size,
+                timeoutMs,
+                // F23: read after the wait, so the tally is complete. Some
+                // segments confirmed plus one failure is "partially sent, do not
+                // resend", not the "failed, retry is safe" answer a bare failure
+                // code used to produce.
+                report.confirmedParts,
+            )
         } catch (e: SecurityException) {
             ActionResult(false, "SMS permission denied: ${e.javaClass.simpleName}")
         } catch (e: IllegalArgumentException) {

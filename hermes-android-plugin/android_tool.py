@@ -810,11 +810,13 @@ def android_send_sms(to: str, body: str) -> str:
     Requires SMS permission on the phone.
     Destructive action — confirm recipient and message with the user first.
 
-    Call it once. The response carries a status: "sent" (the radio confirmed every
-    segment), "failed" (the radio reported an error — the message did not go out,
-    so a retry is safe), or "queued_unconfirmed" (handed to the radio but no send
-    report arrived in time). Never resend on "queued_unconfirmed": the recipient
-    may already have it and a retry delivers it twice.
+    Call it once. The response carries a status and a segment tally: "sent" (the
+    radio confirmed every segment), "failed" (the radio reported an error and
+    delivered is 0, so the message did not go out and a retry is safe),
+    "partially_sent" (some segments were confirmed and one failed), or
+    "queued_unconfirmed" (handed to the radio but no send report arrived in time).
+    Never resend on "partially_sent" or "queued_unconfirmed": the recipient already
+    has something, and a retry delivers it twice. Only "failed" is safe to retry.
     """
     try:
         data = _post("/send_sms", {"to": to, "body": body})
@@ -1721,7 +1723,7 @@ _SCHEMAS = {
     },
     "android_send_sms": {
         "name": "android_send_sms",
-        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission. Call it once: a response status of 'queued_unconfirmed' means the radio has the message but never confirmed it, and resending would deliver it twice. Only 'failed' is safe to retry.",
+        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission. Call it once and read the status: 'sent' confirmed every segment; 'failed' means nothing went out and a retry is safe; 'partially_sent' and 'queued_unconfirmed' mean the recipient already has some or all of it, so resending would deliver it twice. Only 'failed' is safe to retry.",
         "parameters": {
             "type": "object",
             "properties": {

@@ -68,8 +68,10 @@ class SmsSendReportTest {
     }
 
     @Test
-    fun `a failure is returned immediately without waiting out the timeout`() {
-        val report = SmsSendReport(expectedReports = 3)
+    fun `a single-segment failure is returned immediately`() {
+        // Nothing else can arrive for a one-segment send, so waiting out the bound
+        // would only cost the caller ten seconds.
+        val report = SmsSendReport(expectedReports = 1)
         report.onResult(SmsManager.RESULT_ERROR_GENERIC_FAILURE)
 
         val started = System.nanoTime()
@@ -78,6 +80,43 @@ class SmsSendReportTest {
 
         assertEquals(SmsManager.RESULT_ERROR_GENERIC_FAILURE, result)
         assertTrue("a known failure must not stall the request, took ${elapsedMs}ms", elapsedMs < 5_000L)
+    }
+
+    /**
+     * Review F23: a multipart send used to answer on the first failed segment, so
+     * the confirmed count was whatever had happened to arrive by then. That cannot
+     * distinguish "no segment went out" — safe to retry — from "the first two did",
+     * where a retry delivers them a second time to the same recipient. The
+     * remaining reports are waited for, up to the same bound as everything else.
+     */
+    @Test
+    fun `a multipart failure waits for the remaining segment reports`() {
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
+
+        val started = System.nanoTime()
+        val outcome = report.await(timeout)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+
+        assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE, outcome)
+        assertEquals(1, report.confirmedParts)
+        assertTrue(
+            "one segment report is still outstanding, so the count is not final " +
+                "yet; waited ${elapsedMs}ms of a ${timeout}ms bound",
+            elapsedMs >= timeout - 100L,
+        )
+    }
+
+    @Test
+    fun `every segment report is counted before the outcome is decided`() {
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(SmsManager.RESULT_ERROR_RADIO_OFF)
+
+        assertEquals(SmsManager.RESULT_ERROR_RADIO_OFF, report.await(timeout))
+        assertEquals("both confirmed segments must be counted", 2, report.confirmedParts)
     }
 
     @Test
@@ -166,6 +205,70 @@ class SmsSendReportTest {
         )
     }
 
+    /**
+     * Review F23: `failed` is documented to the agent as "the send definitively
+     * did not happen, a retry is safe". For a multipart send with some segments
+     * already confirmed that is false — the recipient has those segments, and a
+     * retry gives them the same opening twice.
+     */
+    @Test
+    fun `a multipart send with confirmed segments is partially sent, not failed`() {
+        val result = SmsSendReport.describe(
+            SmsManager.RESULT_ERROR_NO_SERVICE,
+            parts = 3,
+            timeoutMs = 10_000L,
+            confirmedParts = 2,
+        )
+
+        assertTrue(
+            "success=false is read as 'try again', which duplicates the segments " +
+                "the recipient already has",
+            result.success,
+        )
+        assertEquals("partially_sent", statusOf(result))
+        assertEquals(2, deliveredOf(result))
+        assertTrue(
+            "the message must forbid the retry: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
+        )
+        assertTrue(
+            "and must say what did arrive: ${result.message}",
+            result.message.contains("2") && result.message.contains("3"),
+        )
+        assertTrue(
+            "and must name the radio reason: ${result.message}",
+            result.message.contains("no service", ignoreCase = true),
+        )
+    }
+
+    @Test
+    fun `a failure with no segment confirmed stays a retryable failure`() {
+        val result = SmsSendReport.describe(
+            SmsManager.RESULT_ERROR_RADIO_OFF,
+            parts = 3,
+            timeoutMs = 10_000L,
+            confirmedParts = 0,
+        )
+
+        assertFalse(result.success)
+        assertEquals("failed", statusOf(result))
+        assertEquals(0, deliveredOf(result))
+        assertTrue(result.message.contains("radio off", ignoreCase = true))
+    }
+
+    @Test
+    fun `a single-segment failure is never partially sent`() {
+        val result = SmsSendReport.describe(
+            SmsManager.RESULT_ERROR_GENERIC_FAILURE,
+            parts = 1,
+            timeoutMs = 10_000L,
+            confirmedParts = 0,
+        )
+
+        assertFalse(result.success)
+        assertEquals("failed", statusOf(result))
+    }
+
     @Test
     fun `only a definite radio report is a failure`() {
         // The line the contract turns on: a report saying the send failed is a
@@ -250,6 +353,7 @@ class SmsSendReportTest {
             SmsSendReport.describe(SmsManager.RESULT_ERROR_RADIO_OFF, 1, 10_000L),
             SmsSendReport.describe(SmsManager.RESULT_ERROR_LIMIT_EXCEEDED, 2, 10_000L),
             SmsSendReport.describe(9_999, 1, 10_000L),
+            SmsSendReport.describe(SmsManager.RESULT_ERROR_NO_SERVICE, 3, 10_000L, 2),
         )
         for (outcome in outcomes) {
             assertFalse(
@@ -258,7 +362,8 @@ class SmsSendReportTest {
             )
             assertTrue(
                 "every outcome carries a machine-readable status",
-                statusOf(outcome) in setOf("sent", "queued_unconfirmed", "failed"),
+                statusOf(outcome) in
+                    setOf("sent", "queued_unconfirmed", "partially_sent", "failed"),
             )
         }
     }
@@ -268,5 +373,12 @@ class SmsSendReportTest {
         val data = result.data as? Map<String, Any?>
         assertNotNull("the outcome carries no status: $result", data)
         return data!!["status"] as String
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun deliveredOf(result: ActionResult): Int {
+        val data = result.data as? Map<String, Any?>
+        assertNotNull("the outcome carries no segment tally: $result", data)
+        return data!!["delivered"] as Int
     }
 }

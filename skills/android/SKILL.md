@@ -192,13 +192,15 @@ and the exact text, get an explicit yes, then call `android_send_sms(to, body)`
 once. `android_send_sms` sends immediately and must be confirmed with the user
 first.
 
-Call it **once**, whatever comes back. The response carries a `status`: `sent`
-means the radio confirmed every segment; `failed` means the radio reported an
-error, so the message did not go out and a retry is safe; `queued_unconfirmed`
-means the message was handed to the radio but no send report arrived inside the
-10 s window — **do not resend**. It is reported as a success precisely so a caller
-does not retry and deliver the same SMS twice. Say it could not be confirmed and
-stop.
+Call it **once**, whatever comes back. The response carries a `status` and a
+segment tally: `sent` means the radio confirmed every segment; `failed` means the
+radio reported an error and `delivered` is 0, so nothing went out and a retry is
+safe; `partially_sent` means some segments were confirmed and one failed, so the
+recipient already has the opening of the message; `queued_unconfirmed` means the
+message was handed to the radio but no send report arrived inside the 10 s window.
+For the last two — **do not resend**. They are reported as successes precisely so
+a caller does not retry and deliver the same SMS twice. Say what was and was not
+confirmed, and stop.
 
 **Contact lookup:** `android_search_contacts("<name>")` returns numbers directly — don't navigate the Contacts app.
 

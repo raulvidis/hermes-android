@@ -22,8 +22,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * JVM tests instead of needing a radio.
  *
  * One report per segment: a multipart send fires the sentIntent once per part, so
- * the message is only confirmed when every part reports, and a single failure
- * wins immediately rather than waiting out the timeout for the rest.
+ * the message is only confirmed when every part reports. A failure ends the wait
+ * immediately for a single-segment send, but a multipart one keeps waiting for the
+ * remaining reports (review F23): answering on the first failure could not say
+ * whether the segments that already went out did, and that is the difference
+ * between a retry that is safe and one that duplicates part of the message.
  *
  * An absent report is *not* a failure. The message was handed to the radio and
  * the report merely did not arrive inside the bound, so [describe] answers
@@ -37,16 +40,36 @@ class SmsSendReport(private val expectedReports: Int = 1) {
 
     private val latch = CountDownLatch(maxOf(expectedReports, 1))
     private val failure = AtomicInteger(NOT_YET)
+    private val confirmed = AtomicInteger(0)
+
+    /**
+     * How many segments reported `RESULT_OK`. Read after [await].
+     *
+     * This is what separates "the send did not happen" from "part of it did"
+     * (review F23). Incremented before [CountDownLatch.countDown], so every report
+     * that contributed to releasing the latch is visible to the reader.
+     */
+    val confirmedParts: Int
+        get() = confirmed.get()
 
     /** Called from the BroadcastReceiver with the platform's result code. */
     fun onResult(resultCode: Int) {
         if (resultCode != Activity.RESULT_OK) {
-            // One bad segment is the answer; stop waiting for the others so a
-            // failure costs no more than the time it took to arrive.
             failure.compareAndSet(NOT_YET, resultCode)
-            while (latch.count > 0) latch.countDown()
+            if (expectedReports <= 1) {
+                // A single-segment send has nothing left to report, so waiting out
+                // the bound would only cost the caller ten seconds.
+                latch.countDown()
+                return
+            }
+            // Multipart (review F23): keep waiting for the remaining reports.
+            // Answering on the first failure cannot distinguish "no segment went
+            // out" — safe to retry — from "the first two did", where a retry
+            // delivers them to the same recipient a second time. The wait is
+            // bounded by the same [await] timeout as everything else.
             return
         }
+        confirmed.incrementAndGet()
         latch.countDown()
     }
 
@@ -71,7 +94,13 @@ class SmsSendReport(private val expectedReports: Int = 1) {
         /** Handed to the radio, no report inside the window. Do not resend. */
         const val STATUS_QUEUED_UNCONFIRMED = "queued_unconfirmed"
 
-        /** A report arrived and said the send failed. A retry is safe. */
+        /**
+         * Some segments were confirmed and one reported a failure. Do not resend:
+         * the recipient already has the confirmed ones.
+         */
+        const val STATUS_PARTIALLY_SENT = "partially_sent"
+
+        /** A report arrived and said the send failed, with nothing confirmed. A retry is safe. */
         const val STATUS_FAILED = "failed"
 
         /**
@@ -82,42 +111,76 @@ class SmsSendReport(private val expectedReports: Int = 1) {
          * and message content to be stripped from tool responses, and the
          * segment count is the only send detail that is safe to surface.
          *
-         * Three outcomes, and the line between them is whether the radio *said*
-         * something:
+         * Four outcomes. The line between them is what the radio said, and how
+         * much of the message got out:
          *  - [STATUS_SENT] — every segment reported `RESULT_OK`;
-         *  - [STATUS_FAILED] — a report arrived and was not `RESULT_OK`, so the
-         *    send definitively did not happen and a retry is safe;
+         *  - [STATUS_FAILED] — a report arrived, was not `RESULT_OK`, and **no**
+         *    segment was confirmed, so the send definitively did not happen and a
+         *    retry is safe;
+         *  - [STATUS_PARTIALLY_SENT] — a report failed but other segments were
+         *    confirmed (review F23). `success = true` and do-not-resend, for the
+         *    same reason as below: the recipient already has those segments, and
+         *    "failed" told the caller a retry was safe, so they got the opening of
+         *    the message twice;
          *  - [STATUS_QUEUED_UNCONFIRMED] — no report inside the window. Reported
          *    as `success = true` (review F14): the message was handed to the
          *    radio, and `success = false` read to the caller as "try again", so
          *    the recipient got the same SMS twice whenever the first one was
          *    merely slow. The message says not to resend and why.
+         *
+         * @param confirmedParts how many segments reported `RESULT_OK` — read
+         *   [SmsSendReport.confirmedParts] after [SmsSendReport.await]. Defaults to
+         *   0 so the single-segment call sites keep their three-argument shape.
          */
-        fun describe(reportedCode: Int?, parts: Int, timeoutMs: Long): ActionResult =
-            when (reportedCode) {
-                null -> ActionResult(
+        fun describe(
+            reportedCode: Int?,
+            parts: Int,
+            timeoutMs: Long,
+            confirmedParts: Int = 0,
+        ): ActionResult {
+            // A confirmed send delivered every segment; anything else reports what
+            // the radio actually confirmed.
+            val delivered = if (reportedCode == Activity.RESULT_OK) parts else confirmedParts
+            return when {
+                reportedCode == null -> ActionResult(
                     true,
                     "SMS was handed to the radio but no send report arrived within " +
                         "${timeoutMs}ms; delivery is unconfirmed" +
                         (if (parts > 1) " ($parts segments were in flight)" else "") +
                         ". Do NOT resend: the message may already have been " +
                         "delivered and a retry would duplicate it.",
-                    mapOf("status" to STATUS_QUEUED_UNCONFIRMED, "parts" to parts),
+                    outcome(STATUS_QUEUED_UNCONFIRMED, parts, delivered),
                 )
 
-                Activity.RESULT_OK ->
-                    ActionResult(
-                        true,
-                        if (parts > 1) "SMS sent ($parts parts)" else "SMS sent",
-                        mapOf("status" to STATUS_SENT, "parts" to parts),
-                    )
+                reportedCode == Activity.RESULT_OK -> ActionResult(
+                    true,
+                    if (parts > 1) "SMS sent ($parts parts)" else "SMS sent",
+                    outcome(STATUS_SENT, parts, delivered),
+                )
+
+                // F23: some segments are already with the recipient, so this is not
+                // the "definitely did not happen, retry is safe" case.
+                delivered > 0 -> ActionResult(
+                    true,
+                    "SMS partially sent: $delivered of $parts segments were confirmed " +
+                        "and the rest failed (${reason(reportedCode)}). Do NOT resend: " +
+                        "the recipient already has the confirmed segments and a retry " +
+                        "would duplicate them. Tell the user the message was only " +
+                        "partly delivered.",
+                    outcome(STATUS_PARTIALLY_SENT, parts, delivered),
+                )
 
                 else -> ActionResult(
                     false,
                     "SMS send failed: ${reason(reportedCode)}",
-                    mapOf("status" to STATUS_FAILED, "parts" to parts),
+                    outcome(STATUS_FAILED, parts, delivered),
                 )
             }
+        }
+
+        /** The machine-readable half of an outcome. Segment counts are not PII. */
+        private fun outcome(status: String, parts: Int, delivered: Int): Map<String, Any> =
+            mapOf("status" to status, "parts" to parts, "delivered" to delivered)
 
         /**
          * Human-readable radio reason. The `RESULT_SMS_*` names this used to be
