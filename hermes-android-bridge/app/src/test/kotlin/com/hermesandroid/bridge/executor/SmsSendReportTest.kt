@@ -108,6 +108,14 @@ class SmsSendReportTest {
         )
     }
 
+    /**
+     * Review F29: a failed report never counted the latch down, so the latch only
+     * reached zero when every *successful* report had arrived. A three-segment send
+     * that got two OKs and one failure — i.e. every report the radio was ever going
+     * to send — still sat out the whole bound, because one count was outstanding
+     * forever. F23 introduced the wait to make the tally complete; this is what makes
+     * it end when the tally actually is.
+     */
     @Test
     fun `every segment report is counted before the outcome is decided`() {
         val report = SmsSendReport(expectedReports = 3)
@@ -115,8 +123,57 @@ class SmsSendReportTest {
         report.onResult(Activity.RESULT_OK)
         report.onResult(SmsManager.RESULT_ERROR_RADIO_OFF)
 
-        assertEquals(SmsManager.RESULT_ERROR_RADIO_OFF, report.await(timeout))
+        val started = System.nanoTime()
+        val outcome = report.await(5_000L)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+
+        assertEquals(SmsManager.RESULT_ERROR_RADIO_OFF, outcome)
         assertEquals("both confirmed segments must be counted", 2, report.confirmedParts)
+        assertTrue(
+            "all three reports had arrived; waiting ${elapsedMs}ms more is pure latency",
+            elapsedMs < 1_000L,
+        )
+    }
+
+    @Test
+    fun `an all-failed multipart send also answers as soon as the last report lands`() {
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(SmsManager.RESULT_ERROR_RADIO_OFF)
+        report.onResult(SmsManager.RESULT_ERROR_RADIO_OFF)
+
+        val started = System.nanoTime()
+        report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
+        val outcome = report.await(5_000L)
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+
+        assertEquals(
+            "the first failure code is the one reported",
+            SmsManager.RESULT_ERROR_RADIO_OFF,
+            outcome,
+        )
+        assertEquals(0, report.confirmedParts)
+        assertEquals(3, report.reportedParts)
+        assertTrue("waited ${elapsedMs}ms for reports that had all arrived", elapsedMs < 1_000L)
+    }
+
+    @Test
+    fun `reportedParts counts every report, success or failure`() {
+        val report = SmsSendReport(expectedReports = 4)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
+        report.onResult(Activity.RESULT_OK)
+
+        assertEquals(2, report.confirmedParts)
+        assertEquals(3, report.reportedParts)
+    }
+
+    @Test
+    fun `a single-segment failure is still immediate`() {
+        val report = SmsSendReport(expectedReports = 1)
+        report.onResult(SmsManager.RESULT_ERROR_GENERIC_FAILURE)
+
+        assertEquals(1, report.reportedParts)
+        assertEquals(SmsManager.RESULT_ERROR_GENERIC_FAILURE, report.await(timeout))
     }
 
     @Test

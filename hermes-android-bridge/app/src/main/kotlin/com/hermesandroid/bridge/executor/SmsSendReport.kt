@@ -22,11 +22,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * JVM tests instead of needing a radio.
  *
  * One report per segment: a multipart send fires the sentIntent once per part, so
- * the message is only confirmed when every part reports. A failure ends the wait
- * immediately for a single-segment send, but a multipart one keeps waiting for the
- * remaining reports (review F23): answering on the first failure could not say
- * whether the segments that already went out did, and that is the difference
- * between a retry that is safe and one that duplicates part of the message.
+ * the message is only confirmed when every part reports. Every report counts the
+ * latch down whether it succeeded or failed (review F29), so the wait ends as soon
+ * as the last segment is heard from and only runs to the bound when a report never
+ * arrives. Waiting for all of them is what makes the tally trustworthy: answering
+ * on the first failure could not say whether the segments that already went out
+ * did, and that is the difference between a retry that is safe and one that
+ * duplicates part of the message (review F23).
  *
  * An absent report is *not* a failure. The message was handed to the radio and
  * the report merely did not arrive inside the bound, so [describe] answers
@@ -41,6 +43,7 @@ class SmsSendReport(private val expectedReports: Int = 1) {
     private val latch = CountDownLatch(maxOf(expectedReports, 1))
     private val failure = AtomicInteger(NOT_YET)
     private val confirmed = AtomicInteger(0)
+    private val rejected = AtomicInteger(0)
 
     /**
      * How many segments reported `RESULT_OK`. Read after [await].
@@ -52,31 +55,44 @@ class SmsSendReport(private val expectedReports: Int = 1) {
     val confirmedParts: Int
         get() = confirmed.get()
 
+    /**
+     * How many segments reported at all, successfully or not. Read after [await].
+     *
+     * `confirmedParts + rejected`, i.e. the tally's completeness: `failed` is only
+     * a safe answer when every segment reported and none of them succeeded, because
+     * a segment that never reported may still have gone out (review F30).
+     */
+    val reportedParts: Int
+        get() = confirmed.get() + rejected.get()
+
     /** Called from the BroadcastReceiver with the platform's result code. */
     fun onResult(resultCode: Int) {
         if (resultCode != Activity.RESULT_OK) {
+            // The first failure code is the one reported; later ones are counted, so
+            // [reportedParts] can say whether the tally is complete.
             failure.compareAndSet(NOT_YET, resultCode)
-            if (expectedReports <= 1) {
-                // A single-segment send has nothing left to report, so waiting out
-                // the bound would only cost the caller ten seconds.
-                latch.countDown()
-                return
-            }
-            // Multipart (review F23): keep waiting for the remaining reports.
-            // Answering on the first failure cannot distinguish "no segment went
-            // out" — safe to retry — from "the first two did", where a retry
-            // delivers them to the same recipient a second time. The wait is
-            // bounded by the same [await] timeout as everything else.
-            return
+            rejected.incrementAndGet()
+        } else {
+            confirmed.incrementAndGet()
         }
-        confirmed.incrementAndGet()
+        // Every report counts the latch down, success or failure (review F29). The
+        // latch means "every segment has reported", which is the point the tally is
+        // complete — and completeness is what separates a retry that is safe from
+        // one that duplicates part of the message (F23, F30). A failure used to
+        // leave its count outstanding, so a multipart send that had heard from every
+        // segment the radio was ever going to report still sat out the whole bound.
+        // A single-segment send is unchanged: one report, one count down, immediate.
         latch.countDown()
     }
 
     /**
-     * The outcome, or `null` when no conclusive report arrived within
-     * [timeoutMs]. `null` means "unconfirmed" — see [describe], which reports it
-     * as `queued_unconfirmed` rather than as a failure a caller would retry.
+     * The outcome, or `null` when no report arrived at all within [timeoutMs].
+     * `null` means "unconfirmed" — see [describe], which reports it as
+     * `queued_unconfirmed` rather than as a failure a caller would retry.
+     *
+     * A failure code is returned as soon as the latch is released, which is when
+     * every segment has reported *or* the bound ran out; read [reportedParts] to
+     * tell the two apart.
      */
     fun await(timeoutMs: Long): Int? {
         val completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
