@@ -217,11 +217,15 @@ See [SECURITY.md](SECURITY.md) for details. Key points:
   one
 - Phone connects out to the relay — but it also listens on `0.0.0.0:8765` for
   direct USB/LAN use, with no toggle, so it is reachable from the local network
-- `wss://` by default for a public relay host; plaintext `ws://` allows command
-  injection, not just sniffing, so keep it to a LAN you control. Relay-side TLS
-  needs `ANDROID_RELAY_CERT` + `ANDROID_RELAY_KEY` (or a TLS reverse proxy in
-  front); the app validates with the platform trust store, so the certificate
-  must be CA-trusted — no self-signed certs, no pinning, no bypass
+- `wss://` when you ask for it: the scheme you type wins, and a bare relay host
+  dials plaintext `ws://` (the phone cannot know whether the relay was given a
+  certificate). `android_setup` prints the address with the scheme the relay is
+  really serving — `wss://ip:8766` with `ANDROID_RELAY_CERT` + `ANDROID_RELAY_KEY`
+  set, `ws://ip:8766` without — and the app draws a persistent red warning plus a
+  toast on plaintext to a non-private host. Plaintext `ws://` allows command
+  injection, not just sniffing, so keep it to a LAN you control. The app validates
+  with the platform trust store, so the certificate must be CA-trusted — no
+  self-signed certs, no pinning, no bypass
 - Password fields are redacted from screen reads and events; screenshots and
   screen recordings are pixels and are not
 - Full device access once paired (screen, input, microphone, SMS, calls, contacts,

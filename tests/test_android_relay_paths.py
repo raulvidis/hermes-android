@@ -450,6 +450,73 @@ class TestSslContext:
             relay_mod._ssl_context()
 
 
+class TestRelayUrlScheme:
+    """RELAY-2: get_relay_url() hardcoded http:// even when _ssl_context() is
+    active, so any caller that trusted it attempted plaintext against a TLS
+    listener. The scheme now follows the same configuration the relay serves
+    with, and android_setup uses the same predicate to print an address the app
+    can actually dial (TRANS-1)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_tls(self, monkeypatch):
+        monkeypatch.delenv("ANDROID_RELAY_CERT", raising=False)
+        monkeypatch.delenv("ANDROID_RELAY_KEY", raising=False)
+
+    def test_plaintext_without_a_certificate(self, relay_mod, monkeypatch):
+        monkeypatch.setattr(relay_mod, "_relay_instance", None)
+        monkeypatch.setattr(relay_mod, "_relay_port", lambda: 19555)
+
+        assert relay_mod.is_tls_configured() is False
+        assert relay_mod.get_relay_url() == "http://localhost:19555"
+
+    def test_tls_scheme_when_both_paths_are_configured(self, relay_mod, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/cert.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        state = relay_mod._RelayState(pairing_code="PAIRCODE", port=19556)
+        monkeypatch.setattr(relay_mod, "_relay_instance", state)
+
+        assert relay_mod.is_tls_configured() is True
+        assert relay_mod.get_relay_url() == "https://localhost:19556"
+
+    @pytest.mark.parametrize("present", ["cert", "key"], ids=["cert_only", "key_only"])
+    def test_half_a_configuration_stays_plaintext(self, relay_mod, monkeypatch, present):
+        """Matches _ssl_context(): one path is not TLS, so the URL must not claim
+        https:// against a listener that is serving plaintext."""
+        monkeypatch.setenv(
+            "ANDROID_RELAY_CERT" if present == "cert" else "ANDROID_RELAY_KEY", "/tmp/x.pem"
+        )
+        monkeypatch.setattr(relay_mod, "_relay_instance", None)
+        monkeypatch.setattr(relay_mod, "_relay_port", lambda: 19557)
+
+        assert relay_mod.is_tls_configured() is False
+        assert relay_mod.get_relay_url() == "http://localhost:19557"
+
+    def test_the_url_scheme_agrees_with_the_context_that_is_served(
+        self, relay_mod, monkeypatch
+    ):
+        """The invariant RELAY-2 named: whatever _ssl_context() decides, the URL
+        reports the same transport."""
+        monkeypatch.setattr(relay_mod, "_relay_instance", None)
+        monkeypatch.setattr(relay_mod, "_relay_port", lambda: 19558)
+        monkeypatch.setattr(
+            ssl.SSLContext,
+            "load_cert_chain",
+            lambda self, certfile, keyfile: None,
+        )
+
+        monkeypatch.delenv("ANDROID_RELAY_CERT", raising=False)
+        monkeypatch.delenv("ANDROID_RELAY_KEY", raising=False)
+        assert (relay_mod._ssl_context() is None) == (
+            not relay_mod.get_relay_url().startswith("https://")
+        )
+
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/cert.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        assert (relay_mod._ssl_context() is not None) == (
+            relay_mod.get_relay_url().startswith("https://")
+        )
+
+
 class TestServe:
     """_serve builds the app, starts the site and blocks until shutdown. The site
     is faked so no port is bound."""

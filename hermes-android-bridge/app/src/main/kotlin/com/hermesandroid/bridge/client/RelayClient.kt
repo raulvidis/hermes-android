@@ -544,8 +544,9 @@ object RelayClient {
 
     /**
      * TRANS-1: the scheme decision lives in [RelayUrl] so it can be tested as a
-     * table. A bare public host now defaults to `wss://`; private/LAN hosts and
-     * explicit schemes keep the old behaviour.
+     * table. An explicit scheme always wins; a bare host keeps the plaintext
+     * `ws://` it has always dialled, because only the operator knows whether the
+     * relay is serving a certificate.
      *
      * Internal (test seam): `RelayClientBuildWsUrlTest` pins the delegation.
      */

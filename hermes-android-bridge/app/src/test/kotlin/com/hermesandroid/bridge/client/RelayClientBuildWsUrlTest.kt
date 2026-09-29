@@ -12,9 +12,12 @@ import org.junit.Test
  * case: it is "the bridge never connects". Three contracts matter:
  *  - scheme mapping: http→ws, https→wss, ws and wss kept (a TLS URL must
  *    never be downgraded to plaintext by the rewrite), and — TRANS-1 — a bare
- *    host with no scheme defaults to wss unless it is a private/LAN name, so
- *    the pairing code never travels in plaintext to a public relay. The rule
- *    table itself is pinned in [RelayUrlTest]; these cases pin the delegation;
+ *    host with no scheme keeps the plaintext ws:// it has always produced,
+ *    because the relay only terminates TLS when a certificate is configured.
+ *    Getting TLS is therefore an explicit `wss://`/`https://`, which the
+ *    rewrite must preserve, and a plaintext dial to a non-private host stays
+ *    visible through `RelayUrl.isPlaintextToPublicHost`. The rule table itself
+ *    is pinned in [RelayUrlTest]; these cases pin the delegation;
  *  - the default relay port 8766 is appended only when the URL carries no
  *    port (a URL that names a port is left alone — custom relays and direct
  *    USB/LAN setups both depend on that);
@@ -71,10 +74,25 @@ class RelayClientBuildWsUrlTest {
     }
 
     @Test
-    fun `a bare public host defaults to wss on the default relay port`() {
+    fun `a bare public host keeps ws on the default relay port`() {
+        // The address android_setup prints when the relay has no certificate.
+        // Defaulting it to wss:// made the documented setup fail the handshake.
         assertEquals(
-            "wss://relay.example.com:8766/ws",
+            "ws://relay.example.com:8766/ws",
             RelayClient.buildWsUrl("relay.example.com"),
+        )
+    }
+
+    @Test
+    fun `the explicit scheme android_setup emits survives the rewrite`() {
+        // android_setup prints wss://ip:port when ANDROID_RELAY_CERT/KEY are set.
+        assertEquals(
+            "wss://203.0.113.7:8766/ws",
+            RelayClient.buildWsUrl("wss://203.0.113.7:8766"),
+        )
+        assertEquals(
+            "ws://203.0.113.7:8766/ws",
+            RelayClient.buildWsUrl("ws://203.0.113.7:8766"),
         )
     }
 

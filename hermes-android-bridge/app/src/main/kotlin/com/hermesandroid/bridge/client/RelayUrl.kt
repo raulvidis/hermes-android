@@ -3,7 +3,7 @@ package com.hermesandroid.bridge.client
 /**
  * TRANS-1: relay URL → WebSocket URL, and the plaintext-transport decision.
  *
- * The previous rule was "TLS only if the user typed `https://` or `wss://`", so a
+ * The original rule was "TLS only if the user typed `https://` or `wss://`", so a
  * bare `relay.example.com` silently became cleartext `ws://`. A plaintext
  * WebSocket has no integrity protection, so an on-path attacker does not merely
  * *read* the session: they can append server→client frames to the established TCP
@@ -11,14 +11,26 @@ package com.hermesandroid.bridge.client
  * `authenticated = true` (connection-time auth is the only gate). Command
  * injection, not just sniffing — and no credential required.
  *
- * Rule now, deliberately conservative so LAN users are not broken:
+ * Defaulting every bare public host to `wss://` was tried and reverted: the relay
+ * only terminates TLS when `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` are set, and
+ * `android_setup` told the user to type a bare `public_ip:port`. So the documented
+ * setup — and every URL already stored in prefs — started failing the TLS
+ * handshake against a plaintext listener. The phone cannot know whether the
+ * operator configured a certificate; the operator can, and now says so.
+ *
+ * Rule:
  *  - an explicit scheme always wins (`http`→`ws`, `https`→`wss`, `ws`→`ws`,
- *    `wss`→`wss`, case-insensitively) — nobody's typed URL changes meaning;
- *  - a bare host that is loopback / RFC1918 / link-local / unique-local IPv6 /
- *    `.local` (or a single-label name, which only resolves inside a local search
- *    domain) stays `ws://`, exactly as before: there is no certificate to present
- *    on a LAN;
- *  - any other bare host defaults to `wss://`.
+ *    `wss`→`wss`, case-insensitively) — nobody's typed URL changes meaning, and
+ *    this is how TLS is opted into;
+ *  - a bare host of any kind dials `ws://`, the long-standing behaviour, so an
+ *    upgrade cannot break a working install.
+ *
+ * What keeps TRANS-1 visible is [isPlaintextToPublicHost]: a `ws://` dial to a
+ * host that is not private draws a toast and a persistent red line on the relay
+ * status in `MainActivity`, saying plainly that plaintext can be injected into.
+ * `android_setup` emits the matching explicit scheme (`wss://ip:port` when the
+ * relay has a certificate, `ws://ip:port` when it does not), so the address it
+ * prints never relies on the bare-host fallback.
  *
  * Pure string/host logic with no Android dependencies, so the table is testable.
  */
@@ -34,17 +46,13 @@ object RelayUrl {
         val trimmed = serverUrl.trim().trimEnd('/')
         val lower = trimmed.lowercase()
         val explicitTls = lower.startsWith("https://") || lower.startsWith("wss://")
-        val explicitPlaintext = lower.startsWith("http://") || lower.startsWith("ws://")
         val authority = stripScheme(trimmed, lower)
         // Unchanged from the previous behaviour: an authority that already names a
         // port (or an IPv6 literal, which is full of colons) is left alone.
         val withPort = if (authority.contains(":")) authority else "$authority:$DEFAULT_PORT"
-        val scheme = when {
-            explicitTls -> "wss"
-            explicitPlaintext -> "ws"
-            isPrivateHost(hostOf(authority)) -> "ws"
-            else -> "wss"
-        }
+        // A bare host stays plaintext whatever it looks like: only the operator
+        // knows whether the relay is serving a certificate.
+        val scheme = if (explicitTls) "wss" else "ws"
         return "$scheme://$withPort$WS_PATH"
     }
 
@@ -81,7 +89,8 @@ object RelayUrl {
 
     /**
      * Loopback, RFC1918, link-local, unique-local IPv6, and local-only names —
-     * i.e. "LAN", where plaintext stays the default.
+     * i.e. "LAN", where a plaintext dial draws no warning. Only used by
+     * [isPlaintextToPublicHost] now that [build] no longer branches on it.
      */
     fun isPrivateHost(host: String): Boolean {
         val h = host.trim().removeSuffix(".").lowercase()

@@ -1072,6 +1072,20 @@ def _get_public_ip() -> str:
         return "<your-server-ip>"
 
 
+def _relay_server_address(host: str, port: int, tls: bool) -> str:
+    """The server address `android_setup` tells the user to type into the app.
+
+    TRANS-1: it used to be a bare ``host:port``. The app's `RelayUrl` honours an
+    explicit scheme and otherwise dials cleartext `ws://`, while the relay only
+    terminates TLS when `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` are set — so a
+    bare address either fails the handshake (TLS relay) or connects in plaintext
+    to a public host and draws the app's red injection warning. Setup knows which
+    transport it just started, so it prints the matching scheme and the address
+    the user types is the address that works.
+    """
+    return f"{'wss' if tls else 'ws'}://{host}:{port}"
+
+
 def android_setup(pairing_code: str) -> str:
     """
     Start the Android bridge relay and configure the pairing code.
@@ -1128,7 +1142,12 @@ def android_setup(pairing_code: str) -> str:
 
         # Start the relay server
         try:
-            from .android_relay import start_relay, is_phone_connected, set_pairing_code
+            from .android_relay import (
+                start_relay,
+                is_phone_connected,
+                set_pairing_code,
+                is_tls_configured,
+            )
 
             # AUTH-1: start_relay() is a no-op while a relay thread is alive, so a
             # rotated code would never reach the running relay. Push it explicitly:
@@ -1140,7 +1159,7 @@ def android_setup(pairing_code: str) -> str:
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            server_address = f"{public_ip}:{port}"
+            server_address = _relay_server_address(public_ip, port, is_tls_configured())
 
             if phone_connected:
                 return json.dumps(

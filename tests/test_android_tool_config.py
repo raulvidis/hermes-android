@@ -576,7 +576,7 @@ class TestAndroidSetup:
         assert result["status"] == "ok"
         assert result["phone_connected"] is True
         assert result["message"] == "Phone is connected and ready!"
-        assert result["server_address"] == f"{FAKE_IP}:8766"
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
         assert "user_instructions" not in result
 
     def test_tells_the_user_what_to_type_when_no_phone_yet(self, tool_mod):
@@ -584,9 +584,54 @@ class TestAndroidSetup:
 
         assert result["status"] == "ok"
         assert result["phone_connected"] is False
-        assert result["server_address"] == f"{FAKE_IP}:8766"
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
         assert FAKE_IP in result["user_instructions"]
         assert "PA2RCDE" in result["user_instructions"]
+
+    # ── TRANS-1: the printed address must carry a scheme the app can dial ─────
+    #
+    # RelayClient honours an explicit scheme and otherwise dials plaintext ws://,
+    # while the relay only terminates TLS when ANDROID_RELAY_CERT/KEY are set. A
+    # bare `ip:port` therefore either fails the handshake (TLS relay) or connects
+    # in cleartext and draws the app's red plaintext warning. Setup knows which
+    # transport it just started, so it says so.
+
+    def test_the_printed_address_is_explicitly_plaintext_without_a_certificate(
+        self, tool_mod
+    ):
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
+        assert f"Server: ws://{FAKE_IP}:8766" in result["user_instructions"]
+        assert f"Server: {FAKE_IP}:8766" not in result["user_instructions"], (
+            "a bare host:port is what made the documented setup undialable"
+        )
+
+    def test_the_printed_address_is_wss_when_the_relay_terminates_tls(
+        self, tool_mod, monkeypatch
+    ):
+        monkeypatch.setattr(self.relay, "is_tls_configured", lambda: True)
+        self.connected = True
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"wss://{FAKE_IP}:8766"
+
+    def test_the_printed_address_follows_the_configured_port(self, tool_mod, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_PORT", "9100")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"ws://{FAKE_IP}:9100"
+
+    @pytest.mark.parametrize(
+        "tls,expected", [(False, "ws"), (True, "wss")], ids=["plaintext", "tls"]
+    )
+    def test_the_address_helper_picks_the_scheme(self, tool_mod, tls, expected):
+        assert (
+            tool_mod._relay_server_address(FAKE_IP, 8766, tls)
+            == f"{expected}://{FAKE_IP}:8766"
+        )
 
     def test_exports_the_url_and_token_into_the_process(self, tool_mod):
         as_json(tool_mod.android_setup("PA2RCDE"))

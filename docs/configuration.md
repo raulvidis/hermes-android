@@ -40,18 +40,22 @@ already set, in either the environment or the file.
 
 ## Connection modes
 
-- **Relay (default):** phone connects out to the relay's `/ws` route — `wss://server:8766/ws` for a public host, `ws://server:8766/ws` for a LAN/private one (see [Transport security](#transport-security) below). No `.env` config needed; `android_setup` configures it.
-- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts. A public host then needs no scheme typed in the app — it already defaults to `wss://server:8766/ws` — and an explicit `https://server:8766` upgrades the same way. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
+- **Relay (default):** phone connects out to the relay's `/ws` route — `ws://server:8766/ws` unless the address you type names a TLS scheme (see [Transport security](#transport-security) below). No `.env` config needed; `android_setup` configures it and prints the address with the scheme the relay is actually serving.
+- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts. `android_setup` then prints `wss://ip:8766` instead of `ws://ip:8766`, and typing `wss://server:8766` or `https://server:8766` in the app upgrades the same way. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
 - **Same WiFi (direct):** `ANDROID_BRIDGE_URL=http://192.168.x.x:8765`.
 - **USB (direct):** `adb forward tcp:8765 tcp:8765` then `ANDROID_BRIDGE_URL=http://localhost:8765`.
 - **Persistent relay:** `contrib/hermes-android-relay.service` runs `contrib/hermes-relay-daemon.py` under systemd; it reads `ANDROID_BRIDGE_TOKEN` and `ANDROID_RELAY_PORT` and exits if the token is missing.
 
 ## Transport security
 
-- In the app, a bare relay host defaults to **`wss://`** unless the host is
-  private (RFC1918, `127/8`, `169.254/16`, `::1`, `fe80::/10`, `*.local`,
-  `*.internal`, single-label), where `ws://` stays the default. Type the scheme
-  explicitly to override either default.
+- In the app, the scheme you type wins: `wss://`/`https://` dials TLS, `ws://`/`http://`
+  dials plaintext. A **bare** host (`relay.example.com`, `203.0.113.7:8766`) dials
+  plaintext `ws://`, because the phone has no way to know whether the relay was
+  given a certificate — defaulting a bare public host to `wss://` made the address
+  `android_setup` prints fail the TLS handshake against a plaintext relay.
+- `android_setup` therefore prints an explicit scheme: `wss://ip:port` when
+  `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` are set, `ws://ip:port` otherwise. Type
+  what it prints.
 - `ws://` to a non-private host draws a persistent red warning in the app:
   plaintext is not only readable, it is injectable — see SECURITY.md.
 - Relay-side TLS: set `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` to PEM paths

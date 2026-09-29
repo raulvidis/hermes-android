@@ -63,11 +63,16 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 ## Known Limitations (Prototype)
 
 ### Plaintext transports allow command injection, not just sniffing
-A bare relay host typed into the app now defaults to `wss://` unless it is
-private (RFC1918, `127/8`, `169.254/16`, `::1`, `fe80::/10`, `*.local`,
-`*.internal`, or a single-label name), where `ws://` stays the default. An
-explicit scheme always wins — so `ws://` and the phone's own LAN server on
-`:8765` are still plaintext when you ask for them. Plaintext means:
+The scheme you type is the scheme the app dials: `wss://`/`https://` gets TLS,
+`ws://`/`http://` and a **bare** host (`relay.example.com`, `203.0.113.7:8766`)
+get plaintext `ws://` — as does the phone's own LAN server on `:8765`, which has
+no TLS option at all. A bare host cannot default to `wss://` because the phone has
+no way to know whether the relay was given a certificate; when that was tried, the
+address `android_setup` printed failed the TLS handshake against a plaintext
+relay. `android_setup` now prints the scheme the relay is really serving
+(`wss://ip:port` when `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` are set,
+`ws://ip:port` otherwise), so the documented setup is the TLS one whenever TLS
+exists. Plaintext means:
 - Commands, screen content, and screenshots travel unencrypted and can be read by
   anyone on the network path
 - **A plaintext WebSocket has no integrity protection.** An on-path attacker does

@@ -9,16 +9,22 @@ import org.junit.Test
  * TRANS-1 regression tests for the relay URL builder.
  *
  * Two things must hold at once:
- *  1. a bare **public** host no longer silently becomes cleartext `ws://` — it
- *     defaults to `wss://`, because a plaintext WebSocket can be *injected into*
- *     by anyone on the path, not just read;
- *  2. LAN users are not broken — every private/loopback/link-local/`.local` form
- *     keeps the `ws://` behaviour it has always had, and an explicitly typed
- *     scheme always wins.
+ *  1. a **bare** host keeps the plaintext `ws://` it has always produced. The
+ *     relay only terminates TLS when `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY`
+ *     are configured, and `android_setup` used to tell the user to type a bare
+ *     `public_ip:port` — so defaulting a bare public host to `wss://` broke the
+ *     documented setup and every already-stored URL with a TLS handshake
+ *     failure against a plaintext listener. TLS is therefore something the
+ *     operator opts into by typing a scheme, and `android_setup` now emits the
+ *     scheme that matches what the relay actually serves;
+ *  2. plaintext to a host that is not private is still *loud*: an explicit
+ *     scheme always wins, and [RelayUrl.isPlaintextToPublicHost] keeps driving
+ *     the toast and the persistent red status line, because a plaintext
+ *     WebSocket can be injected into by anyone on the path, not just read.
  */
 class RelayUrlTest {
 
-    // ── 1. LAN users keep working exactly as before ────────────────────────────
+    // ── 1. a bare host keeps the long-standing plaintext behaviour ────────────
 
     @Test
     fun `bare private hosts stay plaintext`() {
@@ -45,8 +51,42 @@ class RelayUrlTest {
         assertAll(cases) { RelayUrl.build(it) }
     }
 
+    /**
+     * The regression this file exists for: `android_setup` hands the user a bare
+     * `public_ip:port`, and a stored bare URL must keep dialling the plaintext
+     * relay rather than failing a TLS handshake it has no certificate for.
+     */
     @Test
-    fun `an explicit scheme is honoured even for a public host`() {
+    fun `bare public hosts stay plaintext too`() {
+        val cases = mapOf(
+            "relay.example.com" to "ws://relay.example.com:8766/ws",
+            "hermes-relay.my-vps.net" to "ws://hermes-relay.my-vps.net:8766/ws",
+            "1.2.3.4" to "ws://1.2.3.4:8766/ws",
+            "203.0.113.7:8766" to "ws://203.0.113.7:8766/ws",
+            "11.0.0.1" to "ws://11.0.0.1:8766/ws",
+            "172.15.0.1" to "ws://172.15.0.1:8766/ws",
+            "172.32.0.1" to "ws://172.32.0.1:8766/ws",
+            "192.169.1.1" to "ws://192.169.1.1:8766/ws",
+            "224.0.0.1" to "ws://224.0.0.1:8766/ws",
+            "100.64.0.1" to "ws://100.64.0.1:8766/ws",
+            "relay.example.com:443" to "ws://relay.example.com:443/ws",
+            "[2001:db8::1]" to "ws://[2001:db8::1]/ws"
+        )
+        assertAll(cases) { RelayUrl.build(it) }
+    }
+
+    @Test
+    fun `a bare host never gets a scheme it did not ask for`() {
+        listOf("relay.example.com", "1.2.3.4", "203.0.113.7:8766", "[2001:db8::1]").forEach {
+            assertTrue("$it must dial ws://", RelayUrl.build(it).startsWith("ws://"))
+            assertFalse("$it must not be upgraded to wss://", RelayUrl.build(it).startsWith("wss://"))
+        }
+    }
+
+    // ── 2. an explicit scheme always wins ─────────────────────────────────────
+
+    @Test
+    fun `an explicit plaintext scheme is honoured even for a public host`() {
         val cases = mapOf(
             "ws://relay.example.com" to "ws://relay.example.com:8766/ws",
             "http://relay.example.com" to "ws://relay.example.com:8766/ws",
@@ -57,8 +97,12 @@ class RelayUrlTest {
     }
 
     @Test
-    fun `an explicit tls scheme is honoured even for a private host`() {
+    fun `an explicit tls scheme is honoured for any host`() {
         val cases = mapOf(
+            "wss://relay.example.com" to "wss://relay.example.com:8766/ws",
+            "https://relay.example.com" to "wss://relay.example.com:8766/ws",
+            "WSS://relay.example.com" to "wss://relay.example.com:8766/ws",
+            "HTTPS://relay.example.com" to "wss://relay.example.com:8766/ws",
             "wss://192.168.1.50" to "wss://192.168.1.50:8766/ws",
             "https://192.168.1.50" to "wss://192.168.1.50:8766/ws",
             "wss://localhost:8766" to "wss://localhost:8766/ws"
@@ -66,30 +110,15 @@ class RelayUrlTest {
         assertAll(cases) { RelayUrl.build(it) }
     }
 
-    // ── 2. public hosts default to TLS ────────────────────────────────────────
-
+    /**
+     * The other half of the fix: TLS is reachable, but only by asking for it.
+     * `android_setup` emits `wss://ip:port` when the relay has a certificate, so
+     * the scheme has to survive the rewrite unchanged.
+     */
     @Test
-    fun `bare public hosts default to tls`() {
-        val cases = mapOf(
-            "relay.example.com" to "wss://relay.example.com:8766/ws",
-            "hermes-relay.my-vps.net" to "wss://hermes-relay.my-vps.net:8766/ws",
-            "1.2.3.4" to "wss://1.2.3.4:8766/ws",
-            "11.0.0.1" to "wss://11.0.0.1:8766/ws",
-            "172.15.0.1" to "wss://172.15.0.1:8766/ws",
-            "172.32.0.1" to "wss://172.32.0.1:8766/ws",
-            "192.169.1.1" to "wss://192.169.1.1:8766/ws",
-            "224.0.0.1" to "wss://224.0.0.1:8766/ws",
-            "100.64.0.1" to "wss://100.64.0.1:8766/ws",
-            "relay.example.com:443" to "wss://relay.example.com:443/ws",
-            "[2001:db8::1]" to "wss://[2001:db8::1]/ws"
-        )
-        assertAll(cases) { RelayUrl.build(it) }
-    }
-
-    @Test
-    fun `tls is the default rather than an opt-in`() {
-        assertTrue(RelayUrl.build("relay.example.com").startsWith("wss://"))
-        assertFalse(RelayUrl.build("relay.example.com").startsWith("ws://relay"))
+    fun `the wss address android_setup emits is dialled as tls`() {
+        assertEquals("wss://203.0.113.7:8766/ws", RelayUrl.build("wss://203.0.113.7:8766"))
+        assertEquals("ws://203.0.113.7:8766/ws", RelayUrl.build("ws://203.0.113.7:8766"))
     }
 
     // ── normalisation ─────────────────────────────────────────────────────────
@@ -99,6 +128,7 @@ class RelayUrlTest {
         val cases = mapOf(
             "  https://relay.example.com/  " to "wss://relay.example.com:8766/ws",
             "192.168.1.50/" to "ws://192.168.1.50:8766/ws",
+            " relay.example.com " to "ws://relay.example.com:8766/ws",
             "\twss://relay.example.com//" to "wss://relay.example.com:8766/ws"
         )
         assertAll(cases) { RelayUrl.build(it) }
@@ -112,7 +142,13 @@ class RelayUrlTest {
             "ws://relay.example.com",
             "http://relay.example.com",
             "WS://1.2.3.4",
-            "ws://1.2.3.4:8766"
+            "ws://1.2.3.4:8766",
+            // A bare host now dials ws:// too, so it must draw the same warning:
+            // this is what keeps TRANS-1 visible after the scheme default went
+            // back to plaintext.
+            "relay.example.com",
+            "1.2.3.4",
+            "203.0.113.7:8766"
         ).forEach {
             assertTrue("$it must be flagged", RelayUrl.isPlaintextToPublicHost(it))
         }
@@ -134,7 +170,7 @@ class RelayUrlTest {
 
     @Test
     fun `tls to a public host is not flagged`() {
-        listOf("wss://relay.example.com", "https://relay.example.com", "relay.example.com")
+        listOf("wss://relay.example.com", "https://relay.example.com", "wss://1.2.3.4:8766")
             .forEach {
                 assertFalse("$it must not be flagged", RelayUrl.isPlaintextToPublicHost(it))
             }

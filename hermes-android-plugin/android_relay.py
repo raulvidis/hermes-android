@@ -210,11 +210,30 @@ def is_phone_connected() -> bool:
         return ws is not None and not ws.closed
 
 
+def is_tls_configured() -> bool:
+    """True when the relay terminates TLS itself (RELAY-2).
+
+    Both paths are required, exactly as `_ssl_context()` requires them, so one
+    misspelled variable cannot make a caller believe the listener is serving
+    `https`/`wss` while it is actually serving plaintext. This is the predicate
+    `android_setup` uses to print an address the app can dial: `RelayUrl` honours
+    an explicit scheme and otherwise dials cleartext `ws://` (TRANS-1).
+    """
+    return bool(_env("ANDROID_RELAY_CERT")) and bool(_env("ANDROID_RELAY_KEY"))
+
+
 def get_relay_url() -> str:
+    """Base URL of the relay, carrying the scheme it is really serving.
+
+    RELAY-2: this hardcoded `http://`, so any caller that trusted it attempted
+    plaintext against a TLS listener whenever `ANDROID_RELAY_CERT`/`_KEY` were
+    configured.
+    """
     with _relay_lock:
         s = _relay_instance
         port = s.port if s else _relay_port()
-    return f"http://localhost:{port}"
+    scheme = "https" if is_tls_configured() else "http"
+    return f"{scheme}://localhost:{port}"
 
 
 def set_pairing_code(code: str) -> None:
@@ -275,7 +294,11 @@ def _run_loop(state: _RelayState, ready: threading.Event) -> None:
 
 
 def _ssl_context() -> Optional["ssl.SSLContext"]:
-    """Build SSL context from env vars if configured."""
+    """Build SSL context from env vars if configured.
+
+    The gate is the same one `is_tls_configured()` exposes to callers reporting a
+    URL, so the scheme they print cannot disagree with what is served here.
+    """
     import ssl as _ssl
 
     cert_path = _env("ANDROID_RELAY_CERT")
