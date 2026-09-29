@@ -58,6 +58,35 @@ object RelayClient {
     private const val KEY_LAST_FIRE = "watchdog_last_fire_ms"
     private const val KEY_REVIVAL_ENABLED = "termux_revival_enabled"
 
+    // Termux RUN_COMMAND target. Termux requires an absolute path under its own
+    // $HOME, and the user must have enabled Termux > Settings > "Allow external
+    // apps" — otherwise startService throws SecurityException.
+    internal const val TERMUX_PACKAGE = "com.termux"
+    internal const val TERMUX_RUN_COMMAND_ACTION = "com.termux.RUN_COMMAND"
+    internal const val TERMUX_RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService"
+    internal const val EXTRA_RUN_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH"
+    internal const val EXTRA_RUN_COMMAND_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
+    internal const val EXTRA_RUN_COMMAND_SESSION_ACTION = "com.termux.RUN_COMMAND_SESSION_ACTION"
+
+    /**
+     * Script the watchdog asks Termux to run.
+     *
+     * This was a hardcoded
+     * `/data/data/com.termux/files/home/.termux/boot/start-zee.sh` — one
+     * contributor's private stack launcher, shipped in a public repo and a public
+     * APK, not configurable and not documented anywhere. Any other user who
+     * enabled the "Termux Auto-Revival" switch had the bridge fire RUN_COMMAND at
+     * a script that did not exist on their device: Termux logged an error, the
+     * bridge showed "Stack unreachable — firing Termux revival…", nothing
+     * recovered, and the user believed auto-recovery was on.
+     *
+     * The location is unchanged (Termux's own boot directory, so the same script
+     * also runs when Termux starts); only the name is now the project's rather
+     * than a person's. docs/configuration.md says what to put in it.
+     */
+    internal const val DEFAULT_REVIVAL_SCRIPT =
+        "/data/data/com.termux/files/home/.termux/boot/start-hermes.sh"
+
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .pingInterval(java.time.Duration.ofSeconds(20))
@@ -430,17 +459,25 @@ object RelayClient {
         }
     }
 
+    /**
+     * Build the RUN_COMMAND intent. Kept separate from firing it so the action,
+     * the target component and the extras can be asserted in a unit test —
+     * `fireTermuxRestart` itself needs a Context, prefs and a real startService.
+     */
+    internal fun termuxRevivalIntent(
+        scriptPath: String = DEFAULT_REVIVAL_SCRIPT,
+    ): android.content.Intent =
+        android.content.Intent(TERMUX_RUN_COMMAND_ACTION).apply {
+            setClassName(TERMUX_PACKAGE, TERMUX_RUN_COMMAND_SERVICE)
+            putExtra(EXTRA_RUN_COMMAND_PATH, scriptPath)
+            putExtra(EXTRA_RUN_COMMAND_BACKGROUND, true)
+            putExtra(EXTRA_RUN_COMMAND_SESSION_ACTION, 0)
+        }
+
     private fun fireTermuxRestart(fireNumber: Int) {
         val ctx = appContext ?: return
         try {
-            val intent = android.content.Intent("com.termux.RUN_COMMAND").apply {
-                setClassName("com.termux", "com.termux.app.RunCommandService")
-                putExtra("com.termux.RUN_COMMAND_PATH",
-                    "/data/data/com.termux/files/home/.termux/boot/start-zee.sh")
-                putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-                putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", 0)
-            }
-            ctx.startService(intent)
+            ctx.startService(termuxRevivalIntent())
             Log.i(TAG, "Termux revival: RUN_COMMAND fired (attempt $fireNumber/$WATCHDOG_MAX_FIRES)")
             notifyStatus(
                 false,

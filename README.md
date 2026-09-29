@@ -185,8 +185,10 @@ ones after successful finalization.
 
 The manifest also declares `com.termux.permission.RUN_COMMAND` for the opt-in
 **Termux Auto-Revival** switch in the app (default OFF): after repeated relay
-failures it fires a Termux `RUN_COMMAND` intent to restart the stack. It targets a
-fixed script path and needs Termux's *Allow external apps* enabled — see
+failures it fires a Termux `RUN_COMMAND` intent to restart the stack, at most 3
+times in total. It targets a fixed script path
+(`~/.termux/boot/start-hermes.sh` inside Termux's home) that you must create
+yourself, and needs Termux's *Allow external apps* enabled — see
 [docs/configuration.md](docs/configuration.md) before turning it on.
 
 ## Architecture

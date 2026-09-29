@@ -58,7 +58,7 @@ Key classes (`app/src/main/kotlin/com/hermesandroid/bridge/`):
 - `server/BridgeServer.kt` — Netty on `0.0.0.0:8765`; Bearer-token interceptor for every path except `/ping`, plus the per-IP `AuthRateLimiter`.
 - `auth/PairingManager.kt` — 6-char code gen/validate (excludes confusable 0/O/1/I); persisted; constant-time compare.
 - `client/RelayClient.kt` — outbound WebSocket; auto-reconnect with exponential backoff.
-- `client/RevivalPolicy.kt` — pure gate/counter/cooldown behind the opt-in Termux revival watchdog.
+- `client/RevivalPolicy.kt` — pure gate/counter/cooldown/fire-budget behind the opt-in Termux revival watchdog; an auth failure (401/403) does not count, and the budget is re-armed only by a session that opens.
 - `service/BridgeAccessibilityService.kt` — singleton AccessibilityService; reads UI tree on demand.
 - `executor/ActionExecutor.kt` — tap/type/swipe/scroll/wait/open-app, plus `press_key` global actions, intents, broadcasts, SMS/call, contacts, TTS and widgets; wakes the device via `WakeLockManager`.
 - `executor/ScreenReader.kt` — traverses accessibility tree → `ScreenNode` hierarchy; finds nodes by text.

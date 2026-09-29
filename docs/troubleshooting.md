@@ -41,6 +41,15 @@ read_when:
 - `android_send_intent` / `android_broadcast` return "blocked for safety" → intended. Intents: package install/uninstall, factory reset/shutdown, direct `CALL`, every `android.settings.*` and `android.provider.action.*` action, and the `intent`, `market`, `smsto`, `mmsto`, `tel` URI schemes plus `content://settings` / `content://com.android.contacts`. Broadcasts: media mounted/unmounted/eject/scanner, package added/removed/replaced/data-cleared, storage low/ok, shutdown, master clear, factory reset. Use the dedicated tools (`android_send_sms`, `android_call`, `android_open_app`) or navigate Settings by tapping.
 - `android_send_sms` / `android_call` on a device without telephony → `success: false` with "not available on this device" at status 200 (capability-gated, not an error).
 
+## Termux auto-revival
+
+Only relevant with the opt-in **Termux Auto-Revival** switch on. See `docs/configuration.md` for the full contract.
+
+- Status shows "Revival blocked — allow Termux RUN_COMMAND (Termux > Allow external apps)" → `startService` threw `SecurityException`. Grant Termux > Settings > *Allow external apps*; declaring `com.termux.permission.RUN_COMMAND` in the manifest is not enough.
+- Status shows "Stack unreachable — firing Termux revival (1/3)…" but nothing restarts → the script is not at the path the bridge uses, `RelayClient.DEFAULT_REVIVAL_SCRIPT` = `/data/data/com.termux/files/home/.termux/boot/start-hermes.sh`. The path is not configurable and has no UI, so create that exact file (absolute, inside Termux's home, executable) or leave the switch off. Check Termux's own log for the `RUN_COMMAND` error.
+- Status shows "Revival stopped after 3 attempts — check the server URL and pairing code, then tap Connect" → the fire budget is spent. This is deliberate: the trigger is "the relay is unreachable", which a wrong server URL, a rotated pairing code or a server that is simply down all look like, and restarting Termux cannot fix any of them. Fix the cause, then reconnect — a session that opens refills the budget.
+- The relay is unreachable and the watchdog never fires → an HTTP 401/403 is excluded on purpose (a credential problem, not a dead stack). So is a disabled switch, which is the default.
+
 ## Microphone
 
 - "duration must be between 0 and 1800 seconds" → `duration` must be an integer number of seconds, `0` (record until `android_mic_stop`) through `1800`. `android_mic_record` checks this client-side and never calls the bridge; the bridge answers `400` (adding "duration must be an integer number of seconds" for a non-numeric value) when `/mic_start` is called directly.
