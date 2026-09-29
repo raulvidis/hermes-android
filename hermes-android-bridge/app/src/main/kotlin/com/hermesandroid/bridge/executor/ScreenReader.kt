@@ -3,6 +3,7 @@ package com.hermesandroid.bridge.executor
 import android.view.accessibility.AccessibilityNodeInfo
 import com.hermesandroid.bridge.model.NodeBounds
 import com.hermesandroid.bridge.model.ScreenNode
+import com.hermesandroid.bridge.security.SensitiveText
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 
 object ScreenReader {
@@ -54,8 +55,10 @@ object ScreenReader {
 
         return ScreenNode(
             nodeId = nodeId,
-            text = info.text?.toString()?.takeIf { it.isNotBlank() },
-            contentDescription = info.contentDescription?.toString()?.takeIf { it.isNotBlank() },
+            // PII-1: a password/OTP field keeps its place in the tree but never
+            // its contents — see SensitiveText for the exact contract.
+            text = SensitiveText.text(info),
+            contentDescription = SensitiveText.contentDescription(info),
             className = info.className?.toString(),
             packageName = info.packageName?.toString(),
             clickable = info.isClickable,
@@ -105,7 +108,7 @@ object ScreenReader {
         text: String,
         exact: Boolean
     ): AccessibilityNodeInfo? {
-        val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+        val nodeText = SensitiveText.searchableText(node)
         if ((exact && nodeText == text) || (!exact && nodeText.contains(text, ignoreCase = true))) {
             return node
         }
@@ -146,7 +149,7 @@ object ScreenReader {
         path: String
     ) {
         if (results.size >= limit) return
-        val nodeText = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+        val nodeText = SensitiveText.searchableText(node)
         val nodeClass = node.className?.toString() ?: ""
         val matches = (textFilter == null || nodeText.contains(textFilter, ignoreCase = true)) &&
                 (classNameFilter == null || nodeClass.contains(classNameFilter, ignoreCase = true)) &&
@@ -154,14 +157,18 @@ object ScreenReader {
         if (matches) {
             val r = android.graphics.Rect()
             node.getBoundsInScreen(r)
-            results.add(mapOf(
+            val secret = SensitiveText.isSecret(node)
+            val hit = mutableMapOf<String, Any?>(
                 "nodeId" to "${node.packageName ?: "?"}_${node.className ?: "?"}_${path}_${r.left}_${r.top}_${r.right}_${r.bottom}",
-                "text" to node.text?.toString(),
-                "contentDescription" to node.contentDescription?.toString(),
+                // PII-1: redacted, and flagged so the caller knows why.
+                "text" to SensitiveText.resultText(node),
+                "contentDescription" to SensitiveText.resultContentDescription(node),
                 "className" to nodeClass,
                 "clickable" to node.isClickable,
                 "bounds" to "${r.left},${r.top},${r.right},${r.bottom}"
-            ))
+            )
+            if (secret) hit["password"] = true
+            results.add(hit)
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue

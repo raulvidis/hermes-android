@@ -23,6 +23,19 @@ hermes-android gives a remote AI agent full control of an Android device via Acc
 - Legacy `?token=` query authentication is rejected so pairing codes cannot land
   in reverse-proxy access logs
 
+### Secret-field redaction
+- Nodes the platform marks `isPassword` are never serialised as text: `/screen`,
+  `/find_nodes`, `/describe_node` and `/events` emit `"[redacted]"` in place of
+  the text and drop `contentDescription`/`hintText` for those nodes. The node
+  itself stays listed (id, class, bounds, editable) so an agent can still tap and
+  type into it.
+- Text *searches* match the redacted value too, so `/find_nodes` cannot be used
+  as a character-by-character oracle against a secret field.
+- **Not covered:** `/screenshot` and `/screen_record` capture rendered pixels, so
+  anything visible on screen — a password mid-typing, an OTP the IME
+  auto-filled — is in the image. Android blanks `FLAG_SECURE` windows; most login
+  screens do not set it.
+
 ### Connection Architecture
 - The phone connects **out** to the server (NAT-friendly)
 - The server relay only accepts one phone at a time

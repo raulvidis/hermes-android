@@ -62,6 +62,15 @@ you exact element text, node IDs, and tap targets — always use it first.
 
 - `android_read_screen(include_bounds=False)` — get the full accessibility tree as JSON. Returns every visible UI element with text, className, nodeId, clickable, etc. **Always call this before interacting. This is your default screen-reading tool.**
 - `android_find_nodes(text=..., class_name=..., clickable=True)` — search the accessibility tree for specific elements without pulling the whole tree. Use to locate a known button/field directly.
+
+**Password fields are redacted.** Any node the platform marks as a password field
+comes back as `text: "[redacted]"` with no `contentDescription`/`hintText`, plus
+`password: true` in `android_find_nodes`/`android_describe_node`; the same applies
+to `android_events`. The field itself is still listed — nodeId, class and bounds
+are intact — so tap it and `android_type()` into it as usual. Never try to read a
+secret back, and never work around this by typing one into a non-password field.
+`android_screenshot`/`android_screen_record` are pixels, not nodes: they show
+whatever is on screen, including secrets.
 - `android_screenshot()` — capture a screenshot as base64 PNG. **Only** for: showing the user what's on screen, verifying visual layout, or apps the accessibility tree can't see (canvas/game rendering). Never use it to search for where to tap — use `android_read_screen`, `android_find_nodes`, or `android_tap_text` instead.
 - `android_current_app()` — get the package name and activity of the foreground app.
 

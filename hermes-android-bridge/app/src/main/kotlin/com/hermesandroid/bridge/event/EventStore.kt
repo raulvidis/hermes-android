@@ -1,6 +1,7 @@
 package com.hermesandroid.bridge.event
 
 import android.view.accessibility.AccessibilityEvent
+import com.hermesandroid.bridge.security.SensitiveText
 
 data class AccessibilityEventData(
     val eventType: String,
@@ -19,6 +20,20 @@ object EventStore {
     @Volatile var streamingEnabled: Boolean = false
 
     fun add(event: AccessibilityEvent) {
+        // PII-1: read the source node once (the caller owns it and must recycle it)
+        // and use the same handle to detect a secret field. AccessibilityEvent's
+        // own getText() is a different code path from node text and is not
+        // password-marked, so the source node is the only reliable signal.
+        var secretField = false
+        val sourceNodeId = event.source?.let { src ->
+            try {
+                secretField = SensitiveText.isSecret(src)
+                val r = android.graphics.Rect()
+                src.getBoundsInScreen(r)
+                "${src.packageName ?: "?"}_${src.className ?: "?"}_${r.left}_${r.top}_${r.right}_${r.bottom}"
+            } finally { src.recycle() }
+        }
+
         val entry = AccessibilityEventData(
             eventType = when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> "VIEW_CLICKED"
@@ -35,15 +50,13 @@ object EventStore {
             },
             packageName = event.packageName?.toString(),
             className = event.className?.toString(),
-            text = event.text?.joinToString(", ")?.ifBlank { null },
-            contentDescription = event.contentDescription?.toString(),
-            sourceNodeId = event.source?.let { src ->
-                try {
-                    val r = android.graphics.Rect()
-                    src.getBoundsInScreen(r)
-                    "${src.packageName ?: "?"}_${src.className ?: "?"}_${r.left}_${r.top}_${r.right}_${r.bottom}"
-                } finally { src.recycle() }
+            // A secret field keeps its event (so the agent can see that something
+            // was typed there) but never what was typed.
+            text = event.text?.joinToString(", ")?.ifBlank { null }?.let { raw ->
+                if (secretField) SensitiveText.REDACTED else raw
             },
+            contentDescription = if (secretField) null else event.contentDescription?.toString(),
+            sourceNodeId = sourceNodeId,
             timestamp = event.eventTime
         )
 

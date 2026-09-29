@@ -18,6 +18,7 @@ import com.hermesandroid.bridge.model.ActionResult
 import com.hermesandroid.bridge.model.ScreenNode
 import com.hermesandroid.bridge.model.computeHash
 import com.hermesandroid.bridge.power.WakeLockManager
+import com.hermesandroid.bridge.security.SensitiveText
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -476,13 +477,20 @@ object ActionExecutor {
             ?: return ActionResult(false, "Node not found: $nodeId")
         val r = android.graphics.Rect()
         node.getBoundsInScreen(r)
+        // PII-1: describe a secret field, never disclose it. Everything needed to
+        // act on the node stays (bounds, class, viewIdResourceName, editable);
+        // text/contentDescription/hintText do not, because the hint and the
+        // content description routinely carry the mask or format of the secret.
+        val secret = SensitiveText.isSecret(node)
         val result = mutableMapOf<String, Any?>(
             "nodeId" to nodeId,
             "className" to node.className?.toString(),
             "packageName" to node.packageName?.toString(),
-            "text" to node.text?.toString(),
-            "contentDescription" to node.contentDescription?.toString(),
-            "hintText" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) node.hintText?.toString() else null,
+            "text" to SensitiveText.resultText(node),
+            "contentDescription" to SensitiveText.resultContentDescription(node),
+            "hintText" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                SensitiveText.hintText(node, node.hintText)
+            } else null,
             "bounds" to mapOf("left" to r.left, "top" to r.top, "right" to r.right, "bottom" to r.bottom),
             "clickable" to node.isClickable,
             "longClickable" to node.isLongClickable,
@@ -494,7 +502,8 @@ object ActionExecutor {
             "enabled" to node.isEnabled,
             "selected" to node.isSelected,
             "childCount" to node.childCount,
-            "viewIdResourceName" to node.viewIdResourceName
+            "viewIdResourceName" to node.viewIdResourceName,
+            "password" to secret
         )
         node.recycle()
         return ActionResult(true, "Node details", result)
