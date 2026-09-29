@@ -723,3 +723,153 @@ class TestRouteAllowlist:
             "tools/android_relay.py and hermes-android-plugin/android_relay.py "
             "have drifted; apply the same change to both"
         )
+
+
+class TestPairingCodeRotation:
+    """AUTH-1: rotating the pairing code must take effect on a *running* relay.
+
+    Before the fix `start_relay()` returned early whenever a relay thread was
+    alive, so `set_pairing_code()` was the only way to rotate — and nothing in
+    production called it. Worse, the WebSocket that was already open had been
+    authenticated with the old code at handshake time and kept full device
+    control after "rotation".
+    """
+
+    PORT = 19973
+    OLD = "ABC234"
+    NEW = "XYZ789"
+
+    def _handshake_succeeds(self, code: str) -> bool:
+        import asyncio
+
+        import aiohttp
+
+        async def attempt():
+            async with aiohttp.ClientSession() as session:
+                try:
+                    ws = await session.ws_connect(
+                        f"ws://127.0.0.1:{self.PORT}/ws",
+                        headers={"Authorization": f"Bearer {code}"},
+                    )
+                except aiohttp.WSServerHandshakeError:
+                    return False
+                await ws.close()
+                return True
+
+        return asyncio.run(attempt())
+
+    @staticmethod
+    async def _wait_for_phone(timeout: float = 10.0) -> bool:
+        import asyncio
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if is_phone_connected():
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    def test_set_pairing_code_reaches_a_running_relay(self):
+        import tools.android_relay as relay
+
+        start_relay(pairing_code=self.OLD, port=self.PORT)
+        assert is_relay_running()
+
+        set_pairing_code(self.NEW)
+
+        assert relay._relay_instance is not None
+        assert relay._relay_instance.pairing_code == self.NEW, (
+            "a running relay must pick up the rotated code — start_relay() alone "
+            "is a no-op once the thread is alive"
+        )
+
+    def test_start_relay_alone_does_not_rotate_a_running_relay(self):
+        """Pins *why* set_pairing_code is required: start_relay is a no-op."""
+        import tools.android_relay as relay
+
+        start_relay(pairing_code=self.OLD, port=self.PORT)
+        start_relay(pairing_code=self.NEW, port=self.PORT)
+
+        assert relay._relay_instance.pairing_code == self.OLD
+
+    def test_rotation_closes_the_session_authenticated_with_the_old_code(self):
+        import asyncio
+
+        import aiohttp
+
+        start_relay(pairing_code=self.OLD, port=self.PORT)
+
+        async def scenario():
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers={"Authorization": f"Bearer {self.OLD}"},
+                )
+                assert await self._wait_for_phone(), "phone session never registered"
+
+                set_pairing_code(self.NEW)
+
+                msg = await asyncio.wait_for(ws.receive(), timeout=10)
+                assert msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                ), f"the stale session must be dropped, got {msg.type!r}"
+                await ws.close()
+
+        asyncio.run(scenario())
+
+    def test_after_rotation_only_the_new_code_is_accepted(self):
+        import asyncio
+
+        import aiohttp
+
+        start_relay(pairing_code=self.OLD, port=self.PORT)
+
+        async def scenario():
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers={"Authorization": f"Bearer {self.OLD}"},
+                )
+                assert await self._wait_for_phone()
+                set_pairing_code(self.NEW)
+                await asyncio.wait_for(ws.receive(), timeout=10)
+                await ws.close()
+
+        asyncio.run(scenario())
+
+        assert self._handshake_succeeds(self.NEW), "the rotated code must work"
+        assert not self._handshake_succeeds(self.OLD), (
+            "the leaked code must stop working immediately after rotation"
+        )
+
+    def test_re_setting_the_same_code_keeps_the_live_session(self):
+        """Re-running android_setup with an unchanged code must not drop a phone."""
+        import asyncio
+
+        import aiohttp
+
+        start_relay(pairing_code=self.OLD, port=self.PORT)
+
+        async def scenario():
+            async with aiohttp.ClientSession() as session:
+                ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws",
+                    headers={"Authorization": f"Bearer {self.OLD}"},
+                )
+                assert await self._wait_for_phone()
+
+                set_pairing_code(self.OLD)
+                await asyncio.sleep(0.5)
+
+                assert not ws.closed, "an unchanged code must not drop the session"
+                assert is_phone_connected()
+                await ws.close()
+
+        asyncio.run(scenario())
+
+    def test_set_pairing_code_without_a_relay_is_still_a_noop(self):
+        stop_relay()
+        set_pairing_code(self.NEW)  # must not raise
+        assert not is_relay_running()

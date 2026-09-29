@@ -16,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.BuildConfig
+import com.hermesandroid.bridge.client.PairingRotationPolicy
 import com.hermesandroid.bridge.client.RelayClient
 import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.overlay.StatusOverlay
@@ -115,8 +116,24 @@ class MainActivity : Activity() {
         btnRegenerate.setOnClickListener {
             PairingManager.regenerateCode()
             tvPairingCode.text = PairingManager.getCode()
+            // AUTH-1: rotation must reach the relay as well. The WebSocket was
+            // authenticated with the OLD code, so that session keeps working until
+            // it is dropped — and the client would otherwise re-dial with a stale
+            // code of its own. Report what actually happened instead of implying
+            // the rotation took effect everywhere by itself.
+            when (RelayClient.onPairingCodeRotated()) {
+                PairingRotationPolicy.Action.RECONNECT -> Toast.makeText(
+                    this, "Pairing code rotated — reconnecting relay…", Toast.LENGTH_LONG
+                ).show()
+                PairingRotationPolicy.Action.DROP -> Toast.makeText(
+                    this, "Pairing code rotated — relay session closed", Toast.LENGTH_LONG
+                ).show()
+                PairingRotationPolicy.Action.NONE -> Toast.makeText(
+                    this, "New pairing code generated", Toast.LENGTH_SHORT
+                ).show()
+            }
+            updateRelayButton()
             updateStatus()
-            Toast.makeText(this, "New pairing code generated", Toast.LENGTH_SHORT).show()
         }
 
         tvPairingCode.setOnClickListener {

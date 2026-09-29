@@ -379,6 +379,57 @@ class TestSetup:
         assert "localhost" in os.environ.get("ANDROID_BRIDGE_URL", "")
 
 
+class TestSetupRotatesARunningRelay:
+    """AUTH-1: a rotated code must reach an already-running relay.
+
+    ``start_relay()`` returns early while a relay thread is alive, so pushing the
+    code through ``set_pairing_code()`` is the only way rotation takes effect —
+    and it is also what closes phone sessions authenticated with the old code.
+    """
+
+    @staticmethod
+    def _stub_relay(monkeypatch, calls):
+        import tools.android_relay as relay
+
+        monkeypatch.setattr(
+            relay,
+            "start_relay",
+            lambda pairing_code, port=0: calls.append(("start_relay", pairing_code)),
+        )
+        monkeypatch.setattr(
+            relay, "set_pairing_code", lambda code: calls.append(("set_pairing_code", code))
+        )
+        monkeypatch.setattr(relay, "is_phone_connected", lambda: False)
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+
+    def test_setup_pushes_the_code_to_a_running_relay(self, monkeypatch):
+        calls = []
+        self._stub_relay(monkeypatch, calls)
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "")
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "")
+
+        result = json.loads(android_setup("K7V3NP"))
+
+        assert result["status"] == "ok"
+        assert ("set_pairing_code", "K7V3NP") in calls, (
+            "android_setup must call set_pairing_code so a relay that is already "
+            f"running picks up the rotated code; calls were {calls}"
+        )
+
+    def test_the_code_is_pushed_before_start_relay(self, monkeypatch):
+        """start_relay is a no-op when running, so it cannot be the rotation path."""
+        calls = []
+        self._stub_relay(monkeypatch, calls)
+        monkeypatch.setenv("ANDROID_BRIDGE_TOKEN", "")
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "")
+
+        android_setup("K7V3NP")
+
+        assert calls.index(("set_pairing_code", "K7V3NP")) < calls.index(
+            ("start_relay", "K7V3NP")
+        ), f"set_pairing_code must run first; calls were {calls}"
+
+
 class TestEnvFileFallback:
     """The gateway process may lack ANDROID_* vars in os.environ even though
     they exist in ~/.hermes/.env.  _bridge_token/_bridge_url must fall back to

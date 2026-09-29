@@ -9,6 +9,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
+import com.hermesandroid.bridge.auth.PairingManager
 import com.hermesandroid.bridge.server.CommandDispatcher
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.*
@@ -29,7 +30,15 @@ object RelayClient {
     private const val TAG = "RelayClient"
     private const val PREFS_NAME = "hermes_bridge_prefs"
     private const val KEY_SERVER_URL = "relay_server_url"
-    private const val KEY_PAIRING_CODE = "relay_pairing_code"
+
+    /**
+     * AUTH-1: this duplicate code store is gone. [PairingManager] is the single
+     * source of truth for the code presented on the relay handshake, so tapping
+     * **Regenerate** rotates what the relay client actually presents. The legacy
+     * key is cleared in [init] so an upgraded install cannot keep a stale,
+     * still-valid code on disk next to the rotated one.
+     */
+    private const val KEY_LEGACY_PAIRING_CODE = "relay_pairing_code"
     private const val MAX_BACKOFF_MS = 30_000L
     private const val MAX_RETRIES = 5
 
@@ -54,6 +63,13 @@ object RelayClient {
     private var prefs: SharedPreferences? = null
     private var appContext: Context? = null
     private val reconnectPolicy = ReconnectPolicy(maxRetries = MAX_RETRIES, maxBackoffMs = MAX_BACKOFF_MS)
+    private val rotationPolicy = PairingRotationPolicy()
+
+    /**
+     * Test seam: unit tests replace this to observe dial attempts (URL + code)
+     * without opening a real socket. Production always routes to [doConnect].
+     */
+    internal var connector: (url: String, code: String) -> Unit = { url, code -> doConnect(url, code) }
 
     /**
      * Test seam: how a scheduled reconnect waits out its backoff. Production
@@ -87,9 +103,12 @@ object RelayClient {
         get() = prefs?.getString(KEY_SERVER_URL, null)
         set(value) { prefs?.edit()?.putString(KEY_SERVER_URL, value)?.apply() }
 
-    var pairingCode: String?
-        get() = prefs?.getString(KEY_PAIRING_CODE, null)
-        set(value) { prefs?.edit()?.putString(KEY_PAIRING_CODE, value)?.apply() }
+    /**
+     * The code presented to the relay. Always [PairingManager.getCode] — there is
+     * deliberately no second store to drift out of sync (AUTH-1).
+     */
+    val pairingCode: String?
+        get() = PairingManager.getCode().takeIf { it.isNotBlank() }
 
     /** Callback for UI updates. Called on main thread. */
     var onStatusChanged: ((connected: Boolean, message: String) -> Unit)? = null
@@ -97,6 +116,9 @@ object RelayClient {
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         appContext = context.applicationContext
+        // AUTH-1: drop the pre-fix duplicate code store; a rotated code must not
+        // leave the previous one readable on disk.
+        prefs?.edit()?.remove(KEY_LEGACY_PAIRING_CODE)?.apply()
     }
 
     // Shares the monitor with scheduleReconnect/beginReconnectAttempt: these run
@@ -104,16 +126,51 @@ object RelayClient {
     // and an interleaving there can strand reconnectPending set with no
     // coroutine left to clear it, killing auto-reconnect for the process.
     @Synchronized
-    fun connect(serverUrl: String, pairingCode: String) {
+    fun connect(serverUrl: String, pairingCode: String = "") {
+        // AUTH-1: the code always comes from PairingManager; the argument is only
+        // a fallback for a manager that has no code yet (pre-init / unit tests).
+        val code = effectivePairingCode(pairingCode)
+        if (code == null) {
+            notifyStatus(false, "No pairing code available — tap Regenerate")
+            return
+        }
+
         disconnect()
 
         this.serverUrl = serverUrl
-        this.pairingCode = pairingCode
         shouldReconnect = true
         reconnectPolicy.reset()
 
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        doConnect(serverUrl, pairingCode)
+        connector(serverUrl, code)
+    }
+
+    private fun effectivePairingCode(requested: String?): String? =
+        PairingManager.getCode().takeIf { it.isNotBlank() }
+            ?: requested?.takeIf { it.isNotBlank() }
+
+    /**
+     * AUTH-1: called after [PairingManager.regenerateCode]. Any session that was
+     * authenticated with the OLD code must stop working immediately, so the live
+     * socket is dropped and — when a relay URL is configured — re-dialed with the
+     * new code. Returns the action taken so the UI can report it instead of
+     * silently claiming success.
+     */
+    @Synchronized
+    fun onPairingCodeRotated(): PairingRotationPolicy.Action {
+        val action = rotationPolicy.onCodeRotated(
+            savedUrl = serverUrl,
+            sessionActive = isConnected,
+            reconnectArmed = shouldReconnect
+        )
+        when (action) {
+            PairingRotationPolicy.Action.NONE -> Unit
+            PairingRotationPolicy.Action.DROP -> disconnect()
+            // connect() disconnects the superseded socket first, then dials with
+            // the code PairingManager holds *now*.
+            PairingRotationPolicy.Action.RECONNECT -> serverUrl?.let { connect(it) }
+        }
+        return action
     }
 
     @Synchronized
@@ -286,7 +343,7 @@ object RelayClient {
         // listener stays active and can fire out-of-order callbacks
         // (onOpen/onFailure) that set isConnected or push duplicate statuses.
         webSocket?.cancel()
-        doConnect(url, code)
+        connector(url, code)
     }
 
     /** A session that had opened is over — refill the budget only if it was stable. */
@@ -351,7 +408,9 @@ object RelayClient {
     private fun reconnectDelayed() {
         try {
             val url = prefs?.getString(KEY_SERVER_URL, null)
-            val code = prefs?.getString(KEY_PAIRING_CODE, null)
+            // Read through PairingManager, not a cached copy: a code rotated while
+            // the watchdog was waiting must be the one presented (AUTH-1).
+            val code = pairingCode
             if (url.isNullOrBlank() || code.isNullOrBlank()) {
                 Log.w(TAG, "Delayed reconnect skipped: no saved server/code")
                 return

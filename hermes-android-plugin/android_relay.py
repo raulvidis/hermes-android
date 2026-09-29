@@ -167,12 +167,38 @@ def get_relay_url() -> str:
 
 
 def set_pairing_code(code: str) -> None:
-    """Update the pairing code (e.g. when user reconnects with new code)."""
+    """Update the pairing code on a *running* relay (e.g. after the user rotates it).
+
+    AUTH-1: `start_relay()` returns early when a relay thread is already alive, so
+    without this call a rotated code never reaches the running relay — the phone
+    keeps authenticating with the old one. Updating the code is not sufficient on
+    its own either: the session that is already open was authenticated with the OLD
+    code at handshake time, so it would retain full device control after rotation.
+    It is therefore dropped here; the phone reconnects on its own (RelayClient) and
+    re-authenticates with the new code.
+    """
     with _relay_lock:
         s = _relay_instance
-        if s is not None:
-            s.pairing_code = code
-            logger.info("Pairing code updated")
+        if s is None:
+            return
+        previous = s.pairing_code
+        s.pairing_code = code
+        loop = s.loop
+
+    if previous == code:
+        # Re-running setup with the same code must not drop a healthy session.
+        logger.info("Pairing code unchanged")
+        return
+
+    # Never log the code itself: it grants full device control.
+    logger.info("Pairing code updated — closing sessions authenticated with the old code")
+    if loop is not None and loop.is_running():
+        asyncio.run_coroutine_threadsafe(_drop_phone_after_rotation(s), loop)
+
+
+async def _drop_phone_after_rotation(state: "_RelayState") -> None:
+    """Close the phone session that was authenticated with a now-rotated code."""
+    await _cleanup_phone(state, reason="pairing code rotated")
 
 
 # ── Background event-loop entry point ─────────────────────────────────────────

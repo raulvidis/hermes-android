@@ -1060,8 +1060,13 @@ def android_setup(pairing_code: str) -> str:
             from tools.android_relay import (
                 start_relay,
                 is_phone_connected,
+                set_pairing_code,
             )
 
+            # AUTH-1: start_relay() is a no-op while a relay thread is alive, so a
+            # rotated code would never reach the running relay. Push it explicitly:
+            # this also closes phone sessions authenticated with the previous code.
+            set_pairing_code(pairing_code)
             start_relay(pairing_code=pairing_code, port=port)
 
             # Check if phone is already connected
