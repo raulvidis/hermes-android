@@ -28,6 +28,10 @@ on:
       - 'pyproject.toml'
       - 'setup.py'
       - 'requirements.txt'
+      # A PR that only edits this workflow — adding a Python to the matrix,
+      # changing the pytest invocation — used to run no check at all, so the
+      # breakage landed on main and surfaced in the next unrelated PR.
+      - '.github/workflows/python.yml'
   workflow_dispatch:
 
 permissions:
