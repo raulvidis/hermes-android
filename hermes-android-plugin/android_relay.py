@@ -97,6 +97,7 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
             logger.info("Relay already running on port %d", _relay_instance.port)
             return
 
+        previous = _relay_instance
         state = _RelayState(pairing_code, port)
         _relay_instance = state
 
@@ -109,6 +110,11 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
         # Wait until the server is actually listening (up to 10 s)
         if not ready.wait(timeout=10):
             logger.error("Relay failed to start within 10 seconds")
+            # Roll back. _run_loop closes its loop in a finally, so leaving this
+            # half-started state registered means the next stop_relay() — the
+            # teardown every caller wraps around a start — reaches for a loop
+            # that is already gone.
+            _relay_instance = previous
             raise RuntimeError("Relay failed to start")
         logger.info("Relay started on port %d", port)
 
@@ -122,9 +128,17 @@ def stop_relay() -> None:
             return
         _relay_instance = None
 
-    # Signal the event loop to shut down
+    # Signal the event loop to shut down. A loop whose thread already finished
+    # is closed — _run_loop closes it in a finally, whether _serve returned or
+    # crashed — and call_soon_threadsafe() on a closed loop raises
+    # RuntimeError("Event loop is closed"). Shutting down is not the place for
+    # that to escape: stop_relay() is the teardown callers wrap around a start,
+    # so raising here replaces a failed start with an unhandled exception.
     if state.loop is not None and state.shutdown_event is not None:
-        state.loop.call_soon_threadsafe(state.shutdown_event.set)
+        try:
+            state.loop.call_soon_threadsafe(state.shutdown_event.set)
+        except RuntimeError:
+            logger.debug("Relay event loop was already closed")
     if state.thread is not None:
         state.thread.join(timeout=5)
     logger.info("Relay stopped")

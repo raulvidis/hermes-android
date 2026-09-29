@@ -155,32 +155,20 @@ class TestStartRelay:
 
         assert "failed to start within 10 seconds" in caplog.text
 
-    def test_a_failed_start_still_leaves_the_instance_registered(self, relay_mod, monkeypatch):
-        """Pinned, because it is what makes the next test fail: start_relay does
-        not roll _relay_instance back, so the dead state stays reachable through
-        the public API."""
+    def test_a_failed_start_rolls_the_instance_back(self, relay_mod, monkeypatch):
+        """The dead state must not stay reachable through the public API. Leaving
+        it registered is what makes the next stop_relay() — the teardown every
+        caller wraps around a start — reach for a loop the relay thread has
+        already closed."""
         self.threading._never_ready = True
         monkeypatch.setattr(relay_mod, "_run_loop", lambda state, ready: None)
 
         with pytest.raises(RuntimeError):
             relay_mod.start_relay(pairing_code="PAIRCODE", port=19555)
 
-        assert relay_mod._relay_instance is not None
+        assert relay_mod._relay_instance is None
         assert relay_mod.is_relay_running() is False
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: stop_relay() raises RuntimeError('Event loop is closed') when "
-            "the relay thread's loop has already finished. start_relay() leaves "
-            "_relay_instance pointing at the dead state after a failed bind, and "
-            "_run_loop() closes its loop in a finally block, so the very next "
-            "stop_relay() — the teardown every caller wraps around a start — "
-            "calls call_soon_threadsafe() on a closed loop and blows up instead "
-            "of shutting down. Nothing checks loop.is_closed(), and the "
-            "exception escapes the `with _relay_lock` block."
-        ),
-    )
     def test_stop_after_a_failed_start_does_not_raise(self, relay_mod, monkeypatch):
         self.threading._never_ready = True
         loop = asyncio.new_event_loop()
@@ -300,6 +288,48 @@ class TestStopRelay:
         state = relay_mod._RelayState(pairing_code="PAIRCODE", port=1)
         state.loop = None
         state.thread = None
+        monkeypatch.setattr(relay_mod, "_relay_instance", state)
+
+        relay_mod.stop_relay()
+
+        assert relay_mod._relay_instance is None
+
+    def test_a_loop_that_already_finished_does_not_raise(self, relay_mod, monkeypatch):
+        """_run_loop closes its loop in a finally, so a stop that lands after the
+        thread died — a crashed serve, or the teardown a caller wraps around a
+        failed start — hits call_soon_threadsafe() on a closed loop. That raises
+        RuntimeError("Event loop is closed"), which used to escape stop_relay()
+        and take the caller's cleanup with it.
+
+        start_relay() now rolls the dead instance back, so this state is reached
+        by a loop that dies *after* a successful start rather than by a failed
+        one; it is covered directly because the rollback hides it from the
+        start/stop test above.
+        """
+        loop = asyncio.new_event_loop()
+        loop.close()
+        state = relay_mod._RelayState(pairing_code="PAIRCODE", port=1)
+        state.loop = loop
+        state.shutdown_event = asyncio.Event()
+        monkeypatch.setattr(relay_mod, "_relay_instance", state)
+
+        relay_mod.stop_relay()
+
+        assert relay_mod._relay_instance is None
+
+    def test_a_loop_that_closes_between_the_check_and_the_signal_does_not_raise(
+        self, relay_mod, monkeypatch
+    ):
+        """The race the is_closed() answer cannot cover: the loop is open when
+        stop_relay() looks and closed by the time it calls."""
+
+        class LoopClosingUnderUs:
+            def call_soon_threadsafe(self, callback):
+                raise RuntimeError("Event loop is closed")
+
+        state = relay_mod._RelayState(pairing_code="PAIRCODE", port=1)
+        state.loop = LoopClosingUnderUs()
+        state.shutdown_event = asyncio.Event()
         monkeypatch.setattr(relay_mod, "_relay_instance", state)
 
         relay_mod.stop_relay()
