@@ -162,12 +162,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/swipe" -> InputCommands.swipe(body)
 
-            method == "POST" && path == "/open_app" -> {
-                val pkg = body.get("package")?.asString
-                    ?: return mapOf("error" to "Missing package") to 400
-                val result = ActionExecutor.openApp(pkg)
-                result to 200
-            }
+            method == "POST" && path == "/open_app" -> AppIntentCommands.openApp(body)
 
             method == "POST" && path == "/press_key" -> InputCommands.pressKey(body)
 
@@ -177,10 +172,7 @@ object CommandDispatcher {
 
             method == "POST" && path == "/wait" -> ScreenCommands.wait(body)
 
-            method == "GET" && path == "/apps" -> {
-                val apps = ActionExecutor.getInstalledApps()
-                mapOf("apps" to apps, "count" to apps.size) to 200
-            }
+            method == "GET" && path == "/apps" -> AppIntentCommands.apps()
 
             method == "GET" && path == "/current_app" -> ScreenCommands.currentApp()
 
@@ -344,31 +336,9 @@ object CommandDispatcher {
                 result to 200
             }
 
-            method == "POST" && path == "/intent" -> {
-                val action = body.get("action")?.asString ?: ""
-                val dataUri = body.get("dataUri")?.asString
-                val extrasObj = body.get("extras")?.asJsonObject
-                val extras = extrasObj?.let { obj ->
-                    val map = mutableMapOf<String, String>()
-                    obj.entrySet().forEach { (k, v) -> map[k] = v.asString }
-                    map
-                }
-                val packageOverride = body.get("packageOverride")?.asString
-                val result = ActionExecutor.sendIntent(action, dataUri, extras, packageOverride)
-                result to 200
-            }
+            method == "POST" && path == "/intent" -> AppIntentCommands.intent(body)
 
-            method == "POST" && path == "/broadcast" -> {
-                val action = body.get("action")?.asString ?: ""
-                val extrasObj = body.get("extras")?.asJsonObject
-                val extras = extrasObj?.let { obj ->
-                    val map = mutableMapOf<String, String>()
-                    obj.entrySet().forEach { (k, v) -> map[k] = v.asString }
-                    map
-                }
-                val result = ActionExecutor.sendBroadcast(action, extras)
-                result to 200
-            }
+            method == "POST" && path == "/broadcast" -> AppIntentCommands.broadcast(body)
 
             method == "POST" && path == "/speak" -> {
                 val text = body.get("text")?.asString ?: ""
