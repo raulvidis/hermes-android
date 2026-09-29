@@ -1077,14 +1077,85 @@ class TestBridgeTlsVerification:
         assert len(seen) == 3, f"expected three HTTP calls, saw {seen}"
         assert seen == [False, False, False]
 
-    # ── F33: the suppression must not outlive the call that needed it ─────────
+    # ── F37: one narrow, module-level filter instead of a per-call context ─────
+    #
+    # F33's `warnings.catch_warnings()` was correctly scoped but not thread-safe:
+    # it swaps the *process-wide* `warnings.filters` list for the duration of the
+    # block, and every swap bumps the filter version, invalidating every module's
+    # `__warningregistry__` cache. In a gateway that can serve tool calls on several
+    # threads, one call's context could also un-suppress — or suppress — another
+    # call's warning. A single `filterwarnings` entry whose *message* is pinned to
+    # the loopback hosts is both narrower and installed once.
 
-    def test_the_process_warning_filters_are_left_alone(self, tool_mod, monkeypatch, bridge):
-        """`urllib3.disable_warnings()` rewrites the process-wide filter list and
-        never restores it. This module runs inside a long-lived gateway, so calling
-        it here silenced `InsecureRequestWarning` for every other library in the
-        process that makes an unverified HTTPS call — including one that never
-        decided to, and would have wanted to hear about it."""
+    @staticmethod
+    def _urllib3_message(host):
+        """The exact text urllib3 2.x warns with (connectionpool.py, `_validate_conn`).
+
+        Spelled out rather than triggered, because triggering it needs a real TLS
+        handshake against a real unverified socket. The host is what varies, and it
+        comes from `parse_url(url).host` — bracketed for an IPv6 literal, which is
+        the easy way to get this pin wrong.
+        """
+        return (
+            f"Unverified HTTPS request is being made to host '{host}'. "
+            "Adding certificate verification is strongly advised. See: "
+            "https://urllib3.readthedocs.io/en/latest/advanced-usage.html#tls-warnings"
+        )
+
+    def test_the_pin_covers_every_host_form_urllib3_puts_in_the_message(self, tool_mod):
+        from urllib3.util import parse_url
+
+        for url in [
+            "https://localhost:8766/ping",
+            "https://127.0.0.1:8766/ping",
+            "https://[::1]:8766/ping",
+            "https://LOCALHOST:8766/ping",
+        ]:
+            host = parse_url(url).host
+            assert self._suppressed(tool_mod, host), (
+                f"{url} reaches urllib3 as host {host!r}, which the filter must cover"
+            )
+
+    def test_a_non_loopback_host_still_warns(self, tool_mod):
+        """The whole point of pinning the message: an unverified request to anywhere
+        else must still be heard, including a host that merely starts with a
+        loopback name."""
+        for host in [
+            "relay.example.com",
+            "203.0.113.7",
+            "localhost.example.com",
+            "127.0.0.1.evil.test",
+            "::2",
+            "10.0.0.5",
+        ]:
+            assert not self._suppressed(tool_mod, host), f"{host!r} must still warn"
+
+    def test_the_filter_is_installed_once_and_idempotently(self, tool_mod):
+        import warnings
+
+        from urllib3.exceptions import InsecureRequestWarning
+
+        def matching():
+            return [
+                entry
+                for entry in warnings.filters
+                if entry[2] is InsecureRequestWarning
+                and getattr(entry[1], "pattern", None)
+                == tool_mod._LOOPBACK_INSECURE_REQUEST_MESSAGE
+            ]
+
+        for _ in range(3):
+            tool_mod._install_loopback_warning_filter()
+
+        assert len(matching()) == 1, (
+            "repeated installs must not stack duplicate filters and bump the "
+            f"warning-filter version each time: {len(matching())} entries"
+        )
+        assert matching()[0][0] == "ignore"
+
+    def test_no_blanket_insecure_request_suppression_is_installed(self, tool_mod, bridge, monkeypatch):
+        """F33's actual complaint, still true under the new mechanism: nothing this
+        module does may silence InsecureRequestWarning as a category."""
         import warnings
 
         from urllib3.exceptions import InsecureRequestWarning
@@ -1092,39 +1163,27 @@ class TestBridgeTlsVerification:
         rsps, _ = bridge
         rsps.add(responses.GET, "https://localhost:8766/ping", json={"status": "ok"})
         monkeypatch.setenv("ANDROID_BRIDGE_URL", "https://localhost:8766")
-        # Force the path even if an earlier test in the session already took it.
-        monkeypatch.setattr(tool_mod, "_insecure_warning_silenced", False, raising=False)
-        before = list(warnings.filters)
 
         tool_mod.android_ping()
 
-        assert warnings.filters == before, (
-            "a tool call changed the gateway's process-wide warning filters"
-        )
-        assert not any(
-            f[0] == "ignore" and f[2] is InsecureRequestWarning for f in warnings.filters
-        ), "InsecureRequestWarning was silenced process-wide"
+        blanket = [
+            entry
+            for entry in warnings.filters
+            if entry[0] == "ignore"
+            and entry[2] is InsecureRequestWarning
+            and getattr(entry[1], "pattern", None)
+            != tool_mod._LOOPBACK_INSECURE_REQUEST_MESSAGE
+        ]
+        assert not blanket, f"a blanket InsecureRequestWarning ignore was installed: {blanket}"
 
-    def test_the_suppression_is_scoped_to_one_call(self, tool_mod):
-        import warnings
+    def test_the_per_call_context_manager_is_gone(self, tool_mod):
+        """Pinned so it cannot come back: `catch_warnings` mutates the process-wide
+        filter list and is documented as not thread-safe."""
+        assert not hasattr(tool_mod, "_loopback_tls_warnings_suppressed")
 
-        from urllib3.exceptions import InsecureRequestWarning
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            with tool_mod._loopback_tls_warnings_suppressed():
-                warnings.warn(InsecureRequestWarning("inside"), InsecureRequestWarning)
-            warnings.warn(InsecureRequestWarning("outside"), InsecureRequestWarning)
-
-        messages = [str(w.message) for w in caught]
-        assert "inside" not in messages, "the context did not suppress the warning"
-        assert "outside" in messages, "the suppression outlived the context"
-
-    def test_a_verified_bridge_call_does_not_touch_the_filters(
-        self, tool_mod, monkeypatch, bridge
-    ):
-        """The common case — plaintext or a public https relay — must not enter the
-        suppression path at all."""
+    def test_a_verified_bridge_call_installs_no_filter(self, tool_mod, monkeypatch, bridge):
+        """The common case — plaintext or a public https relay — never relaxes
+        verification, so it must not touch the warning filters either."""
         import warnings
 
         rsps, _ = bridge
@@ -1135,6 +1194,22 @@ class TestBridgeTlsVerification:
         tool_mod.android_ping()
 
         assert warnings.filters == before
+
+    def _suppressed(self, tool_mod, host):
+        """True when a warning for *host* is swallowed by the module's filter."""
+        import warnings
+
+        from urllib3.exceptions import InsecureRequestWarning
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warnings.filterwarnings(
+                "ignore",
+                category=InsecureRequestWarning,
+                message=tool_mod._LOOPBACK_INSECURE_REQUEST_MESSAGE,
+            )
+            warnings.warn(self._urllib3_message(host), InsecureRequestWarning)
+        return not caught
 
     def test_a_public_https_bridge_stays_fully_verified(self, tool_mod, monkeypatch, bridge):
         rsps, _ = bridge

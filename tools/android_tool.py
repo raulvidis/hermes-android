@@ -51,7 +51,6 @@ Tools registered:
 """
 
 import atexit
-import contextlib
 import json
 import os
 import re
@@ -146,23 +145,22 @@ def _auth_headers() -> dict:
 
 
 def _bridge_request(verb: str, url: str, **kwargs):
-    """One HTTP call to the bridge, with the TLS decision and its warning scope.
+    """One HTTP call to the bridge, with the TLS decision and its warning filter.
 
     Every bridge call site goes through here, so a new one cannot forget `verify`
-    (F19) or leak the loopback warning suppression into the rest of the process
-    (F33). **Never** point this at a non-bridge URL: it attaches the pairing token,
-    which is why `_get_public_ip()`'s calls to third-party IP-echo services do not
-    use it.
+    (F19) or the loopback-only warning filter that goes with relaxing it (F37).
+    **Never** point this at a non-bridge URL: it attaches the pairing token, which
+    is why `_get_public_ip()`'s calls to third-party IP-echo services do not use it.
     """
     kwargs.setdefault("headers", _auth_headers())
     kwargs.setdefault("timeout", _timeout())
     verify = _bridge_tls_verify()
     kwargs["verify"] = verify
-    send = getattr(requests, verb)
-    if verify:
-        return send(url, **kwargs)
-    with _loopback_tls_warnings_suppressed():
-        return send(url, **kwargs)
+    if not verify:
+        # F37: one narrow, message-pinned filter for the loopback hosts, installed
+        # once — not a per-call swap of the process-wide filter list.
+        _install_loopback_warning_filter()
+    return getattr(requests, verb)(url, **kwargs)
 
 
 # Hosts that mean "this machine". An https:// bridge URL aimed at one of these is
@@ -170,26 +168,64 @@ def _bridge_request(verb: str, url: str, **kwargs):
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
-@contextlib.contextmanager
-def _loopback_tls_warnings_suppressed():
-    """Silence urllib3's insecure-request warning for ONE bridge call (review F33).
+# The warning urllib3 emits for an unverified HTTPS request, pinned to the loopback
+# hosts `_bridge_tls_verify()` relaxes for and to nothing else (review F37).
+#
+# The message text is urllib3's own, from `connectionpool.py::_validate_conn`:
+#   f"Unverified HTTPS request is being made to host '{conn.host}'. ..."
+# `conn.host` comes from `urllib3.util.parse_url(url).host`, which keeps the
+# brackets on an IPv6 literal — `https://[::1]:8766` arrives as `[::1]`, so the
+# bracketed alternative is not optional. `warnings.filterwarnings` compiles the
+# message case-insensitively and matches it at the start, which covers a URL whose
+# host was written in upper case.
+#
+# `TestBridgeTlsVerification` re-derives every one of those host forms through
+# `parse_url` and asserts the filter swallows exactly them, so a urllib3 that
+# changes the wording fails a test rather than silently starting to shout.
+_LOOPBACK_INSECURE_REQUEST_MESSAGE = (
+    r"Unverified HTTPS request is being made to host "
+    r"'(localhost|127\.0\.0\.1|::1|\[::1\])'"
+)
+def _install_loopback_warning_filter() -> None:
+    """Install the loopback-only insecure-request filter, once (review F37).
 
-    `urllib3.disable_warnings()` rewrites the process-wide warning filter list and
-    never puts it back. This module runs inside a long-lived gateway, so calling it
-    here silenced `InsecureRequestWarning` for every other library in the process
-    that makes an unverified HTTPS call — including one that never made the decision
-    `_bridge_tls_verify()` made and would have wanted to hear about it.
-    `warnings.catch_warnings()` saves and restores the filter list around the single
-    request instead, so the scope is exactly the call that asked for it.
+    F19's first attempt called `urllib3.disable_warnings()`, which silences the
+    whole category process-wide and permanently; F33 replaced that with a per-call
+    `warnings.catch_warnings()`, which was correctly scoped but swaps the
+    *process-wide* filter list for the duration of the block and is documented as
+    not thread-safe — and it bumps the filter version on every call, invalidating
+    every module's `__warningregistry__` cache. A gateway serving tool calls on
+    several threads could have one call's context suppress, or un-suppress, another
+    call's warning.
+
+    One narrow filter, installed once, is both safer and cheaper: it matches on the
+    message, so an unverified request to any other host still warns, and nothing is
+    swapped at request time.
     """
-    with warnings.catch_warnings():
-        try:
-            from urllib3.exceptions import InsecureRequestWarning
-
-            warnings.simplefilter("ignore", InsecureRequestWarning)
-        except Exception:
-            pass
-        yield
+    try:
+        from urllib3.exceptions import InsecureRequestWarning
+    except Exception:
+        return
+    # Idempotent by inspection rather than by a module flag. A flag is wrong the
+    # first time anything else replaces `warnings.filters` — which is exactly what
+    # `warnings.catch_warnings()` does, legitimately, in any library that uses it —
+    # and then the filter is gone while the flag still says it is installed. The
+    # scan is a handful of tuples on the unverified-loopback path only, and
+    # `filterwarnings` (which bumps the filter version, invalidating every module's
+    # `__warningregistry__`) runs only when the entry really is missing. It also
+    # keeps the two copies of this file, loaded side by side in some deployments,
+    # from stacking duplicate filters.
+    for entry in warnings.filters:
+        if (
+            entry[2] is InsecureRequestWarning
+            and getattr(entry[1], "pattern", None) == _LOOPBACK_INSECURE_REQUEST_MESSAGE
+        ):
+            return
+    warnings.filterwarnings(
+        "ignore",
+        category=InsecureRequestWarning,
+        message=_LOOPBACK_INSECURE_REQUEST_MESSAGE,
+    )
 
 
 def _bridge_tls_verify() -> bool:
@@ -217,9 +253,9 @@ def _bridge_tls_verify() -> bool:
     host = urlparse(url).hostname
     if host is None or host.strip("[]").lower() not in _LOOPBACK_HOSTS:
         return True
-    # The warning this decision provokes is suppressed per call, by
-    # _loopback_tls_warnings_suppressed() in _bridge_request — never process-wide
-    # (review F33).
+    # The warning this decision provokes is silenced by one narrow, message-pinned
+    # filter covering exactly these hosts — never for the whole category, and never
+    # per call (reviews F33, F37).
     return False
 
 
