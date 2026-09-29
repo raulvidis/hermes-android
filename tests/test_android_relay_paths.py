@@ -521,6 +521,39 @@ class TestPairingRotationDrop:
         assert newcomer.closed is False
         assert state.phone_ws is newcomer
 
+    def test_no_session_at_rotation_leaves_a_new_session_in_flight_alone(self, relay_mod):
+        """Review F20: the `stale_ws is None` branch called `_fail_inflight()`
+        unconditionally. Nothing was connected when the code rotated, so any
+        request pending at that point belongs to a session that authenticated with
+        the **new** code — the phone re-dials immediately, and its first tool call
+        can easily be in flight before the scheduled drop runs. Failing those
+        futures answered a live, correctly authenticated session with
+        `ConnectionError("Phone disconnected (pairing code rotated)")`, and the
+        `android_ping()` an agent runs straight after `android_setup` is exactly
+        the call that lands there."""
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="NEWCODE")
+            newcomer = FakePhoneSocket()
+            state.phone_ws = newcomer
+            future = state.loop.create_future()
+            async with state.pending_lock:
+                state.pending["rid-new"] = future
+            await relay_mod._drop_phone_after_rotation(state, None)
+            async with state.pending_lock:
+                still_pending = dict(state.pending)
+            return state, newcomer, future, still_pending
+
+        state, newcomer, future, still_pending = run(scenario())
+
+        assert newcomer.closed is False
+        assert state.phone_ws is newcomer
+        assert not future.done(), (
+            "a NEW-code session's in-flight request must not be failed by a "
+            "rotation that had nothing to drop"
+        )
+        assert list(still_pending) == ["rid-new"]
+        future.cancel()
+
     def test_set_pairing_code_captures_the_socket_it_saw(self, relay_mod, monkeypatch):
         """The capture has to happen inside `set_pairing_code`, under `_relay_lock`.
         Reading `state.phone_ws` later — from the coroutine, on the relay's loop —

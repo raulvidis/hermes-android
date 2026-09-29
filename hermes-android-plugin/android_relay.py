@@ -284,13 +284,19 @@ async def _drop_phone_after_rotation(
     authenticated with the NEW code in the meantime is left alone.
 
     A `None` *stale_ws* means nothing was connected at rotation time, so there is
-    no old-code session to drop. It must not be forwarded as `expected_ws`:
-    `_cleanup_phone()` skips its identity guard for a `None`, which would close
-    whichever phone connected afterwards. In-flight requests are still failed, so
-    a caller cannot hang on a future whose phone is gone.
+    no old-code session to drop and nothing at all to do. It must not be forwarded
+    as `expected_ws` — `_cleanup_phone()` skips its identity guard for a `None`,
+    which would close whichever phone connected afterwards — and it must not fail
+    in-flight requests either (review F20). Every pending request at that point
+    belongs to a session that authenticated with the **new** code: the phone
+    re-dials the moment its code rotates, and its first tool call can be in flight
+    before this coroutine runs. `_fail_inflight()` used to answer those with
+    `ConnectionError("Phone disconnected (pairing code rotated)")`, so a rotation
+    with nothing to drop still broke a healthy session. A future whose phone really
+    is gone is failed by `_cleanup_phone()` on the disconnect path, which is where
+    that belongs.
     """
     if stale_ws is None:
-        await _fail_inflight(state, "pairing code rotated")
         return
     await _cleanup_phone(state, reason="pairing code rotated", expected_ws=stale_ws)
 
