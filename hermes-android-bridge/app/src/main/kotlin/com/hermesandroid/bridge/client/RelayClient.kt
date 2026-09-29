@@ -58,6 +58,30 @@ object RelayClient {
     private const val KEY_LAST_FIRE = "watchdog_last_fire_ms"
     private const val KEY_REVIVAL_ENABLED = "termux_revival_enabled"
 
+    /** How long the watchdog waits after firing before retrying the connection. */
+    internal const val REVIVAL_RECONNECT_DELAY_MS = 30_000L
+
+    /**
+     * Scope the post-revival delayed reconnect runs on (review F9).
+     *
+     * This must NOT be the per-connection [scope]. The reconnect calls
+     * [connect], whose first statement is [disconnect] — and `disconnect()` does
+     * `scope?.cancel(); scope = null`, cancelling the very scope the caller is
+     * running on. It only ever worked because nothing between `disconnect()` and
+     * the end of `doConnect()` suspends, so cancellation of the enclosing job
+     * could not interrupt it. The moment `connect()` or `doConnect()` gains a
+     * suspension point — `withContext(Dispatchers.Main)` to update the UI, an
+     * `await` on DNS — the first one throws `CancellationException`, the
+     * reconnect aborts silently, and the watchdog fires the script but never
+     * reconnects: exactly the bug the comment at the call site claims was fixed.
+     */
+    internal var revivalScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Seam so a test can observe the reconnect without opening a real WebSocket. */
+    internal var revivalConnector: (url: String, code: String) -> Unit = { url, code ->
+        connect(url, code)
+    }
+
     // Termux RUN_COMMAND target. Termux requires an absolute path under its own
     // $HOME, and the user must have enabled Termux > Settings > "Allow external
     // apps" — otherwise startService throws SecurityException.
@@ -496,7 +520,7 @@ object RelayClient {
         }
     }
 
-    private fun reconnectDelayed() {
+    internal fun reconnectDelayed() {
         try {
             val url = prefs?.getString(KEY_SERVER_URL, null)
             // Read through PairingManager, not a cached copy: a code rotated while
@@ -506,9 +530,12 @@ object RelayClient {
                 Log.w(TAG, "Delayed reconnect skipped: no saved server/code")
                 return
             }
-            scope?.launch {
-                kotlinx.coroutines.delay(30_000L)  // 30s later, bounded by the same cooldown
-                connect(url, code)
+            // revivalScope, not scope: see its doc. Launching on the
+            // per-connection scope made this coroutine cancel itself the instant
+            // it called connect().
+            revivalScope.launch {
+                kotlinx.coroutines.delay(REVIVAL_RECONNECT_DELAY_MS)
+                revivalConnector(url, code)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Delayed reconnect not scheduled: $e")
