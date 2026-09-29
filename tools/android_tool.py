@@ -220,9 +220,17 @@ def _get(path: str) -> dict:
 def android_ping() -> str:
     try:
         data = _get("/ping")
-        return json.dumps({"status": "ok", "bridge": data})
     except Exception as e:
         return json.dumps({"status": "error", "message": _safe_error(e)})
+    # A 200 whose body is not JSON comes back from _extract_response as
+    # {"error": <raw text>} — a proxy error page, not a healthy bridge. The
+    # other tools pass that shape straight through, so it reads as a failure;
+    # ping is the one tool that overlays a "status" of its own, and answering
+    # "ok" here is the wrong signal exactly when the relay is handing back
+    # somebody else's error page.
+    if isinstance(data, dict) and "error" in data:
+        return json.dumps({"status": "error", "message": data["error"]})
+    return json.dumps({"status": "ok", "bridge": data})
 
 
 def android_read_screen(include_bounds: bool = False, include_system_ui: bool = False) -> str:

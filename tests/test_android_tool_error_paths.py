@@ -277,24 +277,29 @@ class TestMalformedJsonOnASuccessStatus:
         assert "MEDIA:" not in result
         assert as_json(result) == {"error": "<html>502</html>"}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: android_ping reports status 'ok' for a 200 whose body is not "
-            "JSON. _extract_response turns the undecodable body into "
-            '{"error": "<raw text>"} and hands it back as success data, so ping '
-            "answers {'status': 'ok', 'bridge': {'error': ...}}. Agents read "
-            "status=='ok' as 'bridge is healthy' — exactly the wrong signal when "
-            "the relay is returning a proxy error page."
-        ),
-    )
     def test_ping_does_not_claim_ok_when_the_body_is_not_json(self, tool_mod, bridge):
+        """A proxy in front of the relay answers 200 with an HTML error page.
+        _extract_response turns the undecodable body into {"error": <raw text>};
+        ping must not dress that up as a healthy bridge, because agents read
+        status=='ok' as 'bridge is fine' and stop looking."""
         rsps, url = bridge
         rsps.add(responses.GET, f"{url}/ping", body="<html>502 Bad Gateway</html>", status=200)
 
         result = as_json(tool_mod.android_ping())
 
         assert result["status"] == "error", f"ping called a non-JSON 200 healthy: {result}"
+        assert "<html>502 Bad Gateway</html>" in result["message"]
+
+    def test_ping_does_not_claim_ok_when_the_bridge_returns_an_error_body(self, tool_mod, bridge):
+        """Same lie, JSON flavour: a 200 carrying {"error": ...} is the bridge
+        reporting a problem, not a health check passing."""
+        rsps, url = bridge
+        rsps.add(responses.GET, f"{url}/ping", json={"error": "phone ws gone"}, status=200)
+
+        result = as_json(tool_mod.android_ping())
+
+        assert result["status"] == "error"
+        assert result["message"] == "phone ws gone"
 
 
 class TestCheckRequirements:
