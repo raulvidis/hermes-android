@@ -12,8 +12,8 @@ read_when:
 ## Checklist
 
 1. **CHANGELOG.md** — move items from `## [Unreleased]` into a new `## [X.Y.Z]` section (dated). Reset `[Unreleased]` to empty. One bullet per entry; preserve `#PR` + contributor credit.
-2. **Bump version** in `pyproject.toml` (`[project] version = "X.Y.Z"`). Keep `setup.py` consistent if it pins a version.
-3. **Bump version** in plugin metadata (`hermes-android-plugin/plugin.yaml`) and any `vX.Y.Z` strings in README if present.
+2. **Bump version** in `pyproject.toml` (`[project] version = "X.Y.Z"`). That is the only place the Python version is declared — `setup.py` carries packaging hints and inherits the metadata. `tests/test_version_consistency.py` fails if a second declaration reappears.
+3. **Bump version** in plugin metadata (`hermes-android-plugin/plugin.yaml`), in the APK (`hermes-android-bridge/app/build.gradle.kts` — `versionName`, and increment `versionCode`), and any `vX.Y.Z` strings in README if present. `tests/test_version_consistency.py` pins plugin.yaml, `versionName` and the installed dist metadata to `pyproject.toml`, so a missed one fails the suite rather than shipping.
 4. **Commit:** `chore(release): vX.Y.Z` (explicit paths only).
 5. **Tag:** `git tag vX.Y.Z`.
 6. **GitHub Release:** create release `vX.Y.Z` with the CHANGELOG section as the body. The `latest-build` APK already carries the current build; attach `hermes-android-<version>.apk` to the versioned release if a pinned artifact is wanted.
