@@ -6,7 +6,12 @@ import kotlinx.coroutines.delay
 
 object WakeLockManager {
 
-    private var powerManager: PowerManager? = null
+    // internal, not private: the test seam. WakeLockManager.wake() returns true
+    // unconditionally once this is non-null, so return-value assertions prove
+    // nothing about acquireWakeLock() — the tests have to observe the lock
+    // itself, and that means supplying one. Same idea as
+    // CommandDispatcher.batteryContext.
+    internal var powerManager: PowerManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private const val HOLD_MS = 3_000L
 
