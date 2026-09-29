@@ -171,7 +171,7 @@ For any task, follow this pattern and then STOP:
 5. `android_tap_text("Type a message")`
 6. `android_type("<message text>")`
 7. **STOP** — Confirm with user before sending
-8. `android_tap_text("Send")` or `android_press_key("enter")`
+8. `android_tap_text("Send")` — `android_press_key` has no `enter` key; the bridge rejects keyboard keys (see the Keys section above).
 
 **Pitfalls:** Message input is `android.widget.EditText`. Read screen after typing to verify before sending.
 
@@ -184,13 +184,13 @@ Screenshot + vision loops are slow and burn tokens; the tree has the text alread
 2. For thread history: `android_open_app("com.google.android.apps.messaging")` → `android_tap_text("<contact>")` → `android_read_screen()`. Scroll with `android_scroll("up")` and re-read for older messages.
 3. To locate a specific message or conversation, `android_find_nodes(text="<keyword>")` is much cheaper than reading the whole screen.
 
-**Drafting without sending (review-first workflow):**
-```
-android_send_intent("android.intent.action.SENDTO",
-                    data_uri="smsto:<number>",
-                    extras={"sms_body": "<draft text>"})
-```
-This opens the compose screen pre-filled — the user reviews and hits send themselves. Prefer this over `android_send_sms` whenever the user wants to approve messages; `android_send_sms` sends immediately and must be confirmed with the user first.
+**Drafting without sending (review-first workflow):** there is no intent
+shortcut. The bridge blocks the `smsto:`, `mmsto:` and `tel:` URI schemes and
+every `android.settings.*` action, so `android_send_intent` cannot open a
+pre-filled compose screen. Draft in the conversation instead: show the recipient
+and the exact text, get an explicit yes, then call `android_send_sms(to, body)`
+once. `android_send_sms` sends immediately and must be confirmed with the user
+first.
 
 **Contact lookup:** `android_search_contacts("<name>")` returns numbers directly — don't navigate the Contacts app.
 

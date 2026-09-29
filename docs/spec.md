@@ -19,7 +19,7 @@ read_when:
 ## Non-goals
 
 - Not a granular permission system — once paired, the agent has full device access. Scope is handled by trust, not by per-tool ACLs.
-- Not encrypted transport (prototype): connections are `ws://`. TLS is delegated to a reverse proxy (nginx/caddy), not built in.
+- Not a certificate manager: TLS is opt-in and BYO cert/key (`ANDROID_RELAY_CERT` + `ANDROID_RELAY_KEY` on the relay). There is no issuance, renewal, or pinning, and plaintext `ws://` stays the default. A reverse proxy (nginx/caddy) in front of the relay is still a supported alternative.
 - Not a persistent command audit log (only stdout logging at INFO/DEBUG).
 - Not iOS (future idea, not committed).
 - The Android app does not depend on the Python toolset — Python is server-side only.
@@ -28,7 +28,9 @@ read_when:
 
 - Tool names (`android_*`) and their core argument shapes are the stable public surface for hermes-agent; additive changes preferred, removals are breaking.
 - Command envelope (`request_id`/`method`/`path`/`params`/`body` ↔ `request_id`/`result`/`status`) is the bridge↔relay contract.
-- Ports: phone Ktor server `8765`, relay `8766` (overridable via env).
+- Route allowlist: the relay forwards only the paths in `_ROUTES` (`tools/android_relay.py`). A route added to `CommandDispatcher` is reachable over direct USB/LAN but **not** over the relay until it is allowlisted there; `docs/architecture.md` is pinned to `_ROUTES` in both directions by test.
+- Ports: phone Ktor server `8765` (fixed — `BridgeApplication` starts it with no override), relay `8766` (overridable via `ANDROID_RELAY_PORT`, read from the process environment only).
+- Transport: `ws://` by default; `wss://` when the relay has a cert+key and the phone is given an `https://` or `wss://` server address. The bridge validates with the platform trust store, so the certificate must be CA-trusted.
 - Pairing alphabet excludes confusable chars (0/O/1/I); codes are case-sensitive.
 
 ## Security posture

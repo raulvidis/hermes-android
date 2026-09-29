@@ -132,7 +132,7 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 | `android_swipe` | Swipe up/down/left/right |
 | `android_scroll` | Scroll screen or element |
 | `android_open_app` | Launch app by package name |
-| `android_press_key` | Press back, home, recents, etc. |
+| `android_press_key` | Press a global key: `back`, `home`, `recents`, `notifications`, `quick_settings`, `power`, `lock_screen`, `take_screenshot`, `wake` |
 | `android_wait` | Wait for element to appear |
 | `android_get_apps` | List installed apps |
 | `android_current_app` | Get foreground app info |
@@ -147,13 +147,13 @@ All other tools (tap, swipe, type, screenshot, read screen, open apps, etc.) wor
 | `android_search_contacts` | Search contacts by name |
 | `android_send_sms` | Send SMS to a phone number |
 | `android_call` | Make a phone call or open dialer |
-| `android_media` | Control media playback (play, pause, next, previous) |
+| `android_media` | Control media playback (play, pause, toggle, next, previous) |
 | `android_macro` | Execute a sequence of android tool calls as ordered steps in one request |
 | `android_send_intent` | Send an Android intent |
 | `android_broadcast` | Send a broadcast intent |
 | `android_clipboard_read` | Read clipboard contents |
 | `android_clipboard_write` | Write text to clipboard |
-| `android_notifications` | Read current notifications |
+| `android_notifications` | Read current notifications (dismissed ones only with `include_removed=true`) |
 | `android_events` | Read recent accessibility events |
 | `android_event_stream` | Stream accessibility events in real-time |
 | `android_screen_record` | Record screen video for a duration |
@@ -183,12 +183,18 @@ ones after successful finalization.
 | Call Phone | Settings > Apps > Permissions > Phone | `android_call` (auto-dial) |
 | Notification Listener | Settings > Special app access > Notification access | `android_notifications`, `android_events` |
 
+The manifest also declares `com.termux.permission.RUN_COMMAND` for the opt-in
+**Termux Auto-Revival** switch in the app (default OFF): after repeated relay
+failures it fires a Termux `RUN_COMMAND` intent to restart the stack. It targets a
+fixed script path and needs Termux's *Allow external apps* enabled — see
+[docs/configuration.md](docs/configuration.md) before turning it on.
+
 ## Architecture
 
 **Android app (Kotlin):**
 - AccessibilityService reads the UI tree and performs taps/types/swipes
 - WebSocket client (OkHttp) connects out to the Hermes server
-- Ktor HTTP server for local/USB development
+- Ktor HTTP server on port 8765 for local/USB development (fixed port)
 - Pairing code authentication
 - Screenshot capture via AccessibilityService API
 - Terminal-themed UI
@@ -198,6 +204,7 @@ ones after successful finalization.
 - Tools register into hermes-agent's tool registry
 - Rate-limited authentication (5 attempts / 60s, then 5min block)
 - Auto-detects server public IP for setup instructions
+- Optional TLS: set `ANDROID_RELAY_CERT` + `ANDROID_RELAY_KEY` and the relay serves `https`/`wss` (see [docs/configuration.md](docs/configuration.md))
 
 ## Security
 
@@ -209,7 +216,10 @@ See [SECURITY.md](SECURITY.md) for details. Key points:
 - Phone connects out to the relay — but it also listens on `0.0.0.0:8765` for
   direct USB/LAN use, with no toggle, so it is reachable from the local network
 - `wss://` by default for a public relay host; plaintext `ws://` allows command
-  injection, not just sniffing, so keep it to a LAN you control
+  injection, not just sniffing, so keep it to a LAN you control. Relay-side TLS
+  needs `ANDROID_RELAY_CERT` + `ANDROID_RELAY_KEY` (or a TLS reverse proxy in
+  front); the app validates with the platform trust store, so the certificate
+  must be CA-trusted — no self-signed certs, no pinning, no bypass
 - Password fields are redacted from screen reads and events; screenshots and
   screen recordings are pixels and are not
 - Full device access once paired (screen, input, microphone, SMS, calls, contacts,
@@ -236,7 +246,6 @@ direct SMS/calls, location, microphone recording, screen-wake key, text-to-speec
 and a persistent systemd relay are all in. What's still ahead:
 
 ### Upcoming
-- TLS/WSS support for encrypted phone↔server communication
 - Server-side call counter to prevent tool call loops
 - Better error reporting (screenshot + annotated explanation on failure)
 - File transfer — send files/photos between phone and server
