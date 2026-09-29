@@ -641,19 +641,14 @@ object ActionExecutor {
                 smsManager.sendTextMessage(to, null, body, sentIntents.firstOrNull(), null)
             }
             if (registered) {
-                SmsSendReport.describe(
-                    report.await(timeoutMs),
-                    parts.size,
-                    timeoutMs,
-                    // F23: read after the wait, so the tally is complete. Some
-                    // segments confirmed plus one failure is "partially sent, do not
-                    // resend", not the "failed, retry is safe" answer a bare failure
-                    // code used to produce.
-                    report.confirmedParts,
-                    // F30: and "failed" needs every segment accounted for. A failure
-                    // plus segments that never reported is unconfirmed, not retryable.
-                    report.reportedParts,
-                )
+                // F36: ONE snapshot, not `await()` followed by two separate counter
+                // reads. The receiver is still registered when the bound runs out,
+                // so a late RESULT_OK landing between the reads turned a partly
+                // delivered message into confirmed=0/reported=parts — the shape
+                // describe() maps to "failed, a retry is safe". The tally's
+                // completeness (F30) and its confirmed count (F23) now describe the
+                // same instant by construction.
+                SmsSendReport.describe(report.awaitTally(timeoutMs), parts.size, timeoutMs)
             } else {
                 // F27: with no receiver no report can arrive, so waiting out the
                 // bound would spend ten seconds of the caller's budget learning

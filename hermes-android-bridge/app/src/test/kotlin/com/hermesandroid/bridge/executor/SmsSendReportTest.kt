@@ -100,7 +100,7 @@ class SmsSendReportTest {
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
 
         assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE, outcome)
-        assertEquals(1, report.confirmedParts)
+        assertEquals(1, report.snapshot().confirmedParts)
         assertTrue(
             "one segment report is still outstanding, so the count is not final " +
                 "yet; waited ${elapsedMs}ms of a ${timeout}ms bound",
@@ -128,7 +128,7 @@ class SmsSendReportTest {
         val elapsedMs = (System.nanoTime() - started) / 1_000_000L
 
         assertEquals(SmsManager.RESULT_ERROR_RADIO_OFF, outcome)
-        assertEquals("both confirmed segments must be counted", 2, report.confirmedParts)
+        assertEquals("both confirmed segments must be counted", 2, report.snapshot().confirmedParts)
         assertTrue(
             "all three reports had arrived; waiting ${elapsedMs}ms more is pure latency",
             elapsedMs < 1_000L,
@@ -151,8 +151,8 @@ class SmsSendReportTest {
             SmsManager.RESULT_ERROR_RADIO_OFF,
             outcome,
         )
-        assertEquals(0, report.confirmedParts)
-        assertEquals(3, report.reportedParts)
+        assertEquals(0, report.snapshot().confirmedParts)
+        assertEquals(3, report.snapshot().reportedParts)
         assertTrue("waited ${elapsedMs}ms for reports that had all arrived", elapsedMs < 1_000L)
     }
 
@@ -163,8 +163,127 @@ class SmsSendReportTest {
         report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
         report.onResult(Activity.RESULT_OK)
 
-        assertEquals(2, report.confirmedParts)
-        assertEquals(3, report.reportedParts)
+        val read = report.snapshot()
+        assertEquals(2, read.confirmedParts)
+        assertEquals(3, read.reportedParts)
+    }
+
+    // ── Review F36: the tally is read once, atomically ────────────────────────
+
+    /**
+     * The window the review named. `await()` returns when the bound runs out, but
+     * the receiver is still registered and the radio can still deliver: a
+     * `RESULT_OK` landing between the caller's read of `confirmedParts` and its read
+     * of `reportedParts` produced `confirmed = 0, reported = parts`, which is exactly
+     * the shape `describe` maps to [SmsSendReport.STATUS_FAILED] — "nothing went out,
+     * a retry is safe" — for a message that was partly delivered.
+     *
+     * The race itself is timing-dependent and cannot be replayed deterministically
+     * in a unit test, so what is pinned here is the contract that closes it: the
+     * tally is one immutable object, read under the same lock that guards every
+     * field, and a report arriving afterwards cannot move it.
+     */
+    @Test
+    fun `a tally snapshot taken before a late report is not moved by it`() {
+        val report = SmsSendReport(expectedReports = 2)
+        report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
+
+        val outcome = report.await(timeout) // bound runs out; one of two reported
+        val tally = report.snapshot()
+        report.onResult(Activity.RESULT_OK) // the late report
+
+        assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE, outcome)
+        assertEquals(0, tally.confirmedParts)
+        assertEquals(1, tally.reportedParts)
+        assertEquals("the snapshot must be immutable", 1, tally.reportedParts)
+        assertEquals("while a fresh snapshot does", 2, report.snapshot().reportedParts)
+
+        val safe = SmsSendReport.describe(tally, parts = 2, timeoutMs = timeout)
+        assertTrue(
+            "a partly delivered message must never be called retry-safe: ${safe.message}",
+            safe.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(safe))
+
+        // The split read the old call site performed, for contrast: confirmedParts
+        // taken before the late report and reportedParts after it.
+        val split = SmsSendReport.describe(
+            outcome,
+            parts = 2,
+            timeoutMs = timeout,
+            confirmedParts = 0,
+            reportedParts = 2,
+        )
+        assertFalse(split.success)
+        assertEquals("failed", statusOf(split))
+    }
+
+    @Test
+    fun `awaitTally returns the same answer await does, in one read`() {
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(Activity.RESULT_OK)
+        report.onResult(Activity.RESULT_OK)
+
+        val tally = report.awaitTally(timeout)
+
+        assertEquals(Activity.RESULT_OK, tally.outcomeCode)
+        assertEquals(Activity.RESULT_OK, report.await(timeout))
+        assertEquals(3, tally.confirmedParts)
+        assertEquals(3, tally.reportedParts)
+        assertTrue(tally.everySegmentReported)
+        assertEquals("sent", statusOf(SmsSendReport.describe(tally, parts = 3, timeoutMs = timeout)))
+    }
+
+    @Test
+    fun `a tally whose bound ran out reports itself incomplete`() {
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(Activity.RESULT_OK)
+
+        val tally = report.awaitTally(timeout)
+
+        assertNull("no failure and not every segment reported", tally.outcomeCode)
+        assertFalse(tally.everySegmentReported)
+        assertEquals(1, tally.confirmedParts)
+        assertEquals(1, tally.reportedParts)
+        assertEquals(
+            "queued_unconfirmed",
+            statusOf(SmsSendReport.describe(tally, parts = 3, timeoutMs = timeout)),
+        )
+    }
+
+    @Test
+    fun `reportedParts never disagrees with confirmedParts`() {
+        // The old getter was `confirmed.get() + rejected.get()` — two atomic reads,
+        // so a report landing between them made the sum describe two different
+        // instants. One lock, one read.
+        val report = SmsSendReport(expectedReports = 500)
+        val writer = Thread {
+            repeat(500) { index ->
+                report.onResult(
+                    if (index % 2 == 0) Activity.RESULT_OK
+                    else SmsManager.RESULT_ERROR_NO_SERVICE,
+                )
+            }
+        }
+        writer.start()
+        var violations = 0
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (writer.isAlive && System.nanoTime() < deadline) {
+            val tally = report.snapshot()
+            if (tally.confirmedParts > tally.reportedParts ||
+                tally.reportedParts > 500 ||
+                tally.confirmedParts < 0
+            ) {
+                violations++
+            }
+        }
+        writer.join(5_000L)
+
+        assertEquals("an inconsistent tally was observed $violations times", 0, violations)
+        val final = report.snapshot()
+        assertEquals(500, final.reportedParts)
+        assertEquals(250, final.confirmedParts)
     }
 
     @Test
@@ -172,7 +291,7 @@ class SmsSendReportTest {
         val report = SmsSendReport(expectedReports = 1)
         report.onResult(SmsManager.RESULT_ERROR_GENERIC_FAILURE)
 
-        assertEquals(1, report.reportedParts)
+        assertEquals(1, report.snapshot().reportedParts)
         assertEquals(SmsManager.RESULT_ERROR_GENERIC_FAILURE, report.await(timeout))
     }
 
@@ -400,8 +519,8 @@ class SmsSendReportTest {
             outcome,
             parts = 3,
             timeoutMs = timeout,
-            confirmedParts = report.confirmedParts,
-            reportedParts = report.reportedParts,
+            confirmedParts = report.snapshot().confirmedParts,
+            reportedParts = report.snapshot().reportedParts,
         )
         assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE, outcome)
         assertTrue(result.success)

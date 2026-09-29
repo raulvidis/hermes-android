@@ -5,7 +5,6 @@ import android.telephony.SmsManager
 import com.hermesandroid.bridge.model.ActionResult
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Bounded wait for the radio's SMS send report (review L2).
@@ -41,39 +40,83 @@ import java.util.concurrent.atomic.AtomicInteger
 class SmsSendReport(private val expectedReports: Int = 1) {
 
     private val latch = CountDownLatch(maxOf(expectedReports, 1))
-    private val failure = AtomicInteger(NOT_YET)
-    private val confirmed = AtomicInteger(0)
-    private val rejected = AtomicInteger(0)
 
     /**
-     * How many segments reported `RESULT_OK`. Read after [await].
+     * Guards the three tally fields below as one unit (review F36).
      *
-     * This is what separates "the send did not happen" from "part of it did"
-     * (review F23). Incremented before [CountDownLatch.countDown], so every report
-     * that contributed to releasing the latch is visible to the reader.
+     * They were three `AtomicInteger`s, which is atomic per field and useless across
+     * them: `await()` returns while the receiver is still registered, so a late
+     * `RESULT_OK` could land between the caller's read of [confirmedParts] and its
+     * read of [reportedParts]. `confirmed = 0, reported = parts` is precisely the
+     * shape [describe] maps to [STATUS_FAILED] — "nothing went out, a retry is
+     * safe" — for a message that was partly delivered. [snapshot] is therefore the
+     * only supported way to read the tally, and it reads all of it under one lock.
      */
-    val confirmedParts: Int
-        get() = confirmed.get()
+    private val lock = Any()
+    private var failureCode: Int = NOT_YET
+    private var confirmedCount: Int = 0
+    private var reportedCount: Int = 0
 
     /**
-     * How many segments reported at all, successfully or not. Read after [await].
+     * The tally as one immutable snapshot.
      *
-     * `confirmedParts + rejected`, i.e. the tally's completeness: `failed` is only
-     * a safe answer when every segment reported and none of them succeeded, because
-     * a segment that never reported may still have gone out (review F30).
+     * @param failureCode the first non-`RESULT_OK` code reported, or null
+     * @param confirmedParts how many segments reported `RESULT_OK`
+     * @param reportedParts how many segments reported at all
+     * @param everySegmentReported whether the wait ended because the tally was
+     *   complete rather than because the bound ran out
      */
-    val reportedParts: Int
-        get() = confirmed.get() + rejected.get()
+    data class Tally(
+        val failureCode: Int?,
+        val confirmedParts: Int,
+        val reportedParts: Int,
+        val everySegmentReported: Boolean,
+    ) {
+        /**
+         * What [describe] should treat as the radio's answer: the first failure if
+         * there was one, `RESULT_OK` if every segment reported and none failed, and
+         * null when the bound ran out with segments unheard from.
+         */
+        val outcomeCode: Int?
+            get() = failureCode ?: if (everySegmentReported) Activity.RESULT_OK else null
+    }
+
+    /**
+     * The tally right now, read atomically — the only way to read it (review F36).
+     * Pass the result to [Companion.describe].
+     *
+     * @param latchCompleted what [CountDownLatch.await] returned, when the caller has
+     *   just waited; without it, completeness is inferred from the count.
+     */
+    fun snapshot(latchCompleted: Boolean = false): Tally = synchronized(lock) {
+        Tally(
+            failureCode = failureCode.takeIf { it != NOT_YET },
+            confirmedParts = confirmedCount,
+            reportedParts = reportedCount,
+            everySegmentReported = latchCompleted || reportedCount >= expectedReports,
+        )
+    }
+
+    // Deliberately private (review F36): the only supported read is [snapshot].
+    // Exposing the two counters separately is what let a caller read them at
+    // different instants, and no amount of documentation stops the next call site
+    // from doing it — making it not compile does. `confirmedParts` separates "the
+    // send did not happen" from "part of it did" (F23) and `reportedParts` says
+    // whether the tally is complete, which is what makes `failed` retry-safe at all
+    // (F30); the two only mean anything together.
 
     /** Called from the BroadcastReceiver with the platform's result code. */
     fun onResult(resultCode: Int) {
-        if (resultCode != Activity.RESULT_OK) {
-            // The first failure code is the one reported; later ones are counted, so
-            // [reportedParts] can say whether the tally is complete.
-            failure.compareAndSet(NOT_YET, resultCode)
-            rejected.incrementAndGet()
-        } else {
-            confirmed.incrementAndGet()
+        synchronized(lock) {
+            if (resultCode != Activity.RESULT_OK) {
+                // The first failure code is the one reported; later ones still count
+                // toward the tally, so [Tally.reportedParts] says whether it is
+                // complete.
+                if (failureCode == NOT_YET) failureCode = resultCode
+            } else {
+                confirmedCount++
+            }
+            reportedCount++
         }
         // Every report counts the latch down, success or failure (review F29). The
         // latch means "every segment has reported", which is the point the tally is
@@ -94,12 +137,16 @@ class SmsSendReport(private val expectedReports: Int = 1) {
      * every segment has reported *or* the bound ran out; read [reportedParts] to
      * tell the two apart.
      */
-    fun await(timeoutMs: Long): Int? {
-        val completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-        val failed = failure.get()
-        if (failed != NOT_YET) return failed
-        return if (completed) Activity.RESULT_OK else null
-    }
+    fun await(timeoutMs: Long): Int? = awaitTally(timeoutMs).outcomeCode
+
+    /**
+     * [await], but returning the whole tally read as one snapshot at the instant the
+     * wait ended. This is what a caller must use: [await] alone tells it the radio's
+     * code and nothing about how much of the message got out, and the counters are
+     * private precisely so they cannot be read one at a time (review F36).
+     */
+    fun awaitTally(timeoutMs: Long): Tally =
+        snapshot(latch.await(timeoutMs, TimeUnit.MILLISECONDS))
 
     companion object {
         private const val NOT_YET = Int.MIN_VALUE
@@ -218,6 +265,20 @@ class SmsSendReport(private val expectedReports: Int = 1) {
                 )
             }
         }
+
+        /**
+         * [describe] for a tally read as one snapshot — the race-free form (review
+         * F36). Equivalent to passing the snapshot's three fields separately, except
+         * that they are guaranteed to describe the same instant.
+         */
+        fun describe(tally: Tally, parts: Int, timeoutMs: Long): ActionResult =
+            describe(
+                reportedCode = tally.outcomeCode,
+                parts = parts,
+                timeoutMs = timeoutMs,
+                confirmedParts = tally.confirmedParts,
+                reportedParts = tally.reportedParts,
+            )
 
         /** The machine-readable half of an outcome. Segment counts are not PII. */
         private fun outcome(status: String, parts: Int, delivered: Int): Map<String, Any> =
