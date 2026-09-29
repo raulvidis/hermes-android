@@ -305,6 +305,7 @@ class SmsSendReportTest {
             parts = 3,
             timeoutMs = 10_000L,
             confirmedParts = 0,
+            reportedParts = 3,
         )
 
         assertFalse(result.success)
@@ -320,10 +321,91 @@ class SmsSendReportTest {
             parts = 1,
             timeoutMs = 10_000L,
             confirmedParts = 0,
+            reportedParts = 1,
         )
 
         assertFalse(result.success)
         assertEquals("failed", statusOf(result))
+    }
+
+    /**
+     * Review F30: `failed` is documented to the agent, in the schema, the docstring
+     * and `skill.md`, as "nothing went out, a retry is safe". That is only true when
+     * every segment reported and every one of them failed. One failure and two
+     * segments that never answered is not evidence nothing went out — it is evidence
+     * we do not know — and answering `failed` there invites the retry that
+     * duplicates whatever the silent segments delivered.
+     */
+    @Test
+    fun `a failure with unreported segments is not a retryable failure`() {
+        val result = SmsSendReport.describe(
+            SmsManager.RESULT_ERROR_RADIO_OFF,
+            parts = 3,
+            timeoutMs = 10_000L,
+            confirmedParts = 0,
+            reportedParts = 1,
+        )
+
+        assertTrue(
+            "success=false is read as 'try again', and two segments never reported",
+            result.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertEquals(0, deliveredOf(result))
+        assertTrue(
+            "the message must still name the radio reason: ${result.message}",
+            result.message.contains("radio off", ignoreCase = true),
+        )
+        assertTrue(
+            "and must forbid the retry: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
+        )
+        assertTrue(
+            "and must say how much of the tally is missing: ${result.message}",
+            result.message.contains("1") && result.message.contains("3"),
+        )
+    }
+
+    @Test
+    fun `only a complete tally can say the send failed`() {
+        val code = SmsManager.RESULT_ERROR_NO_SERVICE
+        for (reported in 0..3) {
+            val result = SmsSendReport.describe(
+                code,
+                parts = 3,
+                timeoutMs = 10_000L,
+                confirmedParts = 0,
+                reportedParts = reported,
+            )
+            if (reported == 3) {
+                assertFalse("every segment reported and all failed", result.success)
+                assertEquals("failed", statusOf(result))
+            } else {
+                assertTrue("$reported of 3 reports is not a complete tally", result.success)
+                assertEquals("queued_unconfirmed", statusOf(result))
+            }
+        }
+    }
+
+    @Test
+    fun `an incomplete tally from a real report never says retry-safe`() {
+        // End to end through the latch: one of three segments answers, the rest
+        // never do, and the bound runs out.
+        val report = SmsSendReport(expectedReports = 3)
+        report.onResult(SmsManager.RESULT_ERROR_NO_SERVICE)
+
+        val outcome = report.await(timeout)
+
+        val result = SmsSendReport.describe(
+            outcome,
+            parts = 3,
+            timeoutMs = timeout,
+            confirmedParts = report.confirmedParts,
+            reportedParts = report.reportedParts,
+        )
+        assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE, outcome)
+        assertTrue(result.success)
+        assertEquals("queued_unconfirmed", statusOf(result))
     }
 
     /**
@@ -374,7 +456,13 @@ class SmsSendReportTest {
             9_999, // an unknown non-OK code is still a definite report
         )
         for (code in definite) {
-            val result = SmsSendReport.describe(code, parts = 1, timeoutMs = 10_000L)
+            val result = SmsSendReport.describe(
+                code,
+                parts = 1,
+                timeoutMs = 10_000L,
+                confirmedParts = 0,
+                reportedParts = 1,
+            )
             assertFalse("code $code is a definite failure", result.success)
             assertEquals("failed", statusOf(result))
         }
@@ -409,7 +497,13 @@ class SmsSendReportTest {
             SmsManager.RESULT_ENCODING_ERROR to "encoding",
         )
         for ((code, expected) in reasons) {
-            val result = SmsSendReport.describe(code, parts = 1, timeoutMs = 10_000L)
+            val result = SmsSendReport.describe(
+                code,
+                parts = 1,
+                timeoutMs = 10_000L,
+                confirmedParts = 0,
+                reportedParts = 1,
+            )
             assertFalse("code $code must not report success", result.success)
             assertTrue(
                 "code $code should say '$expected', got: ${result.message}",
@@ -420,7 +514,13 @@ class SmsSendReportTest {
 
     @Test
     fun `an unknown radio code still fails closed`() {
-        val result = SmsSendReport.describe(9_999, parts = 1, timeoutMs = 10_000L)
+        val result = SmsSendReport.describe(
+            9_999,
+            parts = 1,
+            timeoutMs = 10_000L,
+            confirmedParts = 0,
+            reportedParts = 1,
+        )
 
         assertFalse(result.success)
         assertTrue(result.message.isNotEmpty())
@@ -438,7 +538,8 @@ class SmsSendReportTest {
             SmsSendReport.describe(SmsManager.RESULT_ERROR_RADIO_OFF, 1, 10_000L),
             SmsSendReport.describe(SmsManager.RESULT_ERROR_LIMIT_EXCEEDED, 2, 10_000L),
             SmsSendReport.describe(9_999, 1, 10_000L),
-            SmsSendReport.describe(SmsManager.RESULT_ERROR_NO_SERVICE, 3, 10_000L, 2),
+            SmsSendReport.describe(SmsManager.RESULT_ERROR_NO_SERVICE, 3, 10_000L, 2, 3),
+            SmsSendReport.describe(SmsManager.RESULT_ERROR_NO_SERVICE, 3, 10_000L, 0, 1),
             SmsSendReport.describeUnobservable(2, "no send-report receiver"),
         )
         for (outcome in outcomes) {

@@ -650,6 +650,9 @@ object ActionExecutor {
                     // resend", not the "failed, retry is safe" answer a bare failure
                     // code used to produce.
                     report.confirmedParts,
+                    // F30: and "failed" needs every segment accounted for. A failure
+                    // plus segments that never reported is unconfirmed, not retryable.
+                    report.reportedParts,
                 )
             } else {
                 // F27: with no receiver no report can arrive, so waiting out the

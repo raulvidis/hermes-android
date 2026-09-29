@@ -193,8 +193,8 @@ once. `android_send_sms` sends immediately and must be confirmed with the user
 first.
 
 Call it **once**, whatever comes back. The response carries a `status` and a
-segment tally: `sent` means the radio confirmed every segment; `failed` means the
-radio reported an error and `delivered` is 0, so nothing went out and a retry is
+segment tally: `sent` means the radio confirmed every segment; `failed` means
+every segment reported and none succeeded, so nothing went out and a retry is
 safe; `partially_sent` means some segments were confirmed and one failed, so the
 recipient already has the opening of the message; `queued_unconfirmed` means the
 message was handed to the radio but no send report arrived inside the 10 s window.

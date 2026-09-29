@@ -429,6 +429,30 @@ class ActionExecutorSendSmsTest {
         verify(exactly = 0) { mockService.unregisterReceiver(any<BroadcastReceiver>()) }
     }
 
+    /**
+     * Review F30 end to end. The fixture fires exactly one report at registration
+     * time, so a two-segment send hears from one segment and times out on the other.
+     * That is not "the send failed, retry": nothing says the silent segment did not
+     * go out.
+     */
+    @Test
+    fun `a multipart send with one report of many is not reported as retryable`() {
+        stubSmsManager("part-one", "part-two")
+        deliverReport = true
+
+        val result = ActionExecutor.sendSms(recipient, body)
+
+        assertTrue(
+            "an incomplete tally must not invite a retry: ${result.message}",
+            result.success,
+        )
+        assertEquals("queued_unconfirmed", statusOf(result))
+        assertTrue(
+            "the message must still say what the radio did report: ${result.message}",
+            result.message.contains("do not resend", ignoreCase = true),
+        )
+    }
+
     // ── PII ──────────────────────────────────────────────────────────────────
 
     @Test

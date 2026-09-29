@@ -874,8 +874,8 @@ def android_send_sms(to: str, body: str) -> str:
     Destructive action — confirm recipient and message with the user first.
 
     Call it once. The response carries a status and a segment tally: "sent" (the
-    radio confirmed every segment), "failed" (the radio reported an error and
-    delivered is 0, so the message did not go out and a retry is safe),
+    radio confirmed every segment), "failed" (every segment reported and none
+    succeeded, so the message did not go out and a retry is safe),
     "partially_sent" (some segments were confirmed and one failed), or
     "queued_unconfirmed" (handed to the radio but no send report arrived in time).
     Never resend on "partially_sent" or "queued_unconfirmed": the recipient already
@@ -1820,7 +1820,7 @@ _SCHEMAS = {
     },
     "android_send_sms": {
         "name": "android_send_sms",
-        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission. Call it once and read the status: 'sent' confirmed every segment; 'failed' means nothing went out and a retry is safe; 'partially_sent' and 'queued_unconfirmed' mean the recipient already has some or all of it, so resending would deliver it twice. Only 'failed' is safe to retry.",
+        "description": "Send an SMS message directly without navigating the messaging app. Requires SMS permission. Call it once and read the status: 'sent' confirmed every segment; 'failed' means every segment reported and none succeeded, so nothing went out and a retry is safe; 'partially_sent' and 'queued_unconfirmed' mean the recipient already has some or all of it, so resending would deliver it twice. Only 'failed' is safe to retry.",
         "parameters": {
             "type": "object",
             "properties": {

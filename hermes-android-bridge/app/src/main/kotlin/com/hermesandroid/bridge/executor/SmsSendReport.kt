@@ -116,7 +116,10 @@ class SmsSendReport(private val expectedReports: Int = 1) {
          */
         const val STATUS_PARTIALLY_SENT = "partially_sent"
 
-        /** A report arrived and said the send failed, with nothing confirmed. A retry is safe. */
+        /**
+         * Every segment reported, none succeeded. The only retry-safe answer — see
+         * [STATUS_QUEUED_UNCONFIRMED] for the incomplete version of this (review F30).
+         */
         const val STATUS_FAILED = "failed"
 
         /**
@@ -127,32 +130,38 @@ class SmsSendReport(private val expectedReports: Int = 1) {
          * and message content to be stripped from tool responses, and the
          * segment count is the only send detail that is safe to surface.
          *
-         * Four outcomes. The line between them is what the radio said, and how
-         * much of the message got out:
+         * Four outcomes. Two questions decide between them: what did the radio say,
+         * and is the tally complete?
          *  - [STATUS_SENT] — every segment reported `RESULT_OK`;
-         *  - [STATUS_FAILED] — a report arrived, was not `RESULT_OK`, and **no**
-         *    segment was confirmed, so the send definitively did not happen and a
-         *    retry is safe;
          *  - [STATUS_PARTIALLY_SENT] — a report failed but other segments were
-         *    confirmed (review F23). `success = true` and do-not-resend, for the
-         *    same reason as below: the recipient already has those segments, and
-         *    "failed" told the caller a retry was safe, so they got the opening of
-         *    the message twice;
-         *  - [STATUS_QUEUED_UNCONFIRMED] — no report inside the window. Reported
-         *    as `success = true` (review F14): the message was handed to the
-         *    radio, and `success = false` read to the caller as "try again", so
-         *    the recipient got the same SMS twice whenever the first one was
-         *    merely slow. The message says not to resend and why.
+         *    confirmed (review F23). `success = true` and do-not-resend: the
+         *    recipient already has those segments, and "failed" told the caller a
+         *    retry was safe, so they got the opening of the message twice;
+         *  - [STATUS_FAILED] — a report failed, nothing was confirmed, **and every
+         *    segment reported** (review F30). That last clause is what makes it the
+         *    only retry-safe answer: with all segments accounted for and none
+         *    successful, the message definitively did not go out.
+         *  - [STATUS_QUEUED_UNCONFIRMED] — either no report at all inside the window
+         *    (review F14), or a failure with segments still unheard from. Both are
+         *    `success = true` with do-not-resend wording, because `success = false`
+         *    reads to the caller as "try again" and the recipient then gets the same
+         *    SMS twice. The failure variant still names the radio's reason and how
+         *    much of the tally is missing.
          *
          * @param confirmedParts how many segments reported `RESULT_OK` — read
-         *   [SmsSendReport.confirmedParts] after [SmsSendReport.await]. Defaults to
-         *   0 so the single-segment call sites keep their three-argument shape.
+         *   [SmsSendReport.confirmedParts] after [SmsSendReport.await].
+         * @param reportedParts how many segments reported at all — read
+         *   [SmsSendReport.reportedParts] after [SmsSendReport.await]. Both default
+         *   to 0, the *safe* direction: an unstated tally can never produce
+         *   [STATUS_FAILED], so a caller that forgets to pass it degrades to
+         *   do-not-resend rather than to a duplicate.
          */
         fun describe(
             reportedCode: Int?,
             parts: Int,
             timeoutMs: Long,
             confirmedParts: Int = 0,
+            reportedParts: Int = 0,
         ): ActionResult {
             // A confirmed send delivered every segment; anything else reports what
             // the radio actually confirmed.
@@ -186,10 +195,26 @@ class SmsSendReport(private val expectedReports: Int = 1) {
                     outcome(STATUS_PARTIALLY_SENT, parts, delivered),
                 )
 
-                else -> ActionResult(
+                // F30: the only shape in which "the send did not happen" is actually
+                // known — every segment reported, and not one of them succeeded.
+                reportedParts >= parts -> ActionResult(
                     false,
                     "SMS send failed: ${reason(reportedCode)}",
                     outcome(STATUS_FAILED, parts, delivered),
+                )
+
+                // A failure plus segments that never answered. Nothing confirms those
+                // went out and nothing says they did not, so this is the unconfirmed
+                // case again: `failed` here would tell the caller a retry is safe, and
+                // a retry duplicates whatever the silent segments delivered.
+                else -> ActionResult(
+                    true,
+                    "SMS was handed to the radio; $reportedParts of $parts segments " +
+                        "reported and at least one failed (${reason(reportedCode)}), " +
+                        "the rest never reported. Delivery is unconfirmed. Do NOT " +
+                        "resend: a segment that never reported may still have gone out " +
+                        "and a retry would duplicate it.",
+                    outcome(STATUS_QUEUED_UNCONFIRMED, parts, delivered),
                 )
             }
         }
