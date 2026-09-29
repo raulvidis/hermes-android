@@ -720,8 +720,9 @@ class TestMacro:
 
 
 class TestErrorRedaction:
-    """AGENTS.md: never expose server IPs outside the task. The convention is
-    already enforced for android_mic_fetch (#99) — these tests ask why only there."""
+    """AGENTS.md: never expose server IPs outside the task, and strip PII from
+    tool responses. android_mic_fetch has done this since #99; these tests hold
+    every other tool to the same rule."""
 
     def test_mic_fetch_redacts_the_bridge_address(self, tool_mod, bridge, monkeypatch):
         """The behaviour that already works, pinned for both copies."""
@@ -735,23 +736,6 @@ class TestErrorRedaction:
         assert "203.0.113.7" not in result["error"]
         assert "8766" not in result["error"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: 39 of the 40 network tools leak the bridge host and port in "
-            "their error responses. Only android_mic_fetch catches "
-            "requests.exceptions.RequestException and replaces the message "
-            "(#99); every other tool does `except Exception as e: return "
-            "json.dumps({'error': str(e)})`, and requests' own text is "
-            "\"HTTPConnectionPool(host='203.0.113.7', port=8766): Max retries "
-            "exceeded with url: /contacts?query=Jane+Doe&limit=20 ...\". The "
-            "response therefore carries the server IP — and for GET tools whose "
-            "arguments travel in the query string (android_search_contacts' "
-            "contact name, android_notifications / android_events params) it "
-            "carries PII as well. AGENTS.md requires both stripped from tool "
-            "responses."
-        ),
-    )
     def test_no_tool_leaks_the_bridge_address_or_its_own_arguments(
         self, tool_mod, bridge, monkeypatch
     ):
@@ -841,12 +825,25 @@ class TestTransportErrorMessages:
     """The wording an agent sees decides whether it retries, re-pairs or gives
     up, so the interesting shapes are pinned rather than left to str(exception)."""
 
-    def test_connection_error_message_is_the_raw_requests_text(self, tool_mod, bridge):
+    def test_connection_error_message_is_a_safe_generic_reason(self, tool_mod, bridge):
+        """Not str(exception): requests' own text carries the bridge host:port and
+        the request URL, so the wording is pinned to a reason that carries
+        neither (AGENTS.md — no server IPs, no PII in tool responses)."""
         rsps, _ = bridge
         add_transport_error(rsps, message="connection refused by the bridge")
 
         assert as_json(tool_mod.android_get_apps()) == {
-            "error": "connection refused by the bridge"
+            "error": "ConnectionError: bridge unreachable (connection refused)"
+        }
+
+    def test_timeout_message_is_a_safe_generic_reason(self, tool_mod, bridge):
+        """The timeout wording is pinned too: it must still say "timed out", which
+        is what tells an agent the bridge is slow rather than absent."""
+        rsps, _ = bridge
+        add_timeout_error(rsps)
+
+        assert as_json(tool_mod.android_get_apps()) == {
+            "error": "ReadTimeout: bridge request timed out"
         }
 
     def test_http_error_message_is_the_serialised_body(self, tool_mod, bridge):

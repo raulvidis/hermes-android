@@ -162,6 +162,41 @@ def _extract_response(r: requests.Response) -> dict:
     return body
 
 
+def _safe_error(exc: Exception) -> str:
+    """Describe an exception without saying how the bridge is reached.
+
+    ``requests`` puts the host, the port and the whole request URL — query
+    string included, so a contact name for android_search_contacts — into its
+    exception text. Returning ``str(e)`` therefore handed the agent the server
+    IP and, for the GET tools, its own arguments as PII (AGENTS.md allows
+    neither in a tool response). Report the exception class plus a generic
+    reason instead, the way android_mic_fetch already does (#99).
+
+    Two kinds of message carry nothing to hide and are kept verbatim:
+
+    * an ``HTTPError`` from ``_extract_response``, whose text is the bridge's
+      own serialised error body. That is the actionable half — "SEND_SMS
+      permission not granted" — and it is built from the response, never from
+      the request URL.
+    * anything outside ``requests`` (a local ``OSError``, a ``ValueError``, a
+      handler's ``TypeError``): the real cause, with no connection detail in it.
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        message = str(exc)
+        if message:
+            return message
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        return f"HTTPError: HTTP {status}" if status else "HTTPError: HTTP error"
+    if isinstance(exc, requests.exceptions.Timeout):
+        reason = "bridge request timed out"
+    elif isinstance(exc, requests.exceptions.RequestException):
+        reason = "bridge unreachable (connection refused)"
+    else:
+        return str(exc)
+    return f"{type(exc).__name__}: {reason}"
+
+
 def _post(path: str, payload: dict) -> dict:
     r = requests.post(
         f"{_bridge_url()}{path}",
@@ -187,7 +222,7 @@ def android_ping() -> str:
         data = _get("/ping")
         return json.dumps({"status": "ok", "bridge": data})
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        return json.dumps({"status": "error", "message": _safe_error(e)})
 
 
 def android_read_screen(include_bounds: bool = False, include_system_ui: bool = False) -> str:
@@ -207,7 +242,7 @@ def android_read_screen(include_bounds: bool = False, include_system_ui: bool = 
         )
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_tap(
@@ -229,7 +264,7 @@ def android_tap(
         data = _post("/tap", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_tap_text(text: str, exact: bool = False) -> str:
@@ -242,7 +277,7 @@ def android_tap_text(text: str, exact: bool = False) -> str:
         data = _post("/tap_text", {"text": text, "exact": exact})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_type(text: str, clear_first: bool = False) -> str:
@@ -254,7 +289,7 @@ def android_type(text: str, clear_first: bool = False) -> str:
         data = _post("/type", {"text": text, "clearFirst": clear_first})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_swipe(direction: str, distance: str = "medium") -> str:
@@ -266,7 +301,7 @@ def android_swipe(direction: str, distance: str = "medium") -> str:
         data = _post("/swipe", {"direction": direction, "distance": distance})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_open_app(package: str) -> str:
@@ -284,7 +319,7 @@ def android_open_app(package: str) -> str:
         data = _post("/open_app", {"package": package})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_press_key(key: str) -> str:
@@ -298,7 +333,7 @@ def android_press_key(key: str) -> str:
         data = _post("/press_key", {"key": key})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_screenshot() -> str:
@@ -334,7 +369,7 @@ def android_screenshot() -> str:
 
         return f"Screenshot captured ({w}x{h})\nMEDIA:{tmp.name}"
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_scroll(direction: str, node_id: Optional[str] = None) -> str:
@@ -349,7 +384,7 @@ def android_scroll(direction: str, node_id: Optional[str] = None) -> str:
         data = _post("/scroll", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_wait(
@@ -369,7 +404,7 @@ def android_wait(
         data = _post("/wait", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_get_apps() -> str:
@@ -378,7 +413,7 @@ def android_get_apps() -> str:
         data = _get("/apps")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_current_app() -> str:
@@ -387,7 +422,7 @@ def android_current_app() -> str:
         data = _get("/current_app")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_clipboard_read() -> str:
@@ -399,7 +434,7 @@ def android_clipboard_read() -> str:
         data = _get("/clipboard")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_clipboard_write(text: str) -> str:
@@ -411,7 +446,7 @@ def android_clipboard_write(text: str) -> str:
         data = _post("/clipboard", {"text": text})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_notifications(limit: int = 50, since: int = 0, include_removed: bool = False) -> str:
@@ -427,7 +462,7 @@ def android_notifications(limit: int = 50, since: int = 0, include_removed: bool
         data = _get(f"/notifications?limit={limit}&since={since}{removed_param}")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_long_press(
@@ -452,7 +487,7 @@ def android_long_press(
         data = _post("/long_press", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_drag(
@@ -475,7 +510,7 @@ def android_drag(
         )
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_describe_node(node_id: str) -> str:
@@ -487,7 +522,7 @@ def android_describe_node(node_id: str) -> str:
         data = _post("/describe_node", {"nodeId": node_id})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_screen_hash() -> str:
@@ -500,7 +535,7 @@ def android_screen_hash() -> str:
         data = _get("/screen_hash")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_macro(steps: list, name: str = "unnamed") -> str:
@@ -550,7 +585,7 @@ def android_macro(steps: list, name: str = "unnamed") -> str:
         except Exception as e:
             return json.dumps(
                 {
-                    "error": f"Step {i} ({tool_name}) raised: {e}",
+                    "error": f"Step {i} ({tool_name}) raised: {_safe_error(e)}",
                     "completed": i,
                     "results": results,
                 }
@@ -572,7 +607,7 @@ def android_location() -> str:
         data = _get("/location")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_send_sms(to: str, body: str) -> str:
@@ -585,7 +620,7 @@ def android_send_sms(to: str, body: str) -> str:
         data = _post("/send_sms", {"to": to, "body": body})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_call(number: str) -> str:
@@ -598,7 +633,7 @@ def android_call(number: str) -> str:
         data = _post("/call", {"number": number})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_speak(text: str, flush: bool = False) -> str:
@@ -610,7 +645,7 @@ def android_speak(text: str, flush: bool = False) -> str:
         data = _post("/speak", {"text": text, "queue": 0 if flush else 1})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_speak_stop() -> str:
@@ -619,7 +654,7 @@ def android_speak_stop() -> str:
         data = _post("/stop_speaking", {})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_events(limit: int = 50, since: int = 0) -> str:
@@ -633,7 +668,7 @@ def android_events(limit: int = 50, since: int = 0) -> str:
         data = _get(f"/events?limit={limit}&since={since}")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_event_stream(enabled: bool = True) -> str:
@@ -646,7 +681,7 @@ def android_event_stream(enabled: bool = True) -> str:
         data = _post("/events/stream", {"enabled": enabled})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_screen_record(duration_ms: int = 5000) -> str:
@@ -675,7 +710,7 @@ def android_screen_record(duration_ms: int = 5000) -> str:
                 return f"Screen recorded ({w}x{h}, {duration_ms}ms)\nMEDIA:{tmp.name}"
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_mic_record(duration: int = 0) -> str:
@@ -685,7 +720,7 @@ def android_mic_record(duration: int = 0) -> str:
     try:
         return json.dumps(_post("/mic_start", {"duration": duration}))
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_mic_stop() -> str:
@@ -693,7 +728,7 @@ def android_mic_stop() -> str:
     try:
         return json.dumps(_post("/mic_stop", {}))
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_mic_status() -> str:
@@ -701,7 +736,7 @@ def android_mic_status() -> str:
     try:
         return json.dumps(_get("/mic_status"))
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_mic_fetch(remote_path: str = "") -> str:
@@ -775,7 +810,7 @@ def android_mic_fetch(remote_path: str = "") -> str:
                 os.unlink(temp_path)
             except OSError:
                 pass
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_read_widgets() -> str:
@@ -787,7 +822,7 @@ def android_read_widgets() -> str:
         data = _get("/widgets")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_find_nodes(
@@ -809,7 +844,7 @@ def android_find_nodes(
         data = _post("/find_nodes", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_diff_screen(previous_hash: str) -> str:
@@ -822,7 +857,7 @@ def android_diff_screen(previous_hash: str) -> str:
         data = _post("/diff_screen", {"previousHash": previous_hash})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_pinch(x: int, y: int, scale: float = 1.5, duration: int = 300) -> str:
@@ -835,7 +870,7 @@ def android_pinch(x: int, y: int, scale: float = 1.5, duration: int = 300) -> st
         data = _post("/pinch", {"x": x, "y": y, "scale": scale, "duration": duration})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_media(action: str) -> str:
@@ -847,7 +882,7 @@ def android_media(action: str) -> str:
         data = _post("/media", {"action": action})
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_search_contacts(query: str, limit: int = 20) -> str:
@@ -859,7 +894,7 @@ def android_search_contacts(query: str, limit: int = 20) -> str:
         data = _get(f"/contacts?query={quote(query)}&limit={limit}")
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_send_intent(
@@ -881,7 +916,7 @@ def android_send_intent(
         data = _post("/intent", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def android_broadcast(action: str, extras: dict = None) -> str:
@@ -896,7 +931,7 @@ def android_broadcast(action: str, extras: dict = None) -> str:
         data = _post("/broadcast", payload)
         return json.dumps(data)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": _safe_error(e)})
 
 
 def _get_public_ip() -> str:
@@ -1007,7 +1042,7 @@ def android_setup(pairing_code: str) -> str:
             )
 
     except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        return json.dumps({"status": "error", "message": _safe_error(e)})
 
 
 def _update_env_file(env_path, key: str, value: str):
