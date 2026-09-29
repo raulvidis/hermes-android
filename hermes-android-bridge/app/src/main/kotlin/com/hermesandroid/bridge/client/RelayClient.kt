@@ -440,6 +440,12 @@ object RelayClient {
                 // Guarded write, before the early return: see recordFailureHttpCode.
                 recordFailureHttpCode(myGeneration, httpCode)
                 if (myGeneration != generation) return
+                // Audited for F35 and deliberately left as-is: this is a transport
+                // failure, so `t.message` can carry the relay's host — which line 381
+                // already logs on purpose — and nothing from the device. It is also
+                // the text the user sees on the relay status line, where "Unable to
+                // resolve host" is the difference between a diagnosable failure and
+                // an opaque one.
                 val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
                 Log.e(TAG, "WebSocket failure: $errorDetail", t)
                 isConnected = false
@@ -672,7 +678,9 @@ object RelayClient {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Delayed reconnect not scheduled: $e")
+            // F35: `$e` interpolates toString(), which is `class: message`. Same
+            // rule as logMessageFailure — the class name is enough to diagnose.
+            Log.w(TAG, "Delayed reconnect not scheduled: ${e.javaClass.simpleName}")
         }
     }
 
@@ -724,7 +732,7 @@ object RelayClient {
             }
             ws.send(responseJson.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling message: ${e.message}", e)
+            logMessageFailure(e)
             try {
                 val json = JsonParser.parseString(text).asJsonObject
                 val requestId = json.get("request_id")?.asString ?: ""
@@ -861,6 +869,34 @@ object RelayClient {
             addProperty("status", status)
         }
         ws.send(response.toString())
+    }
+
+    /**
+     * How a message-handling failure is logged (review F35).
+     *
+     * The class name, and no throwable. `Log.e(tag, msg, tr)` appends
+     * `Log.getStackTraceString(tr)`, whose first line is `class: message`, so passing
+     * the throwable would put the message back into logcat however the text is
+     * worded — and the message is the problem, not the interpolation: this catch
+     * wraps the JSON parse, the `request_id` check and the `/mic_file` stream, and a
+     * `JsonSyntaxException` from a malformed command can quote the command, which for
+     * `/send_sms` contains the recipient. AGENTS.md keeps phone numbers, recipients
+     * and location out of logs as well as out of responses, and logcat is not
+     * private: a bug report captures it, and READ_LOGS is readable by any app on an
+     * older device.
+     *
+     * The cost is the stack trace. The class name is exactly what `errorBody` already
+     * hands the caller (F26), it is enough to locate the throw, and a recipient in
+     * logcat is not a price worth paying for line numbers.
+     *
+     * Internal (test seam): `RelayClientLogRedactionTest` reads the line back through
+     * Robolectric's `ShadowLog`, including the absence of an attached throwable.
+     */
+    internal fun logMessageFailure(cause: Throwable) {
+        Log.e(
+            TAG,
+            "Error handling message: ${CommandDispatcher.errorBody(cause).getValue("error")}",
+        )
     }
 
     private fun notifyStatus(connected: Boolean, message: String) {

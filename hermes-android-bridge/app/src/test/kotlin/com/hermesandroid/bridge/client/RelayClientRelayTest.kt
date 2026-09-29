@@ -27,6 +27,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowLog
 import org.robolectric.shadows.ShadowBatteryManager
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -229,6 +230,7 @@ class RelayClientRelayTest {
 
     @Test
     fun `a command without a request id answers 500 instead of hanging the relay`() {
+        ShadowLog.clear()
         val relay = RelayPeer()
         server.enqueue(MockResponse().withWebSocketUpgrade(relay))
         connectToRelay()
@@ -245,6 +247,17 @@ class RelayClientRelayTest {
         assertEquals(
             "IllegalArgumentException",
             json.getAsJsonObject("result").get("error").asString,
+        )
+        // F35: the log line beside that response is redacted the same way, which is
+        // what pins the catch to `logMessageFailure` rather than to a bare Log.e.
+        val logged = ShadowLog.getLogsForTag("RelayClient")
+        assertTrue(
+            "the failure must be logged as a class name: $logged",
+            logged.any { it.msg == "Error handling message: IllegalArgumentException" },
+        )
+        assertTrue(
+            "and must not carry the throwable, whose stack trace leads with the message",
+            logged.none { it.msg.startsWith("Error handling message") && it.throwable != null },
         )
     }
 
