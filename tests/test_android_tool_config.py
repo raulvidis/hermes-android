@@ -842,6 +842,88 @@ class TestAndroidSetup:
                 f"the two TLS predicates disagree for cert={cert!r} key={key!r}"
             )
 
+    # ── F24: a TLS address has to be a name the certificate covers ────────────
+    #
+    # The phone validates with the platform trust store, which means hostname
+    # verification against whatever it dialed. Certificates are issued for DNS
+    # names — Let's Encrypt will not issue one for a bare IP — so printing the
+    # detected public IP produced a wss:// address that always failed the
+    # handshake, i.e. the documented TLS setup did not work.
+
+    def test_a_tls_address_uses_the_configured_public_host(self, tool_mod, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == "wss://relay.example.com:8766"
+        assert "server_address_note" not in result
+        assert "Server: wss://relay.example.com:8766" in result["user_instructions"]
+
+    def test_a_tls_address_that_is_still_an_ip_comes_with_a_warning(
+        self, tool_mod, monkeypatch
+    ):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+        monkeypatch.delenv("ANDROID_RELAY_PUBLIC_HOST", raising=False)
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"wss://{FAKE_IP}:8766"
+        note = result["server_address_note"]
+        assert "ANDROID_RELAY_PUBLIC_HOST" in note
+        assert "certificate" in note.lower()
+        assert note in result["user_instructions"], (
+            "the note has to reach the human, not just the JSON"
+        )
+
+    def test_a_plaintext_address_needs_no_host_note(self, tool_mod, monkeypatch):
+        """An IP is a perfectly good ws:// host; only TLS verification cares."""
+        monkeypatch.delenv("ANDROID_RELAY_PUBLIC_HOST", raising=False)
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"ws://{FAKE_IP}:8766"
+        assert "server_address_note" not in result
+
+    def test_the_public_host_alone_does_not_change_a_plaintext_address(
+        self, tool_mod, monkeypatch
+    ):
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == "ws://relay.example.com:8766"
+        assert "server_address_note" not in result
+
+    @pytest.mark.parametrize(
+        "configured,expected",
+        [(None, FAKE_IP), ("", FAKE_IP), ("relay.example.com", "relay.example.com")],
+        ids=["unset", "empty", "set"],
+    )
+    def test_the_public_host_helper_falls_back_to_the_detected_ip(
+        self, tool_mod, monkeypatch, configured, expected
+    ):
+        if configured is None:
+            monkeypatch.delenv("ANDROID_RELAY_PUBLIC_HOST", raising=False)
+        else:
+            monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", configured)
+
+        assert tool_mod._relay_public_host(FAKE_IP) == expected
+
+    def test_the_public_host_does_not_change_where_the_relay_binds(
+        self, tool_mod, monkeypatch
+    ):
+        """ANDROID_RELAY_HOST is the bind address and must stay that way; the new
+        variable only changes what is printed."""
+        relay = relay_module_for(tool_mod)
+        monkeypatch.setenv("ANDROID_RELAY_HOST", "0.0.0.0")
+        monkeypatch.setenv("ANDROID_RELAY_PUBLIC_HOST", "relay.example.com")
+
+        assert relay._relay_host() == "0.0.0.0"
+        assert tool_mod._relay_public_host(FAKE_IP) == "relay.example.com"
+
     def test_the_https_setup_still_prints_a_wss_address_for_the_phone(
         self, tool_mod, monkeypatch
     ):

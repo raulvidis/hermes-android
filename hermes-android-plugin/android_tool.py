@@ -1172,6 +1172,36 @@ def _get_public_ip() -> str:
         return "<your-server-ip>"
 
 
+# Shown when a TLS relay has no hostname to print. Certificates are issued for DNS
+# names — Let's Encrypt will not issue one for a bare IP — so an IP address in a
+# wss:// URL fails the phone's hostname check and the handshake never completes.
+_RELAY_TLS_HOST_NOTE = (
+    "the relay is serving TLS, so the phone checks this address against the "
+    "certificate. Certificates are issued for DNS names, not IPs, so this "
+    "handshake will fail unless the certificate covers the address above. Set "
+    "ANDROID_RELAY_PUBLIC_HOST to the name the certificate covers and re-run "
+    "android_setup."
+)
+
+
+def _relay_public_host(fallback_ip: str) -> str:
+    """The host to print in the address the phone is told to dial (review F24).
+
+    `ANDROID_RELAY_PUBLIC_HOST` is the name the TLS certificate covers. It does not
+    change where the relay binds — that stays `ANDROID_RELAY_HOST` — only what
+    setup prints, because the phone verifies the certificate against whatever it
+    dialed and a detected public IP is almost never in the certificate's SANs.
+    """
+    return _env("ANDROID_RELAY_PUBLIC_HOST") or fallback_ip
+
+
+def _relay_address_note(tls: bool) -> Optional[str]:
+    """The warning that goes with a TLS address that is still an IP, or None."""
+    if not tls or _env("ANDROID_RELAY_PUBLIC_HOST"):
+        return None
+    return _RELAY_TLS_HOST_NOTE
+
+
 def _relay_server_address(host: str, port: int, tls: bool) -> str:
     """The server address `android_setup` tells the user to type into the app.
 
@@ -1261,32 +1291,36 @@ def android_setup(pairing_code: str) -> str:
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            server_address = _relay_server_address(public_ip, port, tls)
+            public_host = _relay_public_host(public_ip)
+            server_address = _relay_server_address(public_host, port, tls)
+            address_note = _relay_address_note(tls)
 
             if phone_connected:
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "message": "Phone is connected and ready!",
-                        "phone_connected": True,
-                        "server_address": server_address,
-                    }
-                )
+                payload = {
+                    "status": "ok",
+                    "message": "Phone is connected and ready!",
+                    "phone_connected": True,
+                    "server_address": server_address,
+                }
             else:
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "message": "Relay is running. Now tell the user to connect their phone.",
-                        "phone_connected": False,
-                        "server_address": server_address,
-                        "user_instructions": (
-                            f"Open the Hermes Bridge app on your phone and enter:\n"
-                            f"  Server: {server_address}\n"
-                            f"  Pairing code: {pairing_code}\n"
-                            f"Then tap Connect."
-                        ),
-                    }
+                instructions = (
+                    f"Open the Hermes Bridge app on your phone and enter:\n"
+                    f"  Server: {server_address}\n"
+                    f"  Pairing code: {pairing_code}\n"
+                    f"Then tap Connect."
                 )
+                if address_note:
+                    instructions = f"{instructions}\nNote: {address_note}"
+                payload = {
+                    "status": "ok",
+                    "message": "Relay is running. Now tell the user to connect their phone.",
+                    "phone_connected": False,
+                    "server_address": server_address,
+                    "user_instructions": instructions,
+                }
+            if address_note:
+                payload["server_address_note"] = address_note
+            return json.dumps(payload)
         except ImportError:
             return json.dumps(
                 {
