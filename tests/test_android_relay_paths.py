@@ -533,6 +533,57 @@ class TestRotationDuringHandshake:
         assert seen["code"] == "PAIRCODE", "the session must record the code it proved"
         assert seen["ws"] is returned
 
+    def test_a_rotation_between_the_two_code_reads_cannot_publish_the_session(
+        self, relay_mod, hookable_websocket, monkeypatch
+    ):
+        """Review F31: the handler read `state.pairing_code` twice — once to compare
+        the token against, once to record what the session proved. A rotation
+        landing between the two recorded the NEW code for a session that had proved
+        the OLD one, so the post-prepare re-check compared NEW against NEW, passed,
+        and published a session that no later rotation drop would ever close: it
+        looks current. F21 closed the window between the check and `prepare`; this
+        closes the one inside the check itself.
+        """
+        real = relay_mod._tokens_equal
+        comparisons = []
+
+        async def scenario():
+            state = make_relay_state(relay_mod, pairing_code="OLDCODE")
+            seen = {}
+
+            def rotating_equal(a, b):
+                comparisons.append((a, b))
+                result = real(a, b)
+                if len(comparisons) == 1:
+                    # The rotation lands after the token check and before the
+                    # handler records which code this handshake proved.
+                    state.pairing_code = "NEWCODE"
+                return result
+
+            async def spy(published_state, raw):
+                seen["code"] = published_state.phone_ws_code
+
+            monkeypatch.setattr(relay_mod, "_tokens_equal", rotating_equal)
+            monkeypatch.setattr(relay_mod, "_on_phone_message", spy)
+            self.messages = [ws_message(aiohttp.WSMsgType.TEXT, '{"request_id":"r1"}')]
+
+            returned = await relay_mod._handle_ws(
+                FakeRequest(headers={"Authorization": "Bearer OLDCODE"}), state
+            )
+            return state, returned, seen
+
+        state, returned, seen = run(scenario())
+
+        assert comparisons, "the token was never compared"
+        assert seen == {}, (
+            "the session was published and served a command on a code that no "
+            f"longer exists (recorded as {seen.get('code')!r})"
+        )
+        assert state.phone_ws_code is None
+        assert returned.closed is True
+        assert returned.close_calls, "the socket must be closed, not left half-open"
+        assert returned.close_calls[0][0] == aiohttp.WSCloseCode.POLICY_VIOLATION
+
     def test_a_rejected_handshake_never_reaches_the_recheck(self, relay_mod, hookable_websocket):
         """The re-check is not a second authentication: a wrong code is still
         refused up front, and the hook never runs because prepare() is not

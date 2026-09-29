@@ -619,11 +619,18 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
         token = auth_header.removeprefix("Bearer ").strip()
     else:
         token = ""
+    # Read the expected code ONCE and use that single value for both the
+    # comparison and the record of what this session proved (review F31). Two reads
+    # let a rotation land in between, which recorded the NEW code for a session that
+    # had proved the OLD one — the post-prepare re-check below then compared NEW
+    # against NEW, passed, and published a session that looked current to every
+    # later rotation drop.
+    expected_code = state.pairing_code
     # Constant-time comparison to mitigate timing side-channel attacks that
     # could otherwise leak the pairing code byte-by-byte.
     # PairingManager generates uppercase-only codes — compare exact-case to
     # preserve full key-space entropy.
-    if not _tokens_equal(token, state.pairing_code):
+    if not _tokens_equal(token, expected_code):
         _auth_record_failure(remote_ip)
         logger.warning(
             "Phone WS rejected — bad token (got %s) from %s", _mask_token(token), remote_ip
@@ -634,7 +641,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     # code can rotate while prepare() is in flight, because set_pairing_code() runs
     # on the caller's thread and needs only _relay_lock, which this handler never
     # holds.
-    authenticated_with = state.pairing_code
+    authenticated_with = expected_code
 
     ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
