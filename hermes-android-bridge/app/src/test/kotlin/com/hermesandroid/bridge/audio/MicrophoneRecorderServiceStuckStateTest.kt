@@ -1,6 +1,15 @@
 package com.hermesandroid.bridge.audio
 
 import android.content.Intent
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -28,6 +37,14 @@ class MicrophoneRecorderServiceStuckStateTest {
     private fun stopIntent(): Intent =
         Intent(RuntimeEnvironment.getApplication(), MicrophoneRecorderService::class.java)
             .apply { action = "stop" }
+
+    @After
+    fun resetState() {
+        // A test that fails mid-way would otherwise leave the state machine in an
+        // active phase, and the next test's tryReserveStart() would fail for
+        // somebody else's reason.
+        MicrophoneRecordingState.markError("test reset")
+    }
 
     @Test
     fun `stop before the record loop resets a stuck STARTING state`() {
@@ -187,5 +204,126 @@ class MicrophoneRecorderServiceStuckStateTest {
         assertFalse(snapshot.isActive)
         assertTrue("a new recording must be reservable again", MicrophoneRecordingState.tryReserveStart())
         MicrophoneRecordingState.markError("test cleanup")
+    }
+
+    // ── Review F16: F10's exemption assumed the finaliser always runs ──────────
+
+    /**
+     * F10 left FINALIZING to "the job that owns it, which has no suspension
+     * points left to run and will reach markReady/markError on its own". That is
+     * true of a job whose body has started. A coroutine cancelled *before* it
+     * starts runs nothing at all — not the finalisation block, not its catch, not
+     * its finally — so the phase stays FINALIZING forever: `isActive` is true,
+     * `tryReserveStart()` returns false, and every `/mic_start` answers 409 until
+     * the app restarts. That is #98 again, one phase later.
+     *
+     * Production reaches it with a STOP and a service destroy inside one dispatch
+     * quantum: `requestStop()` publishes FINALIZING from the main thread while the
+     * record loop is still queued on `Dispatchers.IO`, then `onDestroy` cancels it.
+     */
+    @Test
+    fun `destroy settles a FINALIZING phase whose job never ran`() {
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+        MicrophoneRecordingState.markStarting("recording.wav")
+        MicrophoneRecordingState.markRecording(1024L)
+        MicrophoneRecordingState.markFinalizing(2048L)
+        assertEquals(MicrophoneRecordingPhase.FINALIZING, MicrophoneRecordingState.snapshot().phase)
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        // This instance does own a recording, and its job can never run.
+        controller.get().ownedFileName = "recording.wav"
+        controller.get().recordingJob = unrunnableJob()
+
+        controller.destroy()
+
+        val snapshot = MicrophoneRecordingState.snapshot()
+        assertEquals(MicrophoneRecordingPhase.ERROR, snapshot.phase)
+        assertFalse("a stuck FINALIZING keeps every /mic_start at 409", snapshot.isActive)
+        assertTrue("a new recording must be reservable again", MicrophoneRecordingState.tryReserveStart())
+        MicrophoneRecordingState.markError("test cleanup")
+    }
+
+    @Test
+    fun `destroy does not downgrade a recording whose job is still finalising`() {
+        // The F10 property F16 must not break: while the finaliser can still reach
+        // markReady, onDestroy publishes nothing.
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+        MicrophoneRecordingState.markStarting("recording.wav")
+        MicrophoneRecordingState.markRecording(1024L)
+        MicrophoneRecordingState.markFinalizing(2048L)
+
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val started = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        val job = scope.launch {
+            started.countDown()
+            // Blocking, not suspending — the shape of the real finalisation block,
+            // and the reason cancel() cannot interrupt it.
+            gate.await(10, TimeUnit.SECONDS)
+            MicrophoneRecordingState.markReady(java.io.File("recording.wav"), 2048L)
+        }
+        assertTrue("the finaliser must be running before destroy", started.await(5, TimeUnit.SECONDS))
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().ownedFileName = "recording.wav"
+        controller.get().recordingJob = job
+
+        controller.destroy()
+
+        assertEquals(
+            "the finaliser is still running; onDestroy must not publish an error",
+            MicrophoneRecordingPhase.FINALIZING,
+            MicrophoneRecordingState.snapshot().phase,
+        )
+
+        // Registered after the production handler, so it runs after it.
+        val settled = CountDownLatch(1)
+        job.invokeOnCompletion { settled.countDown() }
+        gate.countDown()
+        assertTrue(settled.await(5, TimeUnit.SECONDS))
+
+        assertEquals(
+            "a recording the finaliser completed must not be downgraded afterwards",
+            MicrophoneRecordingPhase.READY,
+            MicrophoneRecordingState.snapshot().phase,
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun `destroy leaves a FINALIZING phase it does not own alone`() {
+        // No recording job means this instance never started a recording, so the
+        // phase belongs to somebody else and F10's exemption still applies.
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+        MicrophoneRecordingState.markStarting("recording.wav")
+        MicrophoneRecordingState.markFinalizing(2048L)
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.destroy()
+
+        assertEquals(MicrophoneRecordingPhase.FINALIZING, MicrophoneRecordingState.snapshot().phase)
+        MicrophoneRecordingState.markReady(java.io.File("recording.wav"), 2048L)
+    }
+
+    /** A job whose body can never run: the scope is cancelled before it dispatches. */
+    private fun unrunnableJob(): Job {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        scope.cancel()
+        var ran = false
+        val job = scope.launch { ran = true }
+        assertFalse("the job body must not have run", ran)
+        return job
     }
 }

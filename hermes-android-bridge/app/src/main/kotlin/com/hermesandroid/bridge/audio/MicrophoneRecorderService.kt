@@ -71,7 +71,21 @@ class MicrophoneRecorderService : Service() {
 
     @Volatile
     private var recorder: AudioRecord? = null
-    private var recordingJob: Job? = null
+
+    /**
+     * The record loop's handle. Internal rather than private so a test can put the
+     * service in the state onDestroy has to reason about — a job that was
+     * cancelled before its body ran — without racing a real `AudioRecord`.
+     */
+    internal var recordingJob: Job? = null
+
+    /**
+     * The recording this instance owns, i.e. the file `markStarting` published.
+     * OnDestroy's completion handler compares it against the live phase so a late
+     * handler cannot settle a newer recording (F16).
+     */
+    @Volatile
+    internal var ownedFileName: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -108,6 +122,9 @@ class MicrophoneRecorderService : Service() {
                 return
             }
         MicrophoneRecordingState.markStarting(pending.completedFile.name)
+        // Recorded before the job is launched so onDestroy's completion handler
+        // can tell this instance's recording from a newer one (F16).
+        ownedFileName = pending.completedFile.name
 
         val minimumBuffer = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
@@ -308,12 +325,43 @@ class MicrophoneRecorderService : Service() {
             MicrophoneRecordingState.markError("Recorder service was destroyed before completion")
         }
         safelyStop(recorder)
-        recordingJob?.cancel()
-        if (recordingJob == null) {
+        val job = recordingJob
+        job?.cancel()
+        if (job == null) {
             runCatching { recorder?.release() }
             recorder = null
         }
+        settleAbandonedFinalizing(job)
         scope.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * Close the hole F10's exemption leaves (review F16).
+     *
+     * "Leave FINALIZING to the job that owns it" is only sound while that job
+     * runs. `requestStop()` publishes FINALIZING from the main thread, and the
+     * record loop may still be queued on `Dispatchers.IO`; a destroy inside that
+     * window cancels the job *before its body starts*, so the finalisation block,
+     * its catch and its finally all never execute. The phase then stays
+     * FINALIZING — `isActive` — forever, `tryReserveStart()` keeps returning
+     * false, and every `/mic_start` answers 409 until the app restarts: #98, one
+     * phase later.
+     *
+     * `invokeOnCompletion` is what makes this safe for F10: it fires when the job
+     * is done, so a finaliser that ran has already published READY or ERROR and
+     * the settle is a no-op, while a job that never ran gets settled here. A null
+     * job means this instance never started a recording, so the phase is somebody
+     * else's and is left alone.
+     */
+    private fun settleAbandonedFinalizing(job: Job?) {
+        if (job == null) return
+        val owned = ownedFileName
+        job.invokeOnCompletion {
+            MicrophoneRecordingState.settleAbandonedFinalizing(
+                activeFile = owned,
+                message = "Recorder service was destroyed before the recording completed",
+            )
+        }
     }
 }
