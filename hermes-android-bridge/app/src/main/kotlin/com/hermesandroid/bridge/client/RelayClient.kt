@@ -44,11 +44,17 @@ object RelayClient {
 
     // --- Termux revival watchdog ---
     // When the relay is unreachable past these thresholds, fire the
-    // Termux RUN_COMMAND intent to restart the whole stack (start-zee.sh).
+    // Termux RUN_COMMAND intent to restart the whole stack.
     private const val WATCHDOG_FAILURES_TO_TRIGGER = 3
     private const val WATCHDOG_COOLDOWN_MS = 600_000L  // 10 min
-    private val revivalPolicy = RevivalPolicy(WATCHDOG_FAILURES_TO_TRIGGER, WATCHDOG_COOLDOWN_MS)
+    private const val WATCHDOG_MAX_FIRES = RevivalPolicy.DEFAULT_MAX_FIRES
+    private val revivalPolicy = RevivalPolicy(
+        WATCHDOG_FAILURES_TO_TRIGGER,
+        WATCHDOG_COOLDOWN_MS,
+        maxFires = WATCHDOG_MAX_FIRES,
+    )
     private const val KEY_FAILURES = "watchdog_failures"
+    private const val KEY_FIRES = "watchdog_fires"
     private const val KEY_LAST_FIRE = "watchdog_last_fire_ms"
     private const val KEY_REVIVAL_ENABLED = "termux_revival_enabled"
 
@@ -91,6 +97,17 @@ object RelayClient {
     /** `System.nanoTime()` at the last onOpen, or 0 when no session is open. */
     @Volatile
     private var sessionStartedNs: Long = 0L
+
+    /** HTTP status from the most recent onFailure, or 0 for a transport-level
+     *  failure. The watchdog needs it: a 401/403 is a credential problem that
+     *  restarting Termux cannot fix, so it must not spend the fire budget. */
+    @Volatile
+    private var lastFailureHttpCode: Int = 0
+
+    /** Guards the "watchdog gave up" status so it is reported once, not on every
+     *  failure after the budget is spent. */
+    @Volatile
+    private var exhaustedNotified: Boolean = false
 
     @Volatile
     var isConnected: Boolean = false
@@ -140,6 +157,10 @@ object RelayClient {
         this.serverUrl = serverUrl
         shouldReconnect = true
         reconnectPolicy.reset()
+        // A manual Connect is the user re-arming, so the "gave up" notice is
+        // allowed to be shown again if this attempt exhausts the budget too.
+        // The fire budget itself is only refilled by a session that opens.
+        exhaustedNotified = false
 
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         connector(serverUrl, code)
@@ -223,8 +244,12 @@ object RelayClient {
                 }
                 Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
                 isConnected = true
-                // success resets the revival watchdog
-                prefs?.edit()?.putInt(KEY_FAILURES, 0)?.apply()
+                // A session that actually opened is the re-arm: reset the failure
+                // counter AND the fire budget, so a later unrelated outage is not
+                // ignored for the rest of the process lifetime.
+                prefs?.edit()?.putInt(KEY_FAILURES, 0)?.putInt(KEY_FIRES, 0)?.apply()
+                exhaustedNotified = false
+                lastFailureHttpCode = 0
                 // NOT a policy reset: the budget is only refilled once this
                 // session proves stable (see endSession), so a relay that
                 // accepts and instantly drops us can't retry forever.
@@ -260,6 +285,7 @@ object RelayClient {
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (myGeneration != generation) return
                 val httpCode = response?.code ?: 0
+                lastFailureHttpCode = httpCode
                 val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
                 Log.e(TAG, "WebSocket failure: $errorDetail", t)
                 isConnected = false
@@ -357,29 +383,54 @@ object RelayClient {
     /**
      * Termux revival watchdog: after repeated relay connection failures
      * (Termux stack likely dead), fire the RUN_COMMAND intent to restart
-     * the whole stack via start-zee.sh. Cooldown prevents loops.
+     * the whole stack. The cooldown bounds how often it fires and
+     * [WATCHDOG_MAX_FIRES] bounds how many times in total — without the cap a
+     * relay that is merely unreachable (wrong URL, rotated code, server down for
+     * the weekend) made an opt-in device run the script every cooldown forever.
      */
     private fun maybeFireTermuxRevival() {
         val p = prefs ?: return
         val enabled = p.getBoolean(KEY_REVIVAL_ENABLED, false)
         val failures = p.getInt(KEY_FAILURES, 0)
+        val fires = p.getInt(KEY_FIRES, 0)
         val lastFire = p.getLong(KEY_LAST_FIRE, 0L)
         val now = System.currentTimeMillis()
-        when (val d = revivalPolicy.onFailure(enabled, failures, lastFire, now)) {
+        val authFailure = lastFailureHttpCode == 401 || lastFailureHttpCode == 403
+        val decision = revivalPolicy.onFailure(enabled, failures, lastFire, now, fires, authFailure)
+        when (decision) {
             is RevivalPolicy.Decision.Wait -> {
-                p.edit().putInt(KEY_FAILURES, d.failures).apply()
-                if (d.failures > failures) {
-                    Log.i(TAG, "Revival watchdog: ${d.failures}/$WATCHDOG_FAILURES_TO_TRIGGER failures")
+                p.edit().putInt(KEY_FAILURES, decision.failures).apply()
+                if (decision.failures > failures) {
+                    Log.i(TAG, "Revival watchdog: ${decision.failures}/$WATCHDOG_FAILURES_TO_TRIGGER failures")
                 }
             }
             is RevivalPolicy.Decision.Fire -> {
-                p.edit().putInt(KEY_FAILURES, 0).putLong(KEY_LAST_FIRE, now).apply()
-                fireTermuxRestart()
+                p.edit()
+                    .putInt(KEY_FAILURES, 0)
+                    .putInt(KEY_FIRES, fires + 1)
+                    .putLong(KEY_LAST_FIRE, now)
+                    .apply()
+                fireTermuxRestart(fires + 1)
+            }
+            is RevivalPolicy.Decision.Exhausted -> {
+                if (!exhaustedNotified) {
+                    exhaustedNotified = true
+                    Log.w(
+                        TAG,
+                        "Revival watchdog spent its $WATCHDOG_MAX_FIRES-fire budget; " +
+                            "it will not fire again until a connection succeeds",
+                    )
+                    notifyStatus(
+                        false,
+                        "Revival stopped after $WATCHDOG_MAX_FIRES attempts — check the server URL " +
+                            "and pairing code, then tap Connect",
+                    )
+                }
             }
         }
     }
 
-    private fun fireTermuxRestart() {
+    private fun fireTermuxRestart(fireNumber: Int) {
         val ctx = appContext ?: return
         try {
             val intent = android.content.Intent("com.termux.RUN_COMMAND").apply {
@@ -390,8 +441,11 @@ object RelayClient {
                 putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", 0)
             }
             ctx.startService(intent)
-            Log.i(TAG, "Termux revival: RUN_COMMAND fired (start-zee.sh)")
-            notifyStatus(false, "Stack unreachable — firing Termux revival…")
+            Log.i(TAG, "Termux revival: RUN_COMMAND fired (attempt $fireNumber/$WATCHDOG_MAX_FIRES)")
+            notifyStatus(
+                false,
+                "Stack unreachable — firing Termux revival ($fireNumber/$WATCHDOG_MAX_FIRES)…",
+            )
             // The watchdog fired but the app itself must keep trying to
             // reconnect: without this the relay stays dark even after a
             // successful revival (review point: "fires but never reconnects").
