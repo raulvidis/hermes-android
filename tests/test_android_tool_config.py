@@ -610,7 +610,8 @@ class TestAndroidSetup:
     def test_the_printed_address_is_wss_when_the_relay_terminates_tls(
         self, tool_mod, monkeypatch
     ):
-        monkeypatch.setattr(self.relay, "is_tls_configured", lambda: True)
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
         self.connected = True
 
         result = as_json(tool_mod.android_setup("PA2RCDE"))
@@ -776,3 +777,169 @@ class TestAndroidSetup:
 
         assert self.started == [("PA2RCDE", 9100)]
         assert "ANDROID_RELAY_PORT=9100" in env_file.read()
+
+    # ── F19: the saved bridge URL must use the transport the relay serves ──────
+    #
+    # With ANDROID_RELAY_CERT/KEY set, aiohttp serves the *whole* site over TLS —
+    # the /ws route the phone uses and the HTTP routes the tools use are one
+    # TCPSite. So http://localhost:8766 stops speaking HTTP and every tool call
+    # fails, while android_setup had just written that URL to ~/.hermes/.env and
+    # exported it into the process.
+
+    def test_the_saved_bridge_url_is_https_when_the_relay_terminates_tls(
+        self, tool_mod, monkeypatch
+    ):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+
+        as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert os.environ["ANDROID_BRIDGE_URL"] == "https://localhost:8766"
+
+    def test_the_env_file_gets_the_same_https_url(self, tool_mod, hermetic_home, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+
+        as_json(tool_mod.android_setup("PA2RCDE"))
+
+        written = (hermetic_home / ".env").read_text(encoding="utf-8")
+        assert "ANDROID_BRIDGE_URL=https://localhost:8766" in written
+
+    def test_the_saved_bridge_url_stays_http_without_a_certificate(self, tool_mod):
+        as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert os.environ["ANDROID_BRIDGE_URL"] == "http://localhost:8766"
+
+    @pytest.mark.parametrize("present", ["cert", "key"], ids=["cert_only", "key_only"])
+    def test_half_a_tls_configuration_stays_http(self, tool_mod, monkeypatch, present):
+        """Matches the relay: one path is not TLS, so the URL must not claim
+        https:// against a listener that is serving plaintext."""
+        monkeypatch.setenv(
+            "ANDROID_RELAY_CERT" if present == "cert" else "ANDROID_RELAY_KEY", "/tmp/x.pem"
+        )
+
+        as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert os.environ["ANDROID_BRIDGE_URL"] == "http://localhost:8766"
+
+    def test_the_tls_predicate_agrees_with_the_relay(self, tool_mod, monkeypatch):
+        """android_setup decides the scheme before it imports the relay, so it
+        reads the two variables itself. Two predicates that can drift is how
+        RELAY-2 happened, so pin them together."""
+        relay = relay_module_for(tool_mod)
+        for cert, key in [
+            (None, None),
+            ("/c.pem", None),
+            (None, "/k.pem"),
+            ("/c.pem", "/k.pem"),
+        ]:
+            for var, value in (("ANDROID_RELAY_CERT", cert), ("ANDROID_RELAY_KEY", key)):
+                if value is None:
+                    monkeypatch.delenv(var, raising=False)
+                else:
+                    monkeypatch.setenv(var, value)
+            assert tool_mod._relay_tls_enabled() is relay.is_tls_configured(), (
+                f"the two TLS predicates disagree for cert={cert!r} key={key!r}"
+            )
+
+    def test_the_https_setup_still_prints_a_wss_address_for_the_phone(
+        self, tool_mod, monkeypatch
+    ):
+        """Two different transports: the phone dials the WebSocket route, the
+        tools call the HTTP one. Both have to follow the relay."""
+        monkeypatch.setenv("ANDROID_RELAY_CERT", "/certs/fullchain.pem")
+        monkeypatch.setenv("ANDROID_RELAY_KEY", "/certs/key.pem")
+
+        result = as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert result["server_address"] == f"wss://{FAKE_IP}:8766"
+        assert os.environ["ANDROID_BRIDGE_URL"] == "https://localhost:8766"
+
+
+class TestBridgeTlsVerification:
+    """F19: an https:// bridge URL also has to be *usable*, and the relay's
+    certificate is issued for its public name — never for "localhost", so the
+    handshake cannot pass hostname verification on the loopback URL the tools use.
+
+    Verification is relaxed for a loopback bridge URL only. That traffic never
+    leaves the machine, and an attacker positioned to intercept it already has
+    local code execution and can read ~/.hermes/.env — the file holding the token
+    — directly, so nothing is given up that was not already theirs. Any other
+    https:// bridge URL keeps full verification.
+    """
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("http://localhost:8766", True),
+            ("http://127.0.0.1:8766", True),
+            ("https://localhost:8766", False),
+            ("https://127.0.0.1:8766", False),
+            ("https://[::1]:8766", False),
+            ("https://LOCALHOST:8766", False),
+            ("https://relay.example.com:8766", True),
+            ("https://203.0.113.7:8766", True),
+        ],
+        ids=[
+            "http-loopback",
+            "http-127",
+            "https-localhost",
+            "https-127",
+            "https-ipv6-loopback",
+            "https-uppercase",
+            "https-public-name",
+            "https-public-ip",
+        ],
+    )
+    def test_verify_follows_the_url(self, tool_mod, monkeypatch, url, expected):
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", url)
+
+        assert tool_mod._bridge_tls_verify() is expected
+
+    def test_every_call_site_passes_the_verify_setting(
+        self, tool_mod, monkeypatch, bridge
+    ):
+        """A call site that drops it makes the https:// URL setup just wrote fail
+        on that one tool, which is worse than failing on all of them."""
+        rsps, _ = bridge
+        rsps.add(responses.GET, "https://localhost:8766/ping", json={"status": "ok"})
+        rsps.add(responses.GET, "https://localhost:8766/screen_hash", json={"hash": "x"})
+        rsps.add(responses.POST, "https://localhost:8766/tap", json={"success": True})
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "https://localhost:8766")
+        seen = []
+        real_get, real_post = requests.get, requests.post
+
+        def spy_get(target, **kwargs):
+            seen.append(kwargs.get("verify", "MISSING"))
+            return real_get(target, **kwargs)
+
+        def spy_post(target, **kwargs):
+            seen.append(kwargs.get("verify", "MISSING"))
+            return real_post(target, **kwargs)
+
+        monkeypatch.setattr(requests, "get", spy_get)
+        monkeypatch.setattr(requests, "post", spy_post)
+
+        tool_mod.android_ping()
+        tool_mod.android_screen_hash()
+        tool_mod.android_tap(1, 2)
+
+        assert len(seen) == 3, f"expected three HTTP calls, saw {seen}"
+        assert seen == [False, False, False]
+
+    def test_a_public_https_bridge_stays_fully_verified(self, tool_mod, monkeypatch, bridge):
+        rsps, _ = bridge
+        rsps.add(responses.GET, "https://relay.example.com:8766/ping", json={"status": "ok"})
+        monkeypatch.setenv("ANDROID_BRIDGE_URL", "https://relay.example.com:8766")
+        seen = []
+        real_get = requests.get
+
+        def spy_get(target, **kwargs):
+            seen.append(kwargs.get("verify", "MISSING"))
+            return real_get(target, **kwargs)
+
+        monkeypatch.setattr(requests, "get", spy_get)
+
+        tool_mod.android_ping()
+
+        assert seen == [True]

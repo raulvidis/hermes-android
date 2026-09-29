@@ -16,7 +16,7 @@ Config lives in `~/.hermes/.env` (only needed for direct USB/LAN; relay mode is 
 | `ANDROID_RELAY_PORT` | `8766` | env, then `.env` | Port the relay listens on |
 | `ANDROID_RELAY_HOST` | `localhost` | env, then `.env` | Relay bind address (see #38) |
 | `ANDROID_BRIDGE_TIMEOUT` | `30` | env, then `.env` | HTTP request timeout (seconds) |
-| `ANDROID_RELAY_CERT` | *(none)* | env, then `.env` | TLS certificate; relay then serves `https`/`wss` |
+| `ANDROID_RELAY_CERT` | *(none)* | env, then `.env` | TLS certificate; relay then serves `https`/`wss` for **both** the phone and the tools |
 | `ANDROID_RELAY_KEY` | *(none)* | env, then `.env` | TLS private key — both cert and key must be set, or TLS stays off |
 | `HERMES_HOME` | `~/.hermes` | env only | Directory whose `.env` supplies the fallback variables |
 
@@ -41,7 +41,8 @@ already set, in either the environment or the file.
 ## Connection modes
 
 - **Relay (default):** phone connects out to the relay's `/ws` route — `ws://server:8766/ws` unless the address you type names a TLS scheme (see [Transport security](#transport-security) below). No `.env` config needed; `android_setup` configures it and prints the address with the scheme the relay is actually serving.
-- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts. `android_setup` then prints `wss://ip:8766` instead of `ws://ip:8766`, and typing `wss://server:8766` or `https://server:8766` in the app upgrades the same way. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
+- **Relay + TLS:** export `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` before the relay starts. TLS then covers the relay's *whole* site — the `/ws` route the phone dials and the HTTP routes the tools call are one listener — so `android_setup` prints `wss://ip:8766` for the phone *and* writes `ANDROID_BRIDGE_URL=https://localhost:8766` for the tools. Typing `wss://server:8766` or `https://server:8766` in the app upgrades the same way. The app validates with the platform trust store, so the certificate must be CA-trusted; self-signed certs fail the handshake and there is no pinning or bypass.
+  The tools cannot verify that certificate on `https://localhost` — it is issued for the relay's public name, never for `localhost` — so `_bridge_tls_verify()` switches verification off for a **loopback** bridge URL only, and leaves it fully on for any other `https://` bridge URL. Loopback traffic never leaves the machine, and anyone able to intercept it already has local code execution and can read `~/.hermes/.env` (which holds the token) directly. Point `ANDROID_BRIDGE_URL` at a name the certificate covers instead of `localhost` if you want that hop verified too.
 - **Same WiFi (direct):** `ANDROID_BRIDGE_URL=http://192.168.x.x:8765`.
 - **USB (direct):** `adb forward tcp:8765 tcp:8765` then `ANDROID_BRIDGE_URL=http://localhost:8765`.
 - **Persistent relay:** `contrib/hermes-android-relay.service` runs `contrib/hermes-relay-daemon.py` under systemd; it reads `ANDROID_BRIDGE_TOKEN` and `ANDROID_RELAY_PORT` and exits if the token is missing.

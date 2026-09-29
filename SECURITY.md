@@ -90,6 +90,16 @@ exists. Plaintext means:
   (`ANDROID_RELAY_CERT` / `ANDROID_RELAY_KEY`), or sit behind a reverse proxy with
   Let's Encrypt (nginx/caddy). Restrict `ws://` to a LAN/loopback address you
   control, and never to a public host
+- **The gateway→relay hop is not certificate-verified when it is loopback.** With relay TLS
+  on, `android_setup` writes `ANDROID_BRIDGE_URL=https://localhost:<port>`, and the
+  certificate is issued for the relay's public name — never for `localhost` — so
+  `_bridge_tls_verify()` turns verification off for a loopback bridge URL only. That hop
+  never leaves the machine, and an attacker who could intercept it already has local code
+  execution and can read `~/.hermes/.env` (the token) directly, so this gives up nothing
+  that was not already theirs; it is still strictly better than the plaintext `http://`
+  loopback hop it replaces. Verification stays fully on for any non-loopback `https://`
+  bridge URL. Point `ANDROID_BRIDGE_URL` at a name the certificate covers instead of
+  `localhost` if you want the hop verified
 
 ### Full Device Access
 Once paired, the agent has unrestricted access to the device. The list below is

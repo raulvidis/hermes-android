@@ -17,7 +17,7 @@ import tempfile
 import time
 import requests
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 #
@@ -100,6 +100,75 @@ def _auth_headers() -> dict:
     if token:
         return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+# Hosts that mean "this machine". An https:// bridge URL aimed at one of these is
+# the relay's own loopback listener, which is the case _bridge_tls_verify relaxes.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_insecure_warning_silenced = False
+
+
+def _bridge_tls_verify() -> bool:
+    """What `requests` verifies the bridge certificate against (review F19).
+
+    With `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` set, the relay's TLS site is its
+    *only* site — aiohttp serves the whole app over that one `ssl_context`, so the
+    `/ws` route the phone dials and the HTTP routes the tools call are the same
+    listener. `ANDROID_BRIDGE_URL` therefore has to be `https://`, and it still
+    cannot verify: the certificate is issued for the relay's public name, never
+    for `localhost`, so hostname verification fails on the loopback URL by
+    construction.
+
+    Verification is switched off for a **loopback** bridge URL only. That traffic
+    never leaves the machine, and an attacker positioned to intercept it already
+    has local code execution — and can read `~/.hermes/.env`, the file holding the
+    Bearer token, directly. Nothing is given up that was not already theirs, and
+    it is strictly better than the plaintext `http://localhost` this replaces.
+    Any other `https://` bridge URL — a remote relay, a reverse proxy, a direct
+    phone connection over TLS — keeps full verification.
+    """
+    url = _bridge_url()
+    if not url.lower().startswith("https://"):
+        return True
+    host = urlparse(url).hostname
+    if host is None or host.strip("[]").lower() not in _LOOPBACK_HOSTS:
+        return True
+    global _insecure_warning_silenced
+    if not _insecure_warning_silenced:
+        # urllib3 warns per request otherwise, which would bury the gateway log in
+        # a warning about a decision this function made deliberately.
+        _insecure_warning_silenced = True
+        try:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+    return False
+
+
+def _relay_tls_enabled() -> bool:
+    """True when the relay terminates TLS itself.
+
+    Read here rather than through `android_relay.is_tls_configured()` because
+    `android_setup` writes `ANDROID_BRIDGE_URL` *before* it imports the relay
+    module — the scheme has to be decided first. Both read the same two variables
+    with the same both-paths rule, and
+    `TestAndroidSetup::test_the_tls_predicate_agrees_with_the_relay` pins them
+    together so they cannot drift the way `get_relay_url()` did (RELAY-2).
+    """
+    return bool(_env("ANDROID_RELAY_CERT")) and bool(_env("ANDROID_RELAY_KEY"))
+
+
+def _relay_bridge_url(port: int, tls: bool) -> str:
+    """The `ANDROID_BRIDGE_URL` the tools use to reach the relay just started.
+
+    F19: this was hardcoded `http://`. When the relay has a certificate its whole
+    site is TLS, so that URL no longer spoke HTTP and every tool call failed —
+    including the `android_ping()` an agent runs right after setup to check the
+    pairing worked.
+    """
+    return f"{'https' if tls else 'http'}://localhost:{port}"
 
 
 # ── MEDIA temp-file retention (PY-2) ─────────────────────────────────────────
@@ -190,7 +259,12 @@ def _sweep_stale_media_temps(max_age_seconds: int = _MEDIA_TEMP_MAX_AGE_SECONDS)
 def _check_requirements() -> bool:
     """Returns True if the relay is running and a phone is connected."""
     try:
-        r = requests.get(f"{_bridge_url()}/ping", headers=_auth_headers(), timeout=2)
+        r = requests.get(
+            f"{_bridge_url()}/ping",
+            headers=_auth_headers(),
+            timeout=2,
+            verify=_bridge_tls_verify(),
+        )
         if r.status_code == 200:
             data = r.json()
             return data.get("phone_connected", False) or data.get(
@@ -271,13 +345,17 @@ def _post(path: str, payload: dict) -> dict:
         json=payload,
         headers=_auth_headers(),
         timeout=_timeout(),
+        verify=_bridge_tls_verify(),
     )
     return _extract_response(r)
 
 
 def _get(path: str) -> dict:
     r = requests.get(
-        f"{_bridge_url()}{path}", headers=_auth_headers(), timeout=_timeout()
+        f"{_bridge_url()}{path}",
+        headers=_auth_headers(),
+        timeout=_timeout(),
+        verify=_bridge_tls_verify(),
     )
     return _extract_response(r)
 
@@ -886,6 +964,7 @@ def android_mic_fetch(remote_path: str = "") -> str:
             headers=_auth_headers(),
             timeout=_timeout(),
             stream=True,
+            verify=_bridge_tls_verify(),
         ) as response:
             if response.status_code >= 400:
                 try:
@@ -1136,8 +1215,11 @@ def android_setup(pairing_code: str) -> str:
         port_already_set = _env("ANDROID_RELAY_PORT") is not None
         public_ip = _get_public_ip()
 
-        # Save config to ~/.hermes/.env
-        relay_url = f"http://localhost:{port}"
+        # Save config to ~/.hermes/.env. The scheme follows the transport the
+        # relay is about to serve (F19): with a certificate configured its whole
+        # site is TLS, so http://localhost would fail every tool call.
+        tls = _relay_tls_enabled()
+        relay_url = _relay_bridge_url(port, tls)
         try:
             from hermes_cli.config import save_env_value
 
@@ -1165,7 +1247,6 @@ def android_setup(pairing_code: str) -> str:
                 start_relay,
                 is_phone_connected,
                 set_pairing_code,
-                is_tls_configured,
             )
 
             # AUTH-1: start_relay() is a no-op while a relay thread is alive, so a
@@ -1178,7 +1259,7 @@ def android_setup(pairing_code: str) -> str:
             time.sleep(1)
             phone_connected = is_phone_connected()
 
-            server_address = _relay_server_address(public_ip, port, is_tls_configured())
+            server_address = _relay_server_address(public_ip, port, tls)
 
             if phone_connected:
                 return json.dumps(
