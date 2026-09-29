@@ -33,6 +33,16 @@ from urllib.parse import quote
 _ENV_FILE_CACHE: Optional[dict] = None
 
 
+def _hermes_home() -> str:
+    """Directory that holds .env. HERMES_HOME overrides ~/.hermes.
+
+    Both the reader (_env_file_vars) and the writer (android_setup) must resolve
+    it the same way: android_setup used Path.home(), so it wrote a file nothing
+    read, and the test suite mutated the developer's real ~/.hermes/.env.
+    """
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+
 def _env_file_vars() -> dict:
     """Parse ~/.hermes/.env once, cached.
 
@@ -45,9 +55,7 @@ def _env_file_vars() -> dict:
     if _ENV_FILE_CACHE is not None:
         return _ENV_FILE_CACHE
     _ENV_FILE_CACHE = {}
-    env_path = os.path.join(
-        os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env"
-    )
+    env_path = os.path.join(_hermes_home(), ".env")
     try:
         with open(env_path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -79,11 +87,11 @@ def _bridge_token() -> Optional[str]:
 
 
 def _relay_port() -> int:
-    return int(os.getenv("ANDROID_RELAY_PORT", "8766"))
+    return int(_env("ANDROID_RELAY_PORT") or "8766")
 
 
 def _timeout() -> float:
-    return float(os.getenv("ANDROID_BRIDGE_TIMEOUT", "30"))
+    return float(_env("ANDROID_BRIDGE_TIMEOUT") or "30")
 
 
 def _auth_headers() -> dict:
@@ -1088,6 +1096,11 @@ def android_setup(pairing_code: str) -> str:
         )
     try:
         port = _relay_port()
+        # Persisting the port is for a fresh install. When the user already set
+        # ANDROID_RELAY_PORT, writing it back is at best a no-op and at worst
+        # clobbers their value with a default (F5: _relay_port() used to read
+        # os.environ only, so a .env-only 9000 was overwritten with 8766).
+        port_already_set = _env("ANDROID_RELAY_PORT") is not None
         public_ip = _get_public_ip()
 
         # Save config to ~/.hermes/.env
@@ -1097,18 +1110,17 @@ def android_setup(pairing_code: str) -> str:
 
             save_env_value("ANDROID_BRIDGE_URL", relay_url)
             save_env_value("ANDROID_BRIDGE_TOKEN", pairing_code)
-            save_env_value("ANDROID_RELAY_PORT", str(port))
+            if not port_already_set:
+                save_env_value("ANDROID_RELAY_PORT", str(port))
         except ImportError:
             from pathlib import Path
 
-            # Same resolution order as _env_file_vars(), which is where the token
-            # is read back from — writing anywhere else silently does nothing.
-            hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-            env_path = Path(hermes_home) / ".env"
+            env_path = Path(_hermes_home()) / ".env"
             env_path.parent.mkdir(parents=True, exist_ok=True)
             _update_env_file(env_path, "ANDROID_BRIDGE_URL", relay_url)
             _update_env_file(env_path, "ANDROID_BRIDGE_TOKEN", pairing_code)
-            _update_env_file(env_path, "ANDROID_RELAY_PORT", str(port))
+            if not port_already_set:
+                _update_env_file(env_path, "ANDROID_RELAY_PORT", str(port))
 
         # Update current process env
         os.environ["ANDROID_BRIDGE_URL"] = relay_url

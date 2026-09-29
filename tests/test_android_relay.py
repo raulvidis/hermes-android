@@ -140,6 +140,75 @@ class TestTokenMasking:
         assert _mask_token("") == "****"
 
 
+class TestRelayEnvFileFallback:
+    """Review F5: the relay read ANDROID_RELAY_PORT/HOST/CERT/KEY from os.environ
+    only, while docs/configuration.md lists them in the same ~/.hermes/.env table
+    as the two variables that did fall back. The relay started in-process by
+    android_setup runs inside the gateway, which is exactly the process that does
+    not export .env — the condition the fallback exists for. (The systemd unit in
+    contrib/ uses EnvironmentFile=, so the daemon path was never affected.)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self, monkeypatch, tmp_path):
+        import tools.android_relay as relay
+
+        monkeypatch.setattr(relay, "_ENV_FILE_CACHE", None, raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for key in (
+            "ANDROID_RELAY_PORT",
+            "ANDROID_RELAY_HOST",
+            "ANDROID_RELAY_CERT",
+            "ANDROID_RELAY_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        self.env_file = tmp_path / ".env"
+        self.relay = relay
+
+    def test_port_from_env_file(self):
+        self.env_file.write_text("ANDROID_RELAY_PORT=9000\n")
+        assert self.relay._relay_port() == 9000
+
+    def test_port_defaults_when_unset(self):
+        assert self.relay._relay_port() == 8766
+
+    def test_host_from_env_file(self):
+        self.env_file.write_text("ANDROID_RELAY_HOST=0.0.0.0\n")
+        assert self.relay._relay_host() == "0.0.0.0"
+
+    def test_host_defaults_when_unset(self):
+        assert self.relay._relay_host() == "localhost"
+
+    def test_os_environ_wins(self, monkeypatch):
+        monkeypatch.setenv("ANDROID_RELAY_PORT", "7000")
+        self.env_file.write_text("ANDROID_RELAY_PORT=9000\n")
+        assert self.relay._relay_port() == 7000
+
+    def test_tls_paths_from_env_file(self, monkeypatch):
+        """A relay configured for TLS in .env must actually serve TLS; returning
+        None here silently downgrades wss:// to ws://."""
+        self.env_file.write_text("ANDROID_RELAY_CERT=/c.pem\nANDROID_RELAY_KEY=/k.pem\n")
+        seen = {}
+
+        def fake_load(self_ctx, certfile, keyfile):
+            seen["cert"] = certfile
+            seen["key"] = keyfile
+
+        import ssl
+
+        monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", fake_load)
+        assert self.relay._ssl_context() is not None
+        assert seen == {"cert": "/c.pem", "key": "/k.pem"}
+
+    def test_tls_stays_off_without_both_paths(self):
+        self.env_file.write_text("ANDROID_RELAY_CERT=/c.pem\n")
+        assert self.relay._ssl_context() is None
+
+    def test_get_relay_url_uses_the_env_file_port(self):
+        self.env_file.write_text("ANDROID_RELAY_PORT=9000\n")
+        assert get_relay_url() == "http://localhost:9000"
+
+
 class TestBodyLogRedaction:
     """Regression: request-body debug logs must not contain PII (AGENTS.md rule:
     strip phone numbers, recipients, location from tool responses/logs)."""

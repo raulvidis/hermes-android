@@ -369,24 +369,108 @@ class TestCurrentApp:
 
 class TestSetup:
     @responses.activate
-    def test_setup_saves_config(self, monkeypatch):
+    def test_setup_saves_config(self, monkeypatch, tmp_path):
         """android_setup saves pairing code and sets env vars.
+
+        HERMES_HOME is redirected so the suite never writes the developer's real
+        ~/.hermes/.env — it used to, because android_setup resolved the path with
+        Path.home() while the reader honoured HERMES_HOME.
 
         The relay is stubbed: binding a real port made this fail on a loaded
         machine ("Relay failed to start within 10 seconds"), and relay lifecycle
-        is covered by test_android_relay.py.
+        is covered by test_android_relay.py. "ABC234" is a code the PY-1
+        validator accepts — the alphabet PairingManager generates has no 0/O/1/I.
         """
-        import tools.android_relay as relay
-
         monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
-        monkeypatch.setattr(relay, "start_relay", lambda **kw: None)
-        monkeypatch.setattr(relay, "set_pairing_code", lambda code: None)
-        monkeypatch.setattr(relay, "is_phone_connected", lambda: False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _stub_relay_start(monkeypatch)
 
         result = json.loads(android_setup("ABC234"))
+
         assert result["status"] == "ok"
         assert os.environ.get("ANDROID_BRIDGE_TOKEN") == "ABC234"
         assert "localhost" in os.environ.get("ANDROID_BRIDGE_URL", "")
+        assert (tmp_path / ".env").exists()
+
+    @responses.activate
+    def test_setup_never_writes_outside_hermes_home(self, monkeypatch, tmp_path):
+        """The writer must resolve the same file the reader does."""
+        from tools import android_tool
+
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _stub_relay_start(monkeypatch)
+
+        written = []
+        real_update = android_tool._update_env_file
+
+        def spy(env_path, key, value):
+            written.append(str(env_path))
+            return real_update(env_path, key, value)
+
+        monkeypatch.setattr(android_tool, "_update_env_file", spy)
+        android_setup("ABC234")
+
+        assert written, "android_setup wrote no .env file"
+        for path in written:
+            assert path.startswith(str(tmp_path)), f"wrote outside HERMES_HOME: {path}"
+
+    @responses.activate
+    def test_setup_preserves_an_existing_relay_port(self, monkeypatch, tmp_path):
+        """Review F5: setup must not overwrite a port the user configured.
+
+        Before the fix `_relay_port()` read os.environ only, so a user with
+        ANDROID_RELAY_PORT=9000 in ~/.hermes/.env got 8766 back, the relay bound
+        8766, and setup then wrote 8766 over their 9000.
+        """
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.delenv("ANDROID_RELAY_PORT", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / ".env").write_text("ANDROID_RELAY_PORT=9000\n")
+        from tools import android_tool
+
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        started = _stub_relay_start(monkeypatch)
+
+        android_setup("ABC234")
+
+        assert started["port"] == 9000, "the relay must bind the port from .env"
+        assert "ANDROID_RELAY_PORT=9000" in (tmp_path / ".env").read_text()
+
+    @responses.activate
+    def test_setup_records_the_port_when_none_was_configured(self, monkeypatch, tmp_path):
+        """The other half of F5: a fresh install still gets the port persisted,
+        so the phone-facing instructions and the relay agree on restart."""
+        monkeypatch.setattr("tools.android_tool._get_public_ip", lambda: "1.2.3.4")
+        monkeypatch.delenv("ANDROID_RELAY_PORT", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from tools import android_tool
+
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        _stub_relay_start(monkeypatch)
+
+        android_setup("ABC234")
+
+        assert "ANDROID_RELAY_PORT=8766" in (tmp_path / ".env").read_text()
+
+
+def _stub_relay_start(monkeypatch) -> dict:
+    """Keep android_setup off the network and off a real listening port.
+
+    Returns the kwargs start_relay was called with, so a test can assert which
+    port the relay would have bound.
+    """
+    import tools.android_relay as relay
+
+    started = {}
+
+    def fake_start_relay(pairing_code, port=0):
+        started["pairing_code"] = pairing_code
+        started["port"] = port
+
+    monkeypatch.setattr(relay, "start_relay", fake_start_relay)
+    monkeypatch.setattr(relay, "is_phone_connected", lambda: True)
+    return started
 
 
 class TestSetupRotatesARunningRelay:
@@ -479,6 +563,53 @@ class TestEnvFileFallback:
 
         assert android_tool._bridge_token() is None
         assert android_tool._bridge_url() == "http://localhost:8766"
+
+    # Review F5: docs/configuration.md presents all five variables under one
+    # "Config lives in ~/.hermes/.env" table, but only URL and TOKEN were read
+    # through _env(). A user who set ANDROID_RELAY_PORT=9000 there got 8766, and
+    # ANDROID_BRIDGE_TIMEOUT=120 was ignored so long calls died at 30s.
+    def test_relay_port_from_env_file(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_RELAY_PORT", raising=False)
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        (tmp_path / ".env").write_text("ANDROID_RELAY_PORT=9000\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert android_tool._relay_port() == 9000
+
+    def test_timeout_from_env_file(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_BRIDGE_TIMEOUT", raising=False)
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        (tmp_path / ".env").write_text("ANDROID_BRIDGE_TIMEOUT=120\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert android_tool._timeout() == 120.0
+
+    def test_os_environ_wins_for_port_and_timeout(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.setenv("ANDROID_RELAY_PORT", "7000")
+        monkeypatch.setenv("ANDROID_BRIDGE_TIMEOUT", "9")
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        (tmp_path / ".env").write_text("ANDROID_RELAY_PORT=9000\nANDROID_BRIDGE_TIMEOUT=120\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        assert android_tool._relay_port() == 7000
+        assert android_tool._timeout() == 9.0
+
+    def test_defaults_survive_a_missing_env_file(self, monkeypatch, tmp_path):
+        from tools import android_tool
+
+        monkeypatch.delenv("ANDROID_RELAY_PORT", raising=False)
+        monkeypatch.delenv("ANDROID_BRIDGE_TIMEOUT", raising=False)
+        monkeypatch.setattr(android_tool, "_ENV_FILE_CACHE", None)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "nonexistent"))
+
+        assert android_tool._relay_port() == 8766
+        assert android_tool._timeout() == 30.0
 
 
 class TestClipboardRead:

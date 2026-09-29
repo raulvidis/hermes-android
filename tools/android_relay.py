@@ -40,6 +40,57 @@ from aiohttp import web
 
 logger = logging.getLogger("android_relay")
 
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+# The relay can be started in-process by android_setup, inside a gateway that
+# loads ~/.hermes/.env for its own config but does not export it into
+# os.environ. Reading os.getenv alone therefore ignored ANDROID_RELAY_PORT /
+# HOST / CERT / KEY that docs/configuration.md tells users to put there. This
+# mirrors android_tool._env: os.environ wins, .env is the fallback. Kept local
+# rather than imported so this module still runs standalone on a relay host.
+
+_ENV_FILE_CACHE: Optional[dict] = None
+
+
+def _env_file_vars() -> dict:
+    """Parse ~/.hermes/.env once, cached. Missing/unreadable file -> empty."""
+    global _ENV_FILE_CACHE
+    if _ENV_FILE_CACHE is not None:
+        return _ENV_FILE_CACHE
+    _ENV_FILE_CACHE = {}
+    env_path = os.path.join(
+        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), ".env"
+    )
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                _ENV_FILE_CACHE[key.strip()] = value.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return _ENV_FILE_CACHE
+
+
+def _env(key: str) -> Optional[str]:
+    """os.environ first, then ~/.hermes/.env as a fallback."""
+    val = os.getenv(key)
+    if val:
+        return val
+    return _env_file_vars().get(key)
+
+
+def _relay_port() -> int:
+    """Port the relay listens on (default 8766)."""
+    return int(_env("ANDROID_RELAY_PORT") or "8766")
+
+
+def _relay_host() -> str:
+    """Bind address for the relay (default localhost)."""
+    return _env("ANDROID_RELAY_HOST") or "localhost"
+
 # ── Module-level state ────────────────────────────────────────────────────────
 
 _relay_lock = threading.Lock()
@@ -86,7 +137,7 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
     """Start the relay in a background thread.  No-op if already running."""
     global _relay_instance
     if port == 0:
-        port = int(os.getenv("ANDROID_RELAY_PORT", "8766"))
+        port = _relay_port()
 
     with _relay_lock:
         if (
@@ -162,7 +213,7 @@ def is_phone_connected() -> bool:
 def get_relay_url() -> str:
     with _relay_lock:
         s = _relay_instance
-        port = s.port if s else int(os.getenv("ANDROID_RELAY_PORT", "8766"))
+        port = s.port if s else _relay_port()
     return f"http://localhost:{port}"
 
 
@@ -227,8 +278,8 @@ def _ssl_context() -> Optional["ssl.SSLContext"]:
     """Build SSL context from env vars if configured."""
     import ssl as _ssl
 
-    cert_path = os.getenv("ANDROID_RELAY_CERT")
-    key_path = os.getenv("ANDROID_RELAY_KEY")
+    cert_path = _env("ANDROID_RELAY_CERT")
+    key_path = _env("ANDROID_RELAY_KEY")
 
     if not cert_path or not key_path:
         return None
@@ -319,7 +370,7 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     await runner.setup()
 
     ssl_ctx = _ssl_context()
-    host = os.getenv("ANDROID_RELAY_HOST", "localhost")
+    host = _relay_host()
     site = web.TCPSite(runner, host, state.port, ssl_context=ssl_ctx)
     state.site = site
     await site.start()

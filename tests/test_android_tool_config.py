@@ -324,19 +324,13 @@ class TestEnvLookup:
         env_file(f"{key}=9100\n")
         assert tool_mod._env(key) == "9100"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: _relay_port() (and _timeout()) read os.getenv directly instead "
-            "of going through _env(), so a value set only in ~/.hermes/.env is "
-            "ignored. That is the same situation the .env fallback was added for "
-            "in 4234d92 — the gateway does not export every variable — and "
-            "_bridge_url()/_bridge_token() do honour it. android_setup persists "
-            "ANDROID_RELAY_PORT to that very file, so a custom port configured "
-            "only there is silently reset to the 8766 default on the next setup."
-        ),
-    )
     def test_relay_port_honours_the_env_file(self, tool_mod, env_file, no_os_environ):
+        """Was `xfail(strict)` — "BUG: _relay_port() reads os.getenv directly".
+
+        F5 fixed it: every documented `ANDROID_*` variable now goes through
+        `_env()`, so a port set only in `~/.hermes/.env` is honoured. This is the
+        regression test for that fix.
+        """
         env_file("ANDROID_RELAY_PORT=9100\n")
 
         assert tool_mod._relay_port() == 9100
@@ -610,6 +604,26 @@ class TestAndroidSetup:
         assert as_json(tool_mod.android_ping())["status"] == "ok"
 
     def test_uses_hermes_cli_config_when_available(self, tool_mod, hermes_cli, monkeypatch):
+        """No port configured anywhere, so setup records the one it chose."""
+        monkeypatch.delenv("ANDROID_RELAY_PORT", raising=False)
+
+        as_json(tool_mod.android_setup("PA2RCDE"))
+
+        assert hermes_cli == [
+            ("ANDROID_BRIDGE_URL", "http://localhost:8766"),
+            ("ANDROID_BRIDGE_TOKEN", "PA2RCDE"),
+            ("ANDROID_RELAY_PORT", "8766"),
+        ]
+
+    def test_a_port_the_user_already_set_is_not_written_back(
+        self, tool_mod, hermes_cli, monkeypatch
+    ):
+        """F5: an explicit ANDROID_RELAY_PORT is left alone.
+
+        Writing it back is a no-op at best; before the fix setup wrote the
+        *default* it had just read over the user's value, because `_relay_port()`
+        never consulted the .env.
+        """
         monkeypatch.setenv("ANDROID_RELAY_PORT", "9100")
 
         as_json(tool_mod.android_setup("PA2RCDE"))
@@ -617,7 +631,6 @@ class TestAndroidSetup:
         assert hermes_cli == [
             ("ANDROID_BRIDGE_URL", "http://localhost:9100"),
             ("ANDROID_BRIDGE_TOKEN", "PA2RCDE"),
-            ("ANDROID_RELAY_PORT", "9100"),
         ]
 
     def test_falls_back_to_writing_the_env_file(self, tool_mod, hermetic_home):
@@ -702,18 +715,16 @@ class TestAndroidSetup:
 
         assert "SECRET2345" not in caplog.text
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: same root cause as _relay_port() ignoring ~/.hermes/.env, seen "
-            "from the user's side — android_setup starts the relay on the 8766 "
-            "default and then rewrites ANDROID_RELAY_PORT in the .env, "
-            "discarding the port the user configured there."
-        ),
-    )
     def test_setup_keeps_a_port_configured_only_in_the_env_file(
         self, tool_mod, env_file, no_os_environ, hermetic_home
     ):
+        """Was `xfail(strict)` — the user-side view of the same F5 bug.
+
+        android_setup used to start the relay on the 8766 default and then
+        rewrite ANDROID_RELAY_PORT in the .env, discarding the port the user had
+        configured there. It now reads the port through `_env()` and leaves an
+        already-configured value alone.
+        """
         env_file("ANDROID_RELAY_PORT=9100\n")
 
         tool_mod.android_setup("PA2RCDE")

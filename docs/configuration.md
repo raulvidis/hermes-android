@@ -7,24 +7,36 @@ read_when:
 
 # Configuration
 
-Config lives in `~/.hermes/.env` (only needed for direct USB/LAN; relay mode is the default and needs none). Two variables are read from that file as a fallback — the rest are process-environment only.
+Config lives in `~/.hermes/.env` (only needed for direct USB/LAN; relay mode is the default and needs none). Every `ANDROID_*` variable below is read from that file as a fallback; `HERMES_HOME` itself is not, because it selects the file.
 
 | Variable | Default | Read from | Purpose |
 |----------|---------|-----------|---------|
 | `ANDROID_BRIDGE_URL` | `http://localhost:8766` | env, then `.env` | Relay URL, or direct phone URL for USB/LAN |
 | `ANDROID_BRIDGE_TOKEN` | *(none)* | env, then `.env` | Pairing code for auth headers |
-| `ANDROID_RELAY_PORT` | `8766` | env only | Port the relay listens on |
-| `ANDROID_RELAY_HOST` | `localhost` | env only | Relay bind address (see #38) |
-| `ANDROID_BRIDGE_TIMEOUT` | `30` | env only | HTTP request timeout (seconds) |
-| `ANDROID_RELAY_CERT` | *(none)* | env only | TLS certificate; relay then serves `https`/`wss` |
-| `ANDROID_RELAY_KEY` | *(none)* | env only | TLS private key — both cert and key must be set, or TLS stays off |
-| `HERMES_HOME` | `~/.hermes` | env only | Directory whose `.env` supplies the two fallback variables |
+| `ANDROID_RELAY_PORT` | `8766` | env, then `.env` | Port the relay listens on |
+| `ANDROID_RELAY_HOST` | `localhost` | env, then `.env` | Relay bind address (see #38) |
+| `ANDROID_BRIDGE_TIMEOUT` | `30` | env, then `.env` | HTTP request timeout (seconds) |
+| `ANDROID_RELAY_CERT` | *(none)* | env, then `.env` | TLS certificate; relay then serves `https`/`wss` |
+| `ANDROID_RELAY_KEY` | *(none)* | env, then `.env` | TLS private key — both cert and key must be set, or TLS stays off |
+| `HERMES_HOME` | `~/.hermes` | env only | Directory whose `.env` supplies the fallback variables |
 
-Only `ANDROID_BRIDGE_URL` and `ANDROID_BRIDGE_TOKEN` fall back to `~/.hermes/.env`
-(`_env()` in `tools/android_tool.py`); `os.environ` always wins, and the parsed file
-is cached for the life of the process. Everything else is read with a plain
-`os.getenv`, so it must be exported — including under the systemd relay, where
-`contrib/hermes-android-relay.service` supplies it via `EnvironmentFile=-%h/.hermes/.env`.
+All of them fall back to `~/.hermes/.env`: `os.environ` always wins, and the parsed
+file is cached for the life of the process. Two modules read it, because the relay
+also runs standalone on a host without the tool package — `_env()` in
+`tools/android_tool.py` covers `ANDROID_BRIDGE_URL`, `ANDROID_BRIDGE_TOKEN`,
+`ANDROID_RELAY_PORT` and `ANDROID_BRIDGE_TIMEOUT`; `_env()` in `tools/android_relay.py`
+covers `ANDROID_RELAY_PORT`, `ANDROID_RELAY_HOST`, `ANDROID_RELAY_CERT` and
+`ANDROID_RELAY_KEY`. `HERMES_HOME` is the one variable that must be exported, since
+it names the file being read.
+
+The fallback matters because `android_setup` starts the relay *in-process*, inside a
+gateway that loads `.env` for its own config but does not export it. Under the systemd
+relay the variables are exported anyway — `contrib/hermes-android-relay.service`
+supplies them with `EnvironmentFile=-%h/.hermes/.env` — so both paths agree.
+
+`android_setup` persists `ANDROID_BRIDGE_URL`, `ANDROID_BRIDGE_TOKEN` and, on a fresh
+install only, `ANDROID_RELAY_PORT`. It never overwrites an `ANDROID_RELAY_PORT` you
+already set, in either the environment or the file.
 
 ## Connection modes
 
