@@ -28,7 +28,20 @@ object NotificationStore {
     fun add(entry: NotificationEntry) {
         synchronized(lock) {
             if (notifications.size >= maxCapacity) {
-                notifications.removeLast()
+                // Prefer a dismissed entry for eviction. Retained-removed entries
+                // are only visible to the opt-in include_removed read, so letting
+                // them push out a live one meant a busy day of dismissals evicted
+                // the long-lived isOngoing notification the user could still see
+                // in the shade (review F11). The deque is newest-first, so the
+                // last removed entry is the oldest dismissed one. Only when
+                // nothing is dismissed does the original oldest-first eviction
+                // apply — the buffer must stay bounded either way.
+                val dismissed = notifications.indexOfLast { it.removedAt != null }
+                if (dismissed >= 0) {
+                    notifications.removeAt(dismissed)
+                } else {
+                    notifications.removeLast()
+                }
             }
             notifications.addFirst(entry)
         }
