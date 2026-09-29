@@ -14,9 +14,7 @@ import com.hermesandroid.bridge.event.EventStore
 import com.hermesandroid.bridge.executor.ActionExecutor
 import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.model.ActionResult
-import com.hermesandroid.bridge.model.DeviceCapabilities
 import com.hermesandroid.bridge.notification.NotificationStore
-import com.hermesandroid.bridge.power.BatteryMonitor
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import com.hermesandroid.bridge.service.BridgeNotificationListener
 import kotlinx.coroutines.Dispatchers
@@ -216,84 +214,15 @@ object CommandDispatcher {
 
             method == "GET" && path == "/screen_hash" -> ScreenCommands.screenHash()
 
-            method == "GET" && path == "/location" -> {
-                val result = ActionExecutor.location()
-                result to 200
-            }
+            method == "GET" && path == "/location" -> DeviceCommands.location()
 
-            method == "GET" && path == "/battery" -> {
-                // Both values come from BatteryManager — percentage via
-                // getIntProperty (API 21), charge state via isCharging (API 23)
-                // — against a minSdk of 26, so there is no version gate and no
-                // dependency on the accessibility service. Reading the level
-                // out of the status-bar node instead would be language- and
-                // OEM-fragile; see BatteryMonitor.
-                //
-                // No auth check here on purpose. The ktor interceptor in
-                // BridgeServer requires a valid Bearer token for every path
-                // except /ping, and the relay authenticates at connect time
-                // before passing `true`. A second gate in the handler would be
-                // unreachable and would only imply the first one is optional.
-                //
-                // The shape is fixed — both keys, always present. Nullable
-                // fields are not an option even though BridgeServer configures
-                // serializeNulls(): RelayClient serialises results with a
-                // default Gson(), which drops nulls, so a nullable key would
-                // appear over HTTP and vanish over the relay.
-                val app = batteryContext()
-                val percentage = BatteryMonitor.percentage(app)
-                val charging = BatteryMonitor.charging(app)
-                if (percentage == null || charging == null) {
-                    return mapOf(
-                        "error" to "Battery state unavailable on this device",
-                    ) to 503
-                }
-                mapOf(
-                    "batteryPercentage" to percentage,
-                    "charging" to charging,
-                ) to 200
-            }
+            method == "GET" && path == "/battery" -> DeviceCommands.battery()
 
-            method == "POST" && path == "/send_sms" -> {
-                if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "SMS not available on this device") to 200
-                }
-                // Validate before the executor. AOSP's sendTextMessage throws
-                // IllegalArgumentException for an empty destination — and its
-                // message quotes the address, which is why the blank case is
-                // rejected here with a fixed string rather than surfacing the
-                // exception. /open_app already answers 400 for a missing package.
-                val to = body.get("to")?.let { if (it.isJsonPrimitive) it.asString else null }
-                if (to.isNullOrBlank()) {
-                    return mapOf("error" to "Missing or blank 'to'") to 400
-                }
-                val smsBody = body.get("body")?.let { if (it.isJsonPrimitive) it.asString else null }
-                if (smsBody.isNullOrBlank()) {
-                    return mapOf("error" to "Missing or blank 'body'") to 400
-                }
-                // F13: sendSms blocks on a CountDownLatch for up to 10 s waiting
-                // for the radio's send report. `dispatch` is suspend, so calling it
-                // inline would block the transport's own thread — over direct HTTP
-                // a Netty event-loop thread that every other connection shares.
-                // Same shape as /contacts and /screen_record.
-                val result = withContext(Dispatchers.IO) { smsSender(to, smsBody) }
-                result to 200
-            }
+            method == "POST" && path == "/send_sms" -> DeviceCommands.sendSms(body)
 
-            method == "POST" && path == "/call" -> {
-                if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "Phone calls not available on this device") to 200
-                }
-                val number = body.get("number")?.asString ?: ""
-                val result = ActionExecutor.makeCall(number)
-                result to 200
-            }
+            method == "POST" && path == "/call" -> DeviceCommands.call(body)
 
-            method == "POST" && path == "/media" -> {
-                val action = body.get("action")?.asString ?: ""
-                val result = ActionExecutor.mediaControl(action)
-                result to 200
-            }
+            method == "POST" && path == "/media" -> DeviceCommands.media(body)
 
             method == "GET" && path == "/events" -> {
                 // DROID-4: belt and braces behind the gate in EventStore.add — a
@@ -324,17 +253,7 @@ object CommandDispatcher {
                 mapOf("success" to true, "streaming" to enabled) to 200
             }
 
-            method == "GET" && path == "/contacts" -> {
-                if (!DeviceCapabilities.hasTelephony) {
-                    return mapOf("success" to false, "error" to "Contacts not available on this device") to 200
-                }
-                val query = params.get("query")?.asString ?: ""
-                val limit = params.get("limit")?.asString?.toIntOrNull() ?: 20
-                val result = withContext(Dispatchers.IO) {
-                    ActionExecutor.searchContacts(query, limit)
-                }
-                result to 200
-            }
+            method == "GET" && path == "/contacts" -> DeviceCommands.contacts(params)
 
             method == "POST" && path == "/intent" -> AppIntentCommands.intent(body)
 
