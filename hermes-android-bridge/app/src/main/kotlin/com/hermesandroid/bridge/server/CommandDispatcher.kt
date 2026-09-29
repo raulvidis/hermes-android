@@ -49,6 +49,39 @@ object CommandDispatcher {
      */
     internal var batteryContext: () -> Context = { BridgeApplication.instance }
 
+    // RES-1: `/wait` polled the accessibility tree on the main thread for as long
+    // as the caller asked. An unclamped timeoutMs let a relay — or an on-path
+    // injector, since plaintext ws:// has no integrity protection (TRANS-1) —
+    // park a coroutine doing a full tree walk every 500 ms for ~24.8 days:
+    // sustained battery drain and UI jank that outlives the caller's own 30 s
+    // HTTP timeout. The ceiling sits at 4x that timeout (and 24x the tools'
+    // default), so a caller can never observe it: the Python client gives up at
+    // ANDROID_BRIDGE_TIMEOUT (30 s) long before the phone would.
+    internal const val DEFAULT_WAIT_TIMEOUT_MS = 5_000
+    internal const val MAX_WAIT_TIMEOUT_MS = 120_000
+    internal const val DEFAULT_RECORD_DURATION_MS = 5_000L
+
+    // The floor is 1 ms, not something "sensible" like 1 s: a sub-second clip is
+    // useless but it is what the caller asked for, and raising it would silently
+    // lengthen their recording. All the floor has to do is keep a negative value
+    // from reaching Thread.sleep and throwing there.
+    internal const val MIN_RECORD_DURATION_MS = 1L
+    internal const val MAX_RECORD_DURATION_MS = 30_000L
+
+    /** RES-1: clamp a caller-supplied `/wait` timeout instead of trusting it. */
+    internal fun clampWaitTimeoutMs(raw: Int?): Int =
+        (raw ?: DEFAULT_WAIT_TIMEOUT_MS).coerceIn(0, MAX_WAIT_TIMEOUT_MS)
+
+    /**
+     * RES-1: clamp a caller-supplied `/screen_record` duration at both ends. The
+     * maximum was already clamped; the minimum was not, so a negative value
+     * reached Thread.sleep inside ScreenRecorder and threw there instead of being
+     * rejected at the boundary.
+     */
+    internal fun clampRecordDurationMs(raw: Long?): Long =
+        (raw ?: DEFAULT_RECORD_DURATION_MS)
+            .coerceIn(MIN_RECORD_DURATION_MS, MAX_RECORD_DURATION_MS)
+
     suspend fun dispatch(
         method: String,
         path: String,
@@ -147,7 +180,7 @@ object CommandDispatcher {
             method == "POST" && path == "/wait" -> {
                 val text = body.get("text")?.asString
                 val className = body.get("className")?.asString
-                val timeoutMs = body.get("timeoutMs")?.asInt ?: 5000
+                val timeoutMs = clampWaitTimeoutMs(body.get("timeoutMs")?.asInt)
                 val result = withContext(Dispatchers.Main) {
                     ActionExecutor.waitForElement(text, className, timeoutMs)
                 }
@@ -490,7 +523,7 @@ object CommandDispatcher {
             }
 
             method == "POST" && path == "/screen_record" -> {
-                val durationMs = body.get("durationMs")?.asLong?.coerceAtMost(30_000L) ?: 5000L
+                val durationMs = clampRecordDurationMs(body.get("durationMs")?.asLong)
                 val result = withContext(Dispatchers.IO) {
                     ScreenRecorder.record(durationMs)
                 }
