@@ -1000,9 +1000,18 @@ def android_send_intent(
     action: str, data_uri: str = None, extras: dict = None, package: str = None
 ) -> str:
     """
-    Send an Android intent to start an activity. Opens up deep linking,
-    setting toggles, and app-specific APIs.
-    Example: android_send_intent("android.settings.WIFI_SETTINGS")
+    Send an Android intent to start an activity. Opens up deep linking and
+    app-specific APIs.
+
+    Blocked for safety, before the intent is built: every android.settings.* and
+    android.provider.action.* action, package install/uninstall, factory
+    reset/shutdown, direct CALL, the intent, market, tel, sms, smsto, mms and
+    mmsto URI schemes, and personal content:// providers (settings, sms, mms,
+    call_log, telephony, contacts). To change a setting, open the app and tap
+    through it: android_open_app("com.android.settings") then
+    android_tap_text(...).
+
+    Example: android_send_intent("android.intent.action.VIEW", "https://example.com")
     """
     try:
         payload = {"action": action}
@@ -1817,7 +1826,7 @@ _SCHEMAS = {
     },
     "android_send_intent": {
         "name": "android_send_intent",
-        "description": "Send an Android intent to start an activity. Enables deep links and app-specific APIs. Blocked on the device: telephony (CALL, tel:/sms:/smsto:), package management, android.settings.* / android.provider.action.* actions, and personal content:// providers (sms, mms, call_log, telephony, contacts). Use android_call / android_send_sms for telephony and android_open_app for apps.",
+        "description": "Send an Android intent to start an activity. Enables deep linking and app-specific APIs. Refused for safety: every android.settings.* and android.provider.action.* action, package install/uninstall, factory reset/shutdown, direct CALL, the intent://, market://, tel:, sms:, smsto:, mms: and mmsto: URI schemes, and personal content:// providers (settings, sms, mms, call_log, telephony, contacts). Use android_call / android_send_sms for telephony; for settings, use android_open_app(\"com.android.settings\") and tap through the UI.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1827,7 +1836,7 @@ _SCHEMAS = {
                 },
                 "data_uri": {
                     "type": "string",
-                    "description": "Optional data URI e.g. https://example.com/page",
+                    "description": "Optional data URI e.g. https://example.com",
                 },
                 "extras": {
                     "type": "object",
