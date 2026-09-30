@@ -209,13 +209,28 @@ internal object GestureExecutor {
         // endOff < startOff so fingers move together.
         val startOff = 50f
         val endOff = 50f * scale
+        // StrokeDescription's constructor rejects a path whose computed bounds
+        // are negative ("Path bounds must not be negative"), and the strokes
+        // reach endOff px either side of the centre — so a pinch within
+        // 50 * scale px of the left edge (x = 50 at the default 1.5) threw out
+        // of this function before dispatchGesture was ever reached: no gesture,
+        // no ActionResult, just an exception the transport turns into a 500.
+        // Clamp every coordinate at 0 on both axes. bounds.top is checked too,
+        // and a caller-supplied negative y reaches it directly. Near an edge the
+        // gesture is asymmetric — the finger that would have started off-screen
+        // starts at the edge instead — which is a slightly weaker pinch, where
+        // the alternative is a crash the caller cannot catch.
+        //
+        // Named pathY, not y: the result message interpolates the caller's Int
+        // coordinates, and a local `y` would shadow the parameter and change it.
+        val pathY = centerY.coerceAtLeast(0f)
         val path1 = Path().apply {
-            moveTo(centerX - startOff, centerY)
-            lineTo(centerX - endOff, centerY)
+            moveTo((centerX - startOff).coerceAtLeast(0f), pathY)
+            lineTo((centerX - endOff).coerceAtLeast(0f), pathY)
         }
         val path2 = Path().apply {
-            moveTo(centerX + startOff, centerY)
-            lineTo(centerX + endOff, centerY)
+            moveTo((centerX + startOff).coerceAtLeast(0f), pathY)
+            lineTo((centerX + endOff).coerceAtLeast(0f), pathY)
         }
         val stroke1 = GestureDescription.StrokeDescription(path1, 0, duration)
         val stroke2 = GestureDescription.StrokeDescription(path2, 0, duration)

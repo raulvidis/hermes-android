@@ -259,10 +259,6 @@ class ActionExecutorGestureTest {
     fun `pinch zoom in dispatches a single two-stroke gesture`() = bridgeTest {
         completeGesture()
 
-        // Center kept away from the screen edges: the framework rejects
-        // StrokeDescription paths with negative bounds, and pinch at
-        // x < 75 with the default 1.5 scale draws a path into negative
-        // territory (pre-existing latent crash — documented, not fixed here).
         val result = ActionExecutor.pinch(500, 500)
 
         assertTrue("expected success — got: ${result.message}", result.success)
@@ -271,6 +267,78 @@ class ActionExecutorGestureTest {
         verify(exactly = 1) { mockService.dispatchGesture(any(), any(), any()) }
         val gesture = slot<GestureDescription>()
         verify { mockService.dispatchGesture(capture(gesture), any(), any()) }
+        assertEquals(2, gesture.captured.strokeCount)
+    }
+
+    /**
+     * Regression: the framework builds each stroke with
+     * `GestureDescription.StrokeDescription(path, ...)`, whose constructor
+     * throws `IllegalArgumentException("Path bounds must not be negative")`
+     * when `path.computeBounds` reports a negative left or top. The strokes
+     * reach `50 * scale` px either side of the centre, so any pinch whose
+     * centre is within that distance of the left edge used to blow up inside
+     * [ActionExecutor.pinch] — before `dispatchGesture` was ever reached, so
+     * the caller got an exception instead of an [ActionResult] and the tool
+     * surfaced a 500 with no gesture on screen.
+     *
+     * `x = 50` at the default scale is the reported case: `50 - 50 * 1.5 = -25`.
+     */
+    @Test
+    fun `pinch near the left screen edge reports a gesture instead of throwing`() = bridgeTest {
+        completeGesture()
+
+        val result = ActionExecutor.pinch(50, 500)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        // The message still quotes the caller's coordinates, not the clamped ones.
+        assertEquals("Pinch zoom in at (50, 500) scale 1.5", result.message)
+        val gesture = slot<GestureDescription>()
+        verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
+        assertEquals(2, gesture.captured.strokeCount)
+    }
+
+    /** The same crash at the very edge, where both left-hand coordinates clamp. */
+    @Test
+    fun `pinch at the left screen edge still dispatches two strokes`() = bridgeTest {
+        completeGesture()
+
+        val result = ActionExecutor.pinch(0, 300)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        val gesture = slot<GestureDescription>()
+        verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
+        assertEquals(2, gesture.captured.strokeCount)
+    }
+
+    /**
+     * Regression, top edge: the horizontal offsets cannot push the path above
+     * `y = 0`, but a negative `y` from the caller does exactly that, and
+     * `StrokeDescription` checks `bounds.top` as well as `bounds.left`.
+     */
+    @Test
+    fun `pinch above the top screen edge reports a gesture instead of throwing`() = bridgeTest {
+        completeGesture()
+
+        val result = ActionExecutor.pinch(500, -10)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        assertEquals("Pinch zoom in at (500, -10) scale 1.5", result.message)
+        val gesture = slot<GestureDescription>()
+        verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
+        assertEquals(2, gesture.captured.strokeCount)
+    }
+
+    /** The reach is `50 * scale`, so a larger scale clamps further from the edge. */
+    @Test
+    fun `pinch with a wide scale near the left screen edge reports a gesture instead of throwing`() = bridgeTest {
+        completeGesture()
+
+        val result = ActionExecutor.pinch(20, 400, scale = 4f)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        assertEquals("Pinch zoom in at (20, 400) scale 4.0", result.message)
+        val gesture = slot<GestureDescription>()
+        verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
         assertEquals(2, gesture.captured.strokeCount)
     }
 }
