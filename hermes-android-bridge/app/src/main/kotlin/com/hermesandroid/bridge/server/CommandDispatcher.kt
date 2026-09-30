@@ -2,20 +2,13 @@
 
 package com.hermesandroid.bridge.server
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import com.google.gson.JsonObject
 import com.hermesandroid.bridge.BridgeApplication
-import com.hermesandroid.bridge.audio.MicrophoneRecorderService
-import com.hermesandroid.bridge.audio.MicrophoneRecordingFiles
-import com.hermesandroid.bridge.audio.MicrophoneRecordingState
 import com.hermesandroid.bridge.executor.ActionExecutor
-import com.hermesandroid.bridge.media.ScreenRecorder
 import com.hermesandroid.bridge.model.ActionResult
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 /**
  * Single source of truth for command handling, shared by both transports:
@@ -24,6 +17,14 @@ import kotlinx.coroutines.withContext
  *
  * Both transports parse their request into (method, path, params, body) and call [dispatch],
  * so endpoint contracts, device-capability gating, and behaviour live in exactly one place.
+ *
+ * [dispatch] is the error contract and [route] is the routing table: every
+ * (method, path) pair is listed here and nowhere else, so a route cannot be
+ * added to one transport and forgotten in the other. Each arm delegates to a
+ * domain handler object in this package — [ScreenCommands], [InputCommands],
+ * [AppIntentCommands], [DeviceCommands], [NotificationCommands] and
+ * [MediaCommands] — which holds that endpoint's behaviour. `/ping`
+ * (the unauthenticated health check) and the 404 arm stay inline.
  *
  * @param authenticated whether the caller is authenticated. The relay connection is
  *   authenticated at connect time (Bearer token in the WS handshake), so it passes `true`; the HTTP
@@ -211,97 +212,17 @@ object CommandDispatcher {
 
             method == "POST" && path == "/broadcast" -> AppIntentCommands.broadcast(body)
 
-            method == "POST" && path == "/speak" -> {
-                val text = body.get("text")?.asString ?: ""
-                val queue = body.get("queue")?.asInt ?: 1
-                val result = ActionExecutor.speak(text, queue)
-                result to 200
-            }
+            method == "POST" && path == "/speak" -> MediaCommands.speak(body)
 
-            method == "POST" && path == "/stop_speaking" -> {
-                val result = ActionExecutor.stopSpeaking()
-                result to 200
-            }
+            method == "POST" && path == "/stop_speaking" -> MediaCommands.stopSpeaking()
 
-            method == "POST" && path == "/mic_start" -> {
-                val durationValue = body.get("duration")
-                val durationSec = when {
-                    durationValue == null -> 0
-                    !durationValue.isJsonPrimitive || !durationValue.asJsonPrimitive.isNumber -> {
-                        return mapOf("error" to "duration must be an integer number of seconds") to 400
-                    }
-                    else -> durationValue.asJsonPrimitive.asString.toIntOrNull()
-                        ?: return mapOf("error" to "duration must be an integer number of seconds") to 400
-                }
-                val app = BridgeApplication.instance
-                if (durationSec !in 0..MicrophoneRecorderService.MAX_DURATION_SECONDS) {
-                    return mapOf(
-                        "error" to "duration must be between 0 and ${MicrophoneRecorderService.MAX_DURATION_SECONDS} seconds"
-                    ) to 400
-                }
-                if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                    return mapOf("error" to "Microphone permission is not granted") to 403
-                }
-                if (!MicrophoneRecordingState.tryReserveStart()) {
-                    return mapOf("error" to "A microphone recording is already active") to 409
-                }
+            method == "POST" && path == "/mic_start" -> MediaCommands.micStart(body)
 
-                runCatching {
-                    MicrophoneRecorderService.start(app, durationSec)
-                    mapOf(
-                        "status" to "starting",
-                        "duration" to durationSec,
-                    ) to 202
-                }.getOrElse { error ->
-                    MicrophoneRecordingState.markError(
-                        "Could not start microphone service (${error.javaClass.simpleName})",
-                    )
-                    mapOf(
-                        "error" to "Could not start microphone service (${error.javaClass.simpleName})"
-                    ) to 500
-                }
-            }
+            method == "POST" && path == "/mic_stop" -> MediaCommands.micStop()
 
-            method == "POST" && path == "/mic_stop" -> {
-                val snapshot = MicrophoneRecordingState.snapshot()
-                if (!snapshot.isActive) {
-                    return mapOf("status" to "idle") to 200
-                }
-                runCatching {
-                    MicrophoneRecorderService.stop(BridgeApplication.instance)
-                    mapOf("status" to "stopping") to 202
-                }.getOrElse { error ->
-                    mapOf(
-                        "error" to "Could not stop microphone service (${error.javaClass.simpleName})"
-                    ) to 500
-                }
-            }
+            method == "GET" && path == "/mic_status" -> MediaCommands.micStatus()
 
-            method == "GET" && path == "/mic_status" -> {
-                val app = BridgeApplication.instance
-                val snapshot = MicrophoneRecordingState.snapshot()
-                val files = MicrophoneRecordingFiles.listCompleted(app)
-                val latest = files.firstOrNull()
-                mapOf(
-                    "phase" to snapshot.phase.name.lowercase(),
-                    "recording" to snapshot.isActive,
-                    "count" to files.size,
-                    "retentionLimit" to MicrophoneRecordingFiles.MAX_COMPLETED_RECORDINGS,
-                    "latest" to latest?.name,
-                    "latestSize" to latest?.length(),
-                    "bytesWritten" to snapshot.bytesWritten,
-                    "startedAt" to snapshot.startedAtMs,
-                    "error" to snapshot.error,
-                ) to 200
-            }
-
-            method == "POST" && path == "/screen_record" -> {
-                val durationMs = clampRecordDurationMs(body.get("durationMs")?.asLong)
-                val result = withContext(Dispatchers.IO) {
-                    ScreenRecorder.record(durationMs)
-                }
-                result to 200
-            }
+            method == "POST" && path == "/screen_record" -> MediaCommands.screenRecord(body)
 
             method == "GET" && path == "/widgets" -> ScreenCommands.widgets()
 
@@ -310,5 +231,4 @@ object CommandDispatcher {
             }
         }
     }
-
 }
