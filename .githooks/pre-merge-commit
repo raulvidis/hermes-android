@@ -1,0 +1,8 @@
+#!/bin/sh
+# pre-merge-commit — agent isolation guard (agent-repo-standards $worktree → scripts/git-guard.sh).
+# Repo-specific FAST checks go below the guard line; slow gates belong in pre-push/CI.
+R="$(git rev-parse --show-toplevel)"
+G="$R/.agents/skills/worktree/scripts/git-guard.sh"
+[ -f "$G" ] || G="$R/skills/worktree/scripts/git-guard.sh"   # the standards repo itself
+if [ -f "$G" ]; then sh "$G" pre-merge-commit "$@" || exit 1
+else echo "warning: shared git-guard missing (.agents not linked) — isolation rules NOT enforced" >&2; fi
