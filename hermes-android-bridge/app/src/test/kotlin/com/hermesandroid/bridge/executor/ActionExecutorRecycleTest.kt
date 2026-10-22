@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.hermesandroid.bridge.power.WakeLockManager
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
 import io.mockk.*
 import com.hermesandroid.bridge.bridgeTest
@@ -31,8 +32,13 @@ class ActionExecutorRecycleTest {
         mockService = mockk(relaxed = true)
         mockkObject(BridgeAccessibilityService.Companion)
         every { BridgeAccessibilityService.instance } returns mockService
-        // WakeLockManager wakeForAction just executes the block in tests
-        mockkStatic("com.hermesandroid.bridge.power.WakeLockManager")
+        // WakeLockManager is a Kotlin `object`, not a file of top-level
+        // functions, so it is mocked with mockkObject (mockkStatic targets a
+        // JVM class of static members and did nothing useful here). Unstubbed
+        // calls go to the real implementation: WakeLockManager.init() is never
+        // called in tests, so powerManager is null, wakeForAction treats the
+        // device as already awake and simply runs the block.
+        mockkObject(WakeLockManager)
     }
 
     @After

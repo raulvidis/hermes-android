@@ -9,6 +9,7 @@ import io.mockk.mockkObject
 import io.mockk.unmockkAll
 import io.mockk.verify
 import org.junit.After
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Before
 import org.junit.Test
@@ -105,5 +106,29 @@ class ScreenReaderRecycleTest {
         verify(exactly = 1) { miss.recycle() }
         verify(exactly = 1) { ancestor.recycle() }
         verify(exactly = 0) { match.recycle() }
+    }
+
+    @Test
+    fun `findNodeByText recycles each root exactly once when nothing matches`() {
+        // Two windows, no match anywhere. Every root is recycled inside the
+        // search loop; the post-loop cleanup of "remaining" roots must be
+        // skipped (foundIndex == -1) or each root would be recycled twice.
+        val child0 = node(text = "Other")
+        val root0 = node(childCount = 1)
+        every { root0.getChild(0) } returns child0
+        val root1 = node(text = "Nope")
+        val win0 = window(root0)
+        val win1 = window(root1)
+
+        every { mockService.windows } returns listOf(win0, win1)
+
+        val found = ScreenReader.findNodeByText("Target", exact = true)
+
+        assertNull(found)
+        verify(exactly = 1) { root0.recycle() }
+        verify(exactly = 1) { root1.recycle() }
+        verify(exactly = 1) { child0.recycle() }
+        verify(exactly = 1) { win0.recycle() }
+        verify(exactly = 1) { win1.recycle() }
     }
 }
