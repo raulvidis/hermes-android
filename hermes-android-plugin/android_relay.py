@@ -690,12 +690,20 @@ async def _on_phone_message(state: _RelayState, raw: str) -> None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Non-JSON message from phone: %s", raw[:200])
+        # Never log the content: phone messages carry screen text, contacts,
+        # SMS and location (AGENTS.md: strip PII from logs).
+        logger.warning("Non-JSON message from phone (%d chars)", len(raw))
         return
 
-    request_id = data.get("request_id")
+    # Valid JSON need not be an object; `.get` on a list would raise here and
+    # tear down the phone session over one malformed frame.
+    request_id = data.get("request_id") if isinstance(data, dict) else None
     if not request_id:
-        logger.warning("Phone message missing request_id: %s", raw[:200])
+        logger.warning(
+            "Phone message missing request_id (%s, %d chars)",
+            type(data).__name__,
+            len(raw),
+        )
         return
 
     async with state.streams_lock:

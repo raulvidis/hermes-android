@@ -288,6 +288,48 @@ class TestBodyLogRedaction:
         assert len(repr_) <= 200
 
 
+class TestPhoneMessageLogging:
+    """Malformed phone frames are logged by shape only, never by content.
+
+    A phone message is screen text, SMS, contacts or location; the old warnings
+    logged its first 200 characters, and a JSON array raised instead.
+    """
+
+    SECRET = "+15551234567 meet at 221B Baker St"
+
+    def _log_messages(self, caplog, raw):
+        import asyncio
+        import logging
+        from tools.android_relay import _on_phone_message
+
+        state = _RelayState(pairing_code="LOGCDE", port=0)
+
+        async def deliver():
+            state.streams_lock = asyncio.Lock()
+            state.pending_lock = asyncio.Lock()
+            await _on_phone_message(state, raw)
+
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="android_relay"):
+            asyncio.run(deliver())
+        return [r.getMessage() for r in caplog.records]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            SECRET,  # not JSON
+            '{"result": "' + SECRET + '"}',  # object without request_id
+            '["' + SECRET + '"]',  # JSON, but not an object
+        ],
+        ids=["non-json", "missing-request-id", "json-array"],
+    )
+    def test_malformed_frame_logs_no_content(self, caplog, raw):
+        messages = self._log_messages(caplog, raw)
+
+        assert len(messages) == 1
+        assert "+1555" not in messages[0] and "Baker" not in messages[0]
+
+
 class TestWsAuthHeader:
     """Regression: WS handshake auth accepts a Bearer header only. The ?token=
     query string fallback was removed because it leaked pairing codes into
