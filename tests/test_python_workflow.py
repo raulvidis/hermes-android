@@ -68,3 +68,20 @@ class TestPythonWorkflowTriggers:
         text = WORKFLOW.read_text(encoding="utf-8")
 
         assert ".github/workflows/python.yml" in _trigger_paths(text, "pull_request")
+
+    def test_non_python_files_the_suite_reads_are_triggers(self):
+        """The suite reads these outside tools/ and tests/; a PR touching only
+        one of them can break it, so it must run it."""
+        text = WORKFLOW.read_text(encoding="utf-8")
+        read_by_tests = {
+            "docs/architecture.md",
+            "hermes-android-bridge/app/build.gradle.kts",
+            "hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/server/CommandDispatcher.kt",
+            "hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/client/RelayClient.kt",
+        }
+        root = WORKFLOW.parent.parent.parent
+        for path in read_by_tests:
+            assert (root / path).is_file(), f"{path} moved — update python.yml and this test"
+        for trigger in ("push", "pull_request"):
+            missing = read_by_tests - set(_trigger_paths(text, trigger))
+            assert not missing, f"{trigger} does not trigger on {sorted(missing)}"

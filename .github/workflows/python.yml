@@ -19,6 +19,15 @@ on:
       - 'pyproject.toml'
       - 'setup.py'
       - 'requirements.txt'
+      # Non-Python files the suite reads: the allowlist tests pin _ROUTES to
+      # docs/architecture.md and to the bridge's Kotlin routes, and the version
+      # test reads build.gradle.kts. An edit to any of them alone can break the
+      # suite, so it must run it. Narrow paths, not docs/**: other docs edits
+      # stay CI-free.
+      - 'docs/architecture.md'
+      - 'hermes-android-bridge/app/build.gradle.kts'
+      - 'hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/server/CommandDispatcher.kt'
+      - 'hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/client/RelayClient.kt'
       - '.github/workflows/python.yml'
   pull_request:
     paths:
@@ -28,6 +37,15 @@ on:
       - 'pyproject.toml'
       - 'setup.py'
       - 'requirements.txt'
+      # Non-Python files the suite reads: the allowlist tests pin _ROUTES to
+      # docs/architecture.md and to the bridge's Kotlin routes, and the version
+      # test reads build.gradle.kts. An edit to any of them alone can break the
+      # suite, so it must run it. Narrow paths, not docs/**: other docs edits
+      # stay CI-free.
+      - 'docs/architecture.md'
+      - 'hermes-android-bridge/app/build.gradle.kts'
+      - 'hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/server/CommandDispatcher.kt'
+      - 'hermes-android-bridge/app/src/main/kotlin/com/hermesandroid/bridge/client/RelayClient.kt'
       # A PR that only edits this workflow — adding a Python to the matrix,
       # changing the pytest invocation — used to run no check at all, so the
       # breakage landed on main and surfaced in the next unrelated PR.
