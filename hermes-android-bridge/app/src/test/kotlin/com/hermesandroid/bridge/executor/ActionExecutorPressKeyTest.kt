@@ -69,6 +69,29 @@ class ActionExecutorPressKeyTest {
     }
 
     @Test
+    fun `wake works without the accessibility service running`() {
+        // wake only needs PowerManager, so a down accessibility service must
+        // not short-circuit it with "Accessibility service not running".
+        every { BridgeAccessibilityService.instance } returns null
+        every { WakeLockManager.wake() } returns true
+
+        val result = ActionExecutor.pressKey("wake")
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        assertEquals("Woke screen", result.message)
+    }
+
+    @Test
+    fun `non-wake keys still require the accessibility service`() {
+        every { BridgeAccessibilityService.instance } returns null
+
+        val result = ActionExecutor.pressKey("back")
+
+        assertFalse(result.success)
+        assertEquals("Accessibility service not running", result.message)
+    }
+
+    @Test
     fun `power still opens the power dialog`() {
         every { mockService.performGlobalAction(any()) } returns true
 
