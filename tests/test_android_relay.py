@@ -569,17 +569,6 @@ class TestMicrophoneBinaryStreamNegative:
                     assert response.status >= 400
                     await ws.close()
                     return
-                if expect == "teardown-or-complete":
-                    # Detection happens after the last byte is delivered; the
-                    # client either sees a torn-down body or the full payload.
-                    # Server-side logs are asserted by the caller.
-                    response = await asyncio.wait_for(download, timeout=2)
-                    try:
-                        await asyncio.wait_for(response.read(), timeout=2)
-                    except aiohttp.ClientError:
-                        pass
-                    await ws.close()
-                    return
                 # expect == "teardown": the client must never see a silent
                 # truncated success. Three outcomes all satisfy that, and
                 # which one happens depends on whether the relay processes
@@ -639,12 +628,11 @@ class TestMicrophoneBinaryStreamNegative:
                 }
             )
 
-        # The full body has already been streamed when the checksum is
-        # verified, so the HTTP client cannot observe the abort — pin the
-        # server-side detection instead: the relay must log the mismatch and
-        # force-close rather than complete the stream cleanly.
+        # The relay withholds the final chunk until the checksum is verified,
+        # so the client must see a torn-down download, never the full body —
+        # and the relay must log why.
         with caplog.at_level(logging.WARNING, logger="tools.android_relay"):
-            self._run_stream_scenario(phone_play, expect="teardown-or-complete")
+            self._run_stream_scenario(phone_play, expect="teardown")
             # The relay reaches this verdict on its own thread, after the
             # client has returned — wait for it rather than racing it.
             record = _await_log_record(caplog, "checksum mismatch")
@@ -702,10 +690,9 @@ class TestMicrophoneBinaryStreamNegative:
                 }
             )
 
-        # Same shape as the checksum case: the payload is fully delivered
-        # before the end event lies, so pin the server-side detection.
+        # Same as the checksum case: the withheld final chunk is never sent.
         with caplog.at_level(logging.WARNING, logger="tools.android_relay"):
-            self._run_stream_scenario(phone_play, expect="teardown-or-complete")
+            self._run_stream_scenario(phone_play, expect="teardown")
             # As above: the verdict is logged on the relay's own thread.
             record = _await_log_record(caplog, "length does not match")
 

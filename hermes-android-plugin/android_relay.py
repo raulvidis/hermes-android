@@ -969,8 +969,15 @@ async def _relay_binary_stream(
         )
         await response.prepare(request)
 
+        # The phone's sha256 and byte count only arrive in the "end" event,
+        # after the data. Hold the most recent chunk back until that event is
+        # verified: on a mismatch the connection is then torn down short of
+        # Content-Length, which android_mic_fetch rejects as incomplete. Writing
+        # every chunk eagerly delivered a complete-looking file with the wrong
+        # contents, and the checksum was enforced nowhere a caller could see.
         digest = hashlib.sha256()
         total = 0
+        held: Optional[bytes] = None
         while True:
             kind, payload = await asyncio.wait_for(queue.get(), timeout=_RESPONSE_TIMEOUT)
             if kind == "error":
@@ -980,7 +987,9 @@ async def _relay_binary_stream(
                 if total > expected_size or total > _MAX_STREAM_BYTES:
                     raise ValueError("Phone sent more recording data than declared")
                 digest.update(payload)
-                await response.write(payload)
+                if held:
+                    await response.write(held)
+                held = payload
                 continue
             if kind != "message":
                 raise ValueError("Unknown stream event")
@@ -998,6 +1007,8 @@ async def _relay_binary_stream(
                 digest.hexdigest(), expected_sha
             ):
                 raise IOError("Recording stream checksum mismatch")
+            if held:
+                await response.write(held)
             await response.write_eof()
             return response
     except asyncio.TimeoutError:
