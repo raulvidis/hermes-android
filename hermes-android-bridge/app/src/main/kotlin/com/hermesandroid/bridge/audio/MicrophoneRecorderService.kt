@@ -67,6 +67,20 @@ class MicrophoneRecorderService : Service() {
                 "open Hermes Bridge or keep it in the foreground"
 
         /**
+         * Reported instead of READY for a recording that is exact digital
+         * silence. Android 11-13 do not refuse a microphone FGS started from
+         * the background; they hand it all-zero audio instead, and an agent
+         * would otherwise transcribe nothing and conclude nobody spoke.
+         */
+        internal const val SILENT_RECORDING_MESSAGE =
+            "Recording was silent — microphone access was likely denied by the system " +
+                "(is Hermes Bridge in the background?)"
+
+        /** The error to publish for a completed recording, or null if it is READY. */
+        internal fun silentRecordingError(bytesWritten: Long, peakAmplitude: Int): String? =
+            SILENT_RECORDING_MESSAGE.takeIf { bytesWritten > 0L && peakAmplitude == 0 }
+
+        /**
          * User-facing reason for a failed startForegroundService() call.
          * ForegroundServiceStartNotAllowedException (API 31+) is an
          * IllegalStateException; while-in-use denials surface as
@@ -247,6 +261,7 @@ class MicrophoneRecorderService : Service() {
         recordingJob = scope.launch {
             var writer: WavFileWriter? = null
             var outcome: Outcome? = null
+            var peak = 0
             try {
                 writer = WavFileWriter(pending, SAMPLE_RATE)
                 audioRecord.startRecording()
@@ -272,6 +287,8 @@ class MicrophoneRecorderService : Service() {
                         AudioRecord.READ_BLOCKING,
                     )
                     if (read > 0) {
+                        // Measured before gain: a system-silenced mic delivers exact zeros.
+                        peak = maxOf(peak, PcmSampleProcessor.peakAmplitude(samples, read))
                         PcmSampleProcessor.applyRecordingGain(samples, read)
                         writer.write(samples, read)
                         MicrophoneRecordingState.markRecording(writer.totalSamples * 2L)
@@ -306,7 +323,7 @@ class MicrophoneRecorderService : Service() {
                 isRecording.set(false)
                 stopRequested.set(false)
                 recordingJob = null
-                publishOutcome(outcome)
+                publishOutcome(outcome, peak)
                 finishService()
             }
         }
@@ -318,9 +335,17 @@ class MicrophoneRecorderService : Service() {
         class Failed(val message: String) : Outcome()
     }
 
-    private fun publishOutcome(outcome: Outcome?) {
+    private fun publishOutcome(outcome: Outcome?, peak: Int) {
         when (outcome) {
-            is Outcome.Ready -> MicrophoneRecordingState.markReady(outcome.file, outcome.bytesWritten)
+            // The WAV is kept either way; only the reported phase differs.
+            is Outcome.Ready -> {
+                val silent = silentRecordingError(outcome.bytesWritten, peak)
+                if (silent != null) {
+                    MicrophoneRecordingState.markError(silent)
+                } else {
+                    MicrophoneRecordingState.markReady(outcome.file, outcome.bytesWritten)
+                }
+            }
             is Outcome.Failed -> MicrophoneRecordingState.markError(outcome.message)
             // Cancelled with no audio: onDestroy, or the F16 completion handler
             // that runs after this, settles the phase.

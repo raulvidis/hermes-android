@@ -1,6 +1,7 @@
 package com.hermesandroid.bridge.audio
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -41,5 +42,16 @@ class MicrophoneRecorderServiceCapTest {
         for (duration in 0..MicrophoneRecorderService.MAX_DURATION_SECONDS step 137) {
             assertTrue(MicrophoneRecorderService.sampleLimitFor(duration) in 1..ceiling)
         }
+    }
+
+    @Test
+    fun `all-zero audio is reported as a silenced microphone, anything else is READY`() {
+        assertEquals(
+            MicrophoneRecorderService.SILENT_RECORDING_MESSAGE,
+            MicrophoneRecorderService.silentRecordingError(bytesWritten = 32_000L, peakAmplitude = 0),
+        )
+        assertNull(MicrophoneRecorderService.silentRecordingError(bytesWritten = 32_000L, peakAmplitude = 1))
+        // An empty recording is not evidence of a silenced mic.
+        assertNull(MicrophoneRecorderService.silentRecordingError(bytesWritten = 0L, peakAmplitude = 0))
     }
 }
