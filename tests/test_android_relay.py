@@ -103,6 +103,37 @@ class TestRelayLifecycle:
         stop_relay()
 
 
+class TestStartOnATakenPort:
+    PORT = 19887
+
+    def test_start_fails_fast_with_the_cause(self):
+        """A port already held (a systemd relay, another gateway) used to leave
+        start_relay() waiting its full 10 s for a `ready` that never came, then
+        report only "Relay failed to start"."""
+        import socket
+        import tools.android_relay as relay_mod
+
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            blocker.bind(("127.0.0.1", self.PORT))
+            blocker.listen(1)
+            started = time.monotonic()
+            with pytest.raises(RuntimeError, match="Relay failed to start") as info:
+                start_relay(pairing_code="TAKEN1", port=self.PORT)
+            elapsed = time.monotonic() - started
+        finally:
+            blocker.close()
+
+        assert elapsed < 5
+        message = str(info.value)
+        assert str(self.PORT) in message
+        # The cause, but not the OSError's bind-address tuple.
+        assert "in use" in message.lower()
+        assert "127.0.0.1" not in message and "('" not in message
+        assert relay_mod._relay_instance is None
+        assert is_relay_running() is False
+
+
 class TestRateLimiting:
     def test_not_blocked_initially(self):
         assert not _auth_is_blocked("1.2.3.4")

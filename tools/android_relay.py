@@ -138,6 +138,11 @@ class _RelayState:
         # keeps only weak ones to tasks.
         self.close_tasks: set = set()
 
+        # Why _serve() died before it was listening (e.g. the port is already
+        # held by another relay). Set together with `ready` by _run_loop so
+        # start_relay() fails at once with the cause instead of after 10 s.
+        self.start_error: Optional[BaseException] = None
+
 
 # ── Public API (called from sync code) ────────────────────────────────────────
 
@@ -168,7 +173,14 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
         state.thread = t
         t.start()
         # Wait until the server is actually listening (up to 10 s)
-        if not ready.wait(timeout=10):
+        started = ready.wait(timeout=10)
+        if started and state.start_error is not None:
+            _relay_instance = previous
+            raise RuntimeError(
+                f"Relay failed to start on port {port}: "
+                f"{_start_error_reason(state.start_error)}"
+            ) from state.start_error
+        if not started:
             logger.error("Relay failed to start within 10 seconds")
             # Roll back. _run_loop closes its loop in a finally, so leaving this
             # half-started state registered means the next stop_relay() — the
@@ -177,6 +189,20 @@ def start_relay(pairing_code: str, port: int = 0) -> None:
             _relay_instance = previous
             raise RuntimeError("Relay failed to start")
         logger.info("Relay started on port %d", port)
+
+
+def _start_error_reason(exc: BaseException) -> str:
+    """Name why the listener could not start, without the bind address.
+
+    asyncio's bind failure puts the (host, port) tuple into the OSError's
+    message (strerror included); the tool response that carries this must not
+    expose connection details (AGENTS.md), and the port is already in the
+    message. The errno's own text ("Address already in use") is the
+    actionable part.
+    """
+    if isinstance(exc, OSError) and exc.errno:
+        return os.strerror(exc.errno)
+    return type(exc).__name__
 
 
 def stop_relay() -> None:
@@ -323,8 +349,13 @@ def _run_loop(state: _RelayState, ready: threading.Event) -> None:
 
     try:
         loop.run_until_complete(_serve(state, ready))
-    except Exception:
+    except Exception as exc:
         logger.exception("Relay event loop crashed")
+        if not ready.is_set():
+            # Never got as far as listening: hand the cause to start_relay(),
+            # which is blocked on `ready`, instead of letting it time out.
+            state.start_error = exc
+            ready.set()
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
@@ -433,7 +464,11 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
     host = _relay_host()
     site = web.TCPSite(runner, host, state.port, ssl_context=ssl_ctx)
     state.site = site
-    await site.start()
+    try:
+        await site.start()
+    except BaseException:
+        await runner.cleanup()
+        raise
 
     scheme = "https" if ssl_ctx else "http"
     logger.info("Relay listening on %s://%s:%d", scheme, host, state.port)

@@ -204,9 +204,26 @@ class TestRunLoopCrash:
         with caplog.at_level(logging.ERROR, logger=LOGGER):
             relay_mod._run_loop(state, ready)
 
-        assert ready.is_set() is False
         assert state.loop.is_closed() is True
         assert "Relay event loop crashed" in caplog.text
+        # It died before listening, so start_relay() — blocked on `ready` — is
+        # woken with the cause instead of waiting out its 10 s timeout.
+        assert ready.is_set() is True
+        assert str(state.start_error) == "kaboom"
+
+    def test_a_crash_after_listening_is_not_reported_as_a_start_error(self, relay_mod, monkeypatch):
+        state = relay_mod._RelayState(pairing_code="PAIRCODE", port=19555)
+        ready = threading.Event()
+
+        async def crash_later(state, ready):
+            ready.set()
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(relay_mod, "_serve", crash_later)
+
+        relay_mod._run_loop(state, ready)
+
+        assert state.start_error is None
 
     def test_the_loop_primitives_are_created_before_serving(self, relay_mod, monkeypatch):
         """_serve and the handlers assume the locks exist; a handler that runs
