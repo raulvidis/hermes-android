@@ -25,9 +25,18 @@ object NotificationStore {
     private val lock = Any()
     @Volatile var maxCapacity: Int = 50
 
+    /**
+     * Stores [entry] as the newest notification. A notification re-posted with
+     * the same key (an update: progress, a new message in a thread) replaces
+     * the earlier entry instead of sitting beside it. Without that, each update
+     * left a stale copy behind, and markRemoved() flagged only the newest one,
+     * so a dismissed notification kept showing up as active through its older
+     * copies.
+     */
     fun add(entry: NotificationEntry) {
         synchronized(lock) {
-            if (notifications.size >= maxCapacity) {
+            notifications.removeAll { it.key == entry.key }
+            while (notifications.isNotEmpty() && notifications.size >= maxCapacity) {
                 // Prefer a dismissed entry for eviction. Retained-removed entries
                 // are only visible to the opt-in include_removed read, so letting
                 // them push out a live one meant a busy day of dismissals evicted
@@ -55,10 +64,26 @@ object NotificationStore {
         }
     }
 
+    /**
+     * Entries that changed after [sinceTimestamp].
+     *
+     * By default that means active entries posted after it. With
+     * [includeRemoved], an entry also counts when it was dismissed after
+     * [sinceTimestamp]: a poller asking for removals must see a notification
+     * posted before its last poll but cleared since, which a post-time-only
+     * filter hides from it for good.
+     */
     fun getSince(sinceTimestamp: Long, limit: Int = 50, includeRemoved: Boolean = false): List<NotificationEntry> {
         synchronized(lock) {
             return notifications
-                .filter { it.timestamp > sinceTimestamp && (includeRemoved || it.removedAt == null) }
+                .filter { e ->
+                    val removedAt = e.removedAt
+                    if (includeRemoved) {
+                        maxOf(e.timestamp, removedAt ?: Long.MIN_VALUE) > sinceTimestamp
+                    } else {
+                        removedAt == null && e.timestamp > sinceTimestamp
+                    }
+                }
                 .take(limit)
         }
     }
@@ -72,13 +97,16 @@ object NotificationStore {
     fun markRemoved(key: String) {
         synchronized(lock) {
             val now = System.currentTimeMillis()
-            val idx = notifications.indexOfFirst { it.key == key }
-            if (idx >= 0) {
-                // Keep the entry (flagged as removed) so the PA can log it
-                // AFTER the user has read/cleared it — the old behaviour
-                // deleted it instantly and the 2-min poll missed the event.
-                val e = notifications[idx]
-                notifications[idx] = e.copy(removedAt = now)
+            // Keep entries (flagged as removed) so the PA can log them AFTER
+            // the user has read/cleared them — the old behaviour deleted them
+            // instantly and the 2-min poll missed the event. add() keeps keys
+            // unique, but flag every match anyway so no copy is left looking
+            // active; an entry already flagged keeps its original removedAt.
+            for (i in notifications.indices) {
+                val e = notifications[i]
+                if (e.key == key && e.removedAt == null) {
+                    notifications[i] = e.copy(removedAt = now)
+                }
             }
         }
     }
