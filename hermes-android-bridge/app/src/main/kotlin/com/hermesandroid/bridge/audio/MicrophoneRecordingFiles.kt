@@ -33,9 +33,11 @@ internal object MicrophoneRecordingFiles {
 
     fun createPending(context: Context, now: Date = Date()): PendingMicrophoneRecording {
         val directory = directory(context)
-        // A leftover .part means the process died mid-recording. Salvage the
-        // audio instead of deleting it; only one session records at a time,
-        // so no .part can belong to a live writer here.
+        // A leftover .part usually means the process died mid-recording.
+        // Salvage the audio instead of deleting it. The one exception is a
+        // destroyed service whose cancelled job is still finalizing its own
+        // .part; that job's finish() then fails its rename and the audio
+        // survives here instead, which is no worse than the old delete.
         val recovered = recoverIncomplete(directory)
         if (recovered.isNotEmpty()) {
             Log.i(TAG, "Recovered ${recovered.size} interrupted microphone recording(s)")
