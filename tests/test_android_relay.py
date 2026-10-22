@@ -948,6 +948,42 @@ class TestRouteAllowlist:
             f"{sorted(p for p in set(documented) & set(_ROUTES) if documented[p] != _ROUTES[p])}"
         )
 
+    def test_the_bridge_routes_are_exactly_the_allowlist(self):
+        """The phone's real routes and _ROUTES must not drift either.
+
+        The docs test above pins documentation to the allowlist; this pins the
+        allowlist to the code that serves it. CommandDispatcher.dispatch matches
+        `method == "X" && path == "/y"`; /mic_file is the one route handled
+        outside it, in RelayClient (binary stream), with the same shape.
+        """
+        import pathlib
+        import re
+        from tools.android_relay import _ROUTES
+
+        kotlin = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "hermes-android-bridge" / "app" / "src" / "main" / "kotlin"
+            / "com" / "hermesandroid" / "bridge"
+        )
+        pattern = re.compile(r'method\s*==\s*"(GET|POST)"\s*&&\s*path\s*==\s*"([^"]+)"')
+        found: dict[str, set] = {}
+        for rel in ("server/CommandDispatcher.kt", "client/RelayClient.kt"):
+            for method, path in pattern.findall((kotlin / rel).read_text(encoding="utf-8")):
+                found.setdefault(path, set()).add(method)
+        assert len(found) > 30, "route pattern no longer matches the Kotlin source"
+
+        bridge = {
+            path: "BOTH" if methods == {"GET", "POST"} else next(iter(methods))
+            for path, methods in found.items()
+        }
+        assert bridge == _ROUTES, (
+            "CommandDispatcher/RelayClient and the relay allowlist disagree — "
+            f"bridge only: {sorted(set(bridge) - set(_ROUTES))}, "
+            f"allowlisted only: {sorted(set(_ROUTES) - set(bridge))}, "
+            "method mismatches: "
+            f"{sorted(p for p in set(bridge) & set(_ROUTES) if bridge[p] != _ROUTES[p])}"
+        )
+
     def test_the_two_relay_copies_are_byte_identical(self):
         """AGENTS.md requires the plugin copy to track tools/ exactly.
 
