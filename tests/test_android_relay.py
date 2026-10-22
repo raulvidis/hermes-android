@@ -521,6 +521,69 @@ class TestPhoneReplacement:
         asyncio.run(scenario())
 
 
+class TestUnresponsiveOldPhone:
+    PORT = 19886
+    CODE = "HALFDD"
+
+    def test_half_dead_old_socket_does_not_stall_http(self):
+        """Closing the replaced socket waits for the peer's close frame (up to
+        10 s) and can hang on a half-dead peer. That must not happen under
+        phone_ws_lock, or every HTTP request — and the new phone's read loop —
+        stalls behind it.
+
+        A real half-dead TCP peer is hard to fake portably, so the relay-side
+        socket's close() is replaced with one that hangs until released.
+        """
+        import asyncio
+        import aiohttp
+        import tools.android_relay as relay_mod
+
+        start_relay(pairing_code=self.CODE, port=self.PORT)
+        state = relay_mod._relay_instance
+        release = threading.Event()
+        close_called = threading.Event()
+
+        async def hanging_close(*args, **kwargs):
+            close_called.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            return True
+
+        async def scenario():
+            headers = {"Authorization": f"Bearer {self.CODE}"}
+            async with aiohttp.ClientSession() as session:
+                old_ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws", headers=headers
+                )
+                for _ in range(200):
+                    if state.phone_ws is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                state.phone_ws.close = hanging_close
+
+                new_ws = await session.ws_connect(
+                    f"ws://127.0.0.1:{self.PORT}/ws", headers=headers
+                )
+                assert await asyncio.to_thread(close_called.wait, 3)
+                request = asyncio.create_task(
+                    session.get(f"http://127.0.0.1:{self.PORT}/ping", headers=headers)
+                )
+                command = await new_ws.receive_json(timeout=3)
+                await new_ws.send_json(
+                    {"request_id": command["request_id"], "status": 200, "result": {"ok": True}}
+                )
+                response = await asyncio.wait_for(request, timeout=3)
+                assert response.status == 200
+                release.set()
+                await new_ws.close()
+                await old_ws.close()
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            release.set()
+
+
 class TestMicrophoneBinaryStreamNegative:
     """Negative paths for the binary stream relay (#99).
 

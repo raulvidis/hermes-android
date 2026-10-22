@@ -133,6 +133,11 @@ class _RelayState:
         # Shutdown event
         self.shutdown_event: Optional[asyncio.Event] = None
 
+        # Close handshakes of replaced phone sockets, run in the background so a
+        # half-dead old socket cannot hold phone_ws_lock. Strong refs: the loop
+        # keeps only weak ones to tasks.
+        self.close_tasks: set = set()
+
 
 # ── Public API (called from sync code) ────────────────────────────────────────
 
@@ -646,7 +651,12 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
     ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
 
-    # Only one phone at a time — kick previous if any
+    # Only one phone at a time — kick previous if any. Swap the reference under
+    # the lock but close the old socket outside it: close() waits up to aiohttp's
+    # 10 s close timeout for the peer's close frame, and a half-dead old socket
+    # (the phone changed networks) would otherwise stall every HTTP request
+    # queued on phone_ws_lock — and this handler's own read loop — behind it.
+    old_ws = None
     async with state.phone_ws_lock:
         if not _tokens_equal(authenticated_with, state.pairing_code):
             # Rotated between the token check and here. Publishing anyway would
@@ -662,11 +672,15 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
         if state.phone_ws is not None and not state.phone_ws.closed:
             logger.info("Replacing previous phone connection")
             await _fail_inflight(state, reason="phone connection replaced")
-            await state.phone_ws.close(
-                code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced"
-            )
+            old_ws = state.phone_ws
         state.phone_ws = ws
         state.phone_ws_code = authenticated_with
+    if old_ws is not None:
+        task = asyncio.ensure_future(
+            old_ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"replaced")
+        )
+        state.close_tasks.add(task)
+        task.add_done_callback(state.close_tasks.discard)
 
     logger.info("Phone connected from %s", request.remote)
 
