@@ -7,6 +7,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.util.Base64
 import android.util.DisplayMetrics
 import com.hermesandroid.bridge.service.BridgeAccessibilityService
@@ -32,6 +33,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -178,13 +180,26 @@ class ScreenRecorderTest {
      * ScreenRecorder exposes no public revoke — clearProjectionPermission() is
      * private and release() would quitSafely() the shared HandlerThread, after
      * which every later record() in this JVM would block on a dead looper. So
-     * the two grant fields are reset reflectively instead.
+     * the grant field is reset reflectively instead.
      */
     private fun clearGrant() {
-        listOf("projectionData", "projectionResultCode").forEach { name ->
-            ScreenRecorder::class.java.getDeclaredField(name)
-                .apply { isAccessible = true }
-                .set(ScreenRecorder, null)
+        ScreenRecorder::class.java.getDeclaredField("grant")
+            .apply { isAccessible = true }
+            .set(ScreenRecorder, null)
+    }
+
+    /**
+     * Runs [block] with Build.VERSION.SDK_INT reporting [sdk]. The suite runs
+     * on Robolectric SDK 33; the Android 14 (API 34) single-use-token rule is
+     * exercised by overriding the field rather than by a second SDK image.
+     */
+    private fun <T> withSdkInt(sdk: Int, block: () -> T): T {
+        val original = Build.VERSION.SDK_INT
+        ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", sdk)
+        try {
+            return block()
+        } finally {
+            ReflectionHelpers.setStaticField(Build.VERSION::class.java, "SDK_INT", original)
         }
     }
 
@@ -360,14 +375,56 @@ class ScreenRecorderTest {
     }
 
     @Test
-    fun `the grant survives a successful recording`() {
-        // Characterisation. On Android 14+ a projection token is single-use, so
-        // the next record() with this same grant fails at getMediaProjection and
-        // only *then* drops it (see the SecurityException test below). Pinned so
-        // that behaviour is a decision rather than an accident.
+    fun `the grant survives a successful recording below Android 14`() {
+        // Below API 34 the consent token is reusable, so users there are not
+        // sent back through the consent dialog before every capture.
         grantPermission()
 
-        val result = ScreenRecorder.record(50)
+        val result = withSdkInt(33) { ScreenRecorder.record(50) }
+
+        assertTrue(result.message(), result.success())
+        assertTrue(ScreenRecorder.hasPermission())
+    }
+
+    @Test
+    fun `the consumed grant is dropped after a successful recording on Android 14+`() {
+        // On API 34+ the token is single-use. Keeping it made hasPermission()
+        // (and the app's Screen Recording switch) report a grant that the next
+        // record() could only fail on with a SecurityException.
+        grantPermission()
+
+        val result = withSdkInt(34) { ScreenRecorder.record(50) }
+
+        assertTrue(result.message(), result.success())
+        assertFalse(ScreenRecorder.hasPermission())
+        val next = withSdkInt(34) { ScreenRecorder.record(50) }
+        assertFalse(next.success())
+        assertTrue(next.message(), next.message().startsWith("No MediaProjection"))
+    }
+
+    @Test
+    fun `the consumed grant is dropped after a failed recording on Android 14+`() {
+        grantPermission()
+        every {
+            projection.createVirtualDisplay(any(), any(), any(), any(), any(), any(), any(), any())
+        } throws RuntimeException("no free display")
+
+        val result = withSdkInt(34) { ScreenRecorder.record(50) }
+
+        assertFalse(result.success())
+        assertFalse("getMediaProjection already consumed the token", ScreenRecorder.hasPermission())
+    }
+
+    @Test
+    fun `a grant made while a recording runs is not dropped with the consumed one`() {
+        grantPermission("hermes.FIRST_GRANT")
+        // The user re-consents mid-recording; the new grant must survive the
+        // old one being cleared.
+        every { anyConstructed<MediaRecorder>().start() } answers {
+            grantPermission("hermes.SECOND_GRANT")
+        }
+
+        val result = withSdkInt(34) { ScreenRecorder.record(50) }
 
         assertTrue(result.message(), result.success())
         assertTrue(ScreenRecorder.hasPermission())
