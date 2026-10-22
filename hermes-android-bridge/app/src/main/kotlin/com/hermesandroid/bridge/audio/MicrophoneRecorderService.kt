@@ -13,7 +13,9 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +25,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -139,6 +142,11 @@ class MicrophoneRecorderService : Service() {
     /** Latest delivered startId; only touched on the main thread. */
     private var lastStartId = 0
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Set by onDestroy; only touched on the main thread. */
+    private var destroyed = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -238,6 +246,7 @@ class MicrophoneRecorderService : Service() {
         recorder = audioRecord
         recordingJob = scope.launch {
             var writer: WavFileWriter? = null
+            var outcome: Outcome? = null
             try {
                 writer = WavFileWriter(pending, SAMPLE_RATE)
                 audioRecord.startRecording()
@@ -276,17 +285,20 @@ class MicrophoneRecorderService : Service() {
                 safelyStop(audioRecord)
                 val completed = writer.finish()
                 MicrophoneRecordingFiles.enforceRetention(this@MicrophoneRecorderService)
-                MicrophoneRecordingState.markReady(completed, writer.totalSamples * 2L)
-                updateNotification("Recording ready")
+                outcome = Outcome.Ready(completed, writer.totalSamples * 2L)
             } catch (cancelled: CancellationException) {
-                finalizeInterruptedWriter(writer)
+                outcome = finalizeInterruptedWriter(writer)
                 throw cancelled
             } catch (error: Throwable) {
-                val recovered = finalizeInterruptedWriter(writer)
-                val message = safeError("Microphone recording failed", error)
-                MicrophoneRecordingState.markError(message)
-                updateNotification(if (recovered) "Recording stopped with an error" else message)
+                // Keep whatever audio was captured; the session still reports ERROR.
+                finalizeInterruptedWriter(writer)
+                outcome = Outcome.Failed(safeError("Microphone recording failed", error))
             } finally {
+                // Release everything BEFORE the terminal state is published. A
+                // client that sees READY/ERROR and immediately sends /mic_start
+                // used to find isRecording still set (its START was silently
+                // dropped and later reported as "destroyed before completion"),
+                // or had its new recording killed by this job's stopSelf().
                 safelyStop(audioRecord)
                 runCatching { audioRecord.release() }
                 if (recorder === audioRecord) recorder = null
@@ -294,26 +306,55 @@ class MicrophoneRecorderService : Service() {
                 isRecording.set(false)
                 stopRequested.set(false)
                 recordingJob = null
-                stopForegroundCompat()
-                // A STOP command has a newer startId than the original START.
-                // stopSelfResult(startId) would therefore leave this service
-                // alive after finalization.
-                stopSelf()
+                publishOutcome(outcome)
+                finishService()
             }
         }
     }
 
-    private fun finalizeInterruptedWriter(writer: WavFileWriter?): Boolean {
+    /** Terminal result of one recording, published only after cleanup. */
+    private sealed class Outcome {
+        class Ready(val file: File, val bytesWritten: Long) : Outcome()
+        class Failed(val message: String) : Outcome()
+    }
+
+    private fun publishOutcome(outcome: Outcome?) {
+        when (outcome) {
+            is Outcome.Ready -> MicrophoneRecordingState.markReady(outcome.file, outcome.bytesWritten)
+            is Outcome.Failed -> MicrophoneRecordingState.markError(outcome.message)
+            // Cancelled with no audio: onDestroy, or the F16 completion handler
+            // that runs after this, settles the phase.
+            null -> Unit
+        }
+    }
+
+    private fun finalizeInterruptedWriter(writer: WavFileWriter?): Outcome.Ready? {
         if (writer == null || writer.totalSamples == 0L) {
             writer?.abort()
-            return false
+            return null
         }
         return runCatching {
             MicrophoneRecordingState.markFinalizing(writer.totalSamples * 2L)
             val completed = writer.finish()
             MicrophoneRecordingFiles.enforceRetention(this)
-            MicrophoneRecordingState.markReady(completed, writer.totalSamples * 2L)
-        }.isSuccess
+            Outcome.Ready(completed, writer.totalSamples * 2L)
+        }.getOrNull()
+    }
+
+    /**
+     * Leaves the foreground and stops the service once a recording is over.
+     * Runs on the main thread so it is serialized with onStartCommand: it is a
+     * no-op if a new recording started meanwhile, and stopSelfResult(latest
+     * startId) refuses while a newer command is still pending delivery. A STOP
+     * has a newer startId than its START and is delivered first, so a stopped
+     * recording still shuts the service down.
+     */
+    private fun finishService() {
+        mainHandler.post {
+            if (destroyed || isRecording.get()) return@post
+            stopForegroundCompat()
+            stopSelfResult(lastStartId)
+        }
     }
 
     private fun requestStop() {
@@ -419,6 +460,8 @@ class MicrophoneRecorderService : Service() {
         "$prefix (${error.javaClass.simpleName})"
 
     override fun onDestroy() {
+        destroyed = true
+        mainHandler.removeCallbacksAndMessages(null)
         inForeground = false
         stopRequested.set(true)
         isRecording.set(false)
