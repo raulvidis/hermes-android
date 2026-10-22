@@ -228,6 +228,66 @@ class RelayClientRelayTest {
         assertEquals(true, result.get("authenticated").asBoolean)
     }
 
+    /**
+     * A peer that does NOT answer the client's close frame, so its socket stays
+     * writable after the client has moved on — the window in which a superseded
+     * session can still push commands at us.
+     */
+    private class LingeringPeer : WebSocketListener() {
+        val opened = CountDownLatch(1)
+        val closing = CountDownLatch(1)
+        @Volatile var socket: WebSocket? = null
+
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            socket = webSocket
+            opened.countDown()
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            closing.countDown()
+        }
+    }
+
+    /**
+     * Regression (ported from fix/review-relay-client c9c4f1f): onMessage had no
+     * generation check. connect() — and so a pairing-code rotation (AUTH-1) —
+     * closes the old socket gracefully, and its reader keeps delivering frames
+     * until the peer's close arrives; those commands were launched on the NEW
+     * session's scope and dispatched.
+     */
+    @Test
+    fun `a frame from a superseded socket is not dispatched`() {
+        val stale = LingeringPeer()
+        val live = RelayPeer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(stale))
+        server.enqueue(MockResponse().withWebSocketUpgrade(live))
+
+        connectToRelay()
+        assertTrue(stale.opened.await(10, TimeUnit.SECONDS))
+        connectToRelay() // supersedes the first session
+        assertTrue(live.awaitOpen())
+        assertTrue("the old session must have been asked to close", stale.closing.await(10, TimeUnit.SECONDS))
+
+        ShadowLog.clear()
+        assertTrue(
+            stale.socket!!.send("""{"request_id":"stale-1","method":"GET","path":"/ping","params":{},"body":{}}"""),
+        )
+        // A round trip on the live socket proves the dispatcher is running and
+        // gives the stale frame time to arrive first.
+        live.send("""{"request_id":"live-1","method":"GET","path":"/ping","params":{},"body":{}}""")
+        val reply = live.nextMessage()
+        assertNotNull(reply)
+        assertEquals("live-1", JsonParser.parseString(reply).asJsonObject.get("request_id").asString)
+        Thread.sleep(300)
+
+        val dispatched = ShadowLog.getLogsForTag("RelayClient").map { it.msg }
+        assertTrue(
+            "a command from the superseded socket was dispatched: $dispatched",
+            dispatched.none { it.contains("id=stale-1") },
+        )
+        assertTrue("the live command must have been dispatched", dispatched.any { it.contains("id=live-1") })
+    }
+
     @Test
     fun `a command without a request id answers 500 instead of hanging the relay`() {
         ShadowLog.clear()

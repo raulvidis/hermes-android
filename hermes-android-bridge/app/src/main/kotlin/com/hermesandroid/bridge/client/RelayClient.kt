@@ -396,33 +396,48 @@ object RelayClient {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
 
+            // The generation check and the state it guards must be one step under
+            // the monitor disconnect()/connect()/scheduleReconnect hold. Checked
+            // outside it, a late onOpen could pass the check, lose the CPU to a
+            // disconnect(), then set isConnected and promote the foreground
+            // service for a socket nobody owns any more. Same for onClosed and
+            // onFailure (cf. recordFailureHttpCode). OkHttp never invokes a
+            // listener while holding its own locks, so this cannot deadlock.
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (myGeneration != generation) {
-                    webSocket.cancel()
-                    return
+                synchronized(this@RelayClient) {
+                    if (myGeneration != generation) {
+                        webSocket.cancel()
+                        return
+                    }
+                    Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
+                    isConnected = true
+                    // A session that actually opened is the re-arm: reset the failure
+                    // counter AND the fire budget, so a later unrelated outage is not
+                    // ignored for the rest of the process lifetime.
+                    prefs?.edit()?.putInt(KEY_FAILURES, 0)?.putInt(KEY_FIRES, 0)?.apply()
+                    exhaustedNotified = false
+                    lastFailureHttpCode = 0
+                    // NOT a policy reset: the budget is only refilled once this
+                    // session proves stable (see endSession), so a relay that
+                    // accepts and instantly drops us can't retry forever.
+                    sessionStartedNs = System.nanoTime()
+                    try {
+                        BridgeAccessibilityService.instance?.startForeground()
+                    } catch (e: SecurityException) {
+                        Log.w(TAG, "Could not promote bridge service to foreground", e)
+                    }
+                    notifyStatus(true, "Connected to $serverUrl")
                 }
-                Log.i(TAG, "WebSocket connected to ${buildWsUrl(serverUrl)}")
-                isConnected = true
-                // A session that actually opened is the re-arm: reset the failure
-                // counter AND the fire budget, so a later unrelated outage is not
-                // ignored for the rest of the process lifetime.
-                prefs?.edit()?.putInt(KEY_FAILURES, 0)?.putInt(KEY_FIRES, 0)?.apply()
-                exhaustedNotified = false
-                lastFailureHttpCode = 0
-                // NOT a policy reset: the budget is only refilled once this
-                // session proves stable (see endSession), so a relay that
-                // accepts and instantly drops us can't retry forever.
-                sessionStartedNs = System.nanoTime()
-                try {
-                    BridgeAccessibilityService.instance?.startForeground()
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "Could not promote bridge service to foreground", e)
-                }
-                notifyStatus(true, "Connected to $serverUrl")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                // A retired socket can still deliver frames: connect() (and so a
+                // pairing-code rotation, AUTH-1) closes the old socket gracefully,
+                // and its reader keeps dispatching until the peer's close arrives.
+                // Without this check those commands ran on the NEW session's scope.
+                if (myGeneration != generation) return
                 scope?.launch {
+                    if (myGeneration != generation) return@launch
                     handleMessage(webSocket, text)
                 }
             }
@@ -433,31 +448,35 @@ object RelayClient {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (myGeneration != generation) return
-                Log.i(TAG, "WebSocket closed: $code $reason")
-                isConnected = false
-                endSession()
-                notifyStatus(false, "Closed: code=$code $reason")
-                scheduleReconnect()
+                synchronized(this@RelayClient) {
+                    if (myGeneration != generation) return
+                    Log.i(TAG, "WebSocket closed: $code $reason")
+                    isConnected = false
+                    endSession()
+                    notifyStatus(false, "Closed: code=$code $reason")
+                    scheduleReconnect()
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val httpCode = response?.code ?: 0
-                // Guarded write, before the early return: see recordFailureHttpCode.
-                recordFailureHttpCode(myGeneration, httpCode)
-                if (myGeneration != generation) return
-                // Audited for F35 and deliberately left as-is: this is a transport
-                // failure, so `t.message` can carry the relay's host — which line 381
-                // already logs on purpose — and nothing from the device. It is also
-                // the text the user sees on the relay status line, where "Unable to
-                // resolve host" is the difference between a diagnosable failure and
-                // an opaque one.
-                val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
-                Log.e(TAG, "WebSocket failure: $errorDetail", t)
-                isConnected = false
-                endSession()
-                notifyStatus(false, errorDetail)
-                scheduleReconnect()
+                synchronized(this@RelayClient) {
+                    val httpCode = response?.code ?: 0
+                    // Guarded write, before the early return: see recordFailureHttpCode.
+                    recordFailureHttpCode(myGeneration, httpCode)
+                    if (myGeneration != generation) return
+                    // Audited for F35 and deliberately left as-is: this is a transport
+                    // failure, so `t.message` can carry the relay's host — which line 381
+                    // already logs on purpose — and nothing from the device. It is also
+                    // the text the user sees on the relay status line, where "Unable to
+                    // resolve host" is the difference between a diagnosable failure and
+                    // an opaque one.
+                    val errorDetail = "Error: ${t.javaClass.simpleName}: ${t.message} (HTTP $httpCode)"
+                    Log.e(TAG, "WebSocket failure: $errorDetail", t)
+                    isConnected = false
+                    endSession()
+                    notifyStatus(false, errorDetail)
+                    scheduleReconnect()
+                }
             }
         })
     }
