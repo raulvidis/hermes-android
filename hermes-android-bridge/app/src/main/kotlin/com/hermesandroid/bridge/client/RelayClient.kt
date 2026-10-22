@@ -571,6 +571,25 @@ object RelayClient {
                 if (decision.failures > failures) {
                     Log.i(TAG, "Revival watchdog: ${decision.failures}/$WATCHDOG_FAILURES_TO_TRIGGER failures")
                 }
+                // The counter only advances when a retry cycle exhausts, and
+                // exhaustion is terminal — so on an unattended device nothing
+                // ever started the next cycle and the threshold was unreachable:
+                // the switch was on, the stack was dead, and the watchdog sat at
+                // 1/3 until someone tapped Connect. While the watchdog is armed,
+                // schedule the next cycle itself. Bounded: once the fire budget
+                // is spent the decision is Exhausted and the loop stops. Not for
+                // a 401/403 (a restart cannot fix a credential, and the counter
+                // does not move on one) or with the switch off (unchanged
+                // give-up behaviour).
+                if (enabled && !authFailure) {
+                    notifyStatus(
+                        false,
+                        "Relay unreachable — revival watchdog ${decision.failures}/" +
+                            "$WATCHDOG_FAILURES_TO_TRIGGER, retrying in " +
+                            "${REVIVAL_RECONNECT_DELAY_MS / 1000}s…",
+                    )
+                    reconnectDelayed()
+                }
             }
             is RevivalPolicy.Decision.Fire -> {
                 p.edit()
@@ -622,10 +641,6 @@ object RelayClient {
                 false,
                 "Stack unreachable — firing Termux revival ($fireNumber/$WATCHDOG_MAX_FIRES)…",
             )
-            // The watchdog fired but the app itself must keep trying to
-            // reconnect: without this the relay stays dark even after a
-            // successful revival (review point: "fires but never reconnects").
-            reconnectDelayed()
         } catch (e: SecurityException) {
             Log.e(TAG, "Termux revival BLOCKED: RUN_COMMAND permission missing", e)
             notifyStatus(false, "Revival blocked — allow Termux RUN_COMMAND (Termux > Allow external apps)")
@@ -633,6 +648,12 @@ object RelayClient {
             Log.e(TAG, "Termux revival intent failed", e)
             notifyStatus(false, "Revival failed: ${e.message?.take(80) ?: "unknown error"}")
         }
+        // The watchdog fired but the app itself must keep trying to reconnect:
+        // without this the relay stays dark even after a successful revival
+        // (review point: "fires but never reconnects"). Also after a blocked or
+        // failed intent — the outage may have been transient, and the fire was
+        // already counted against the budget, so the loop still ends.
+        reconnectDelayed()
     }
 
     internal fun reconnectDelayed() {
@@ -648,8 +669,9 @@ object RelayClient {
             synchronized(this) {
                 // A second watchdog fire supersedes the reconnect already waiting.
                 revivalReconnectJob?.cancel()
-                // The only caller is the exhausted-budget path, which has just set
-                // shouldReconnect = false. The watchdog is deliberately scheduling
+                // Both callers (a watchdog fire, and a watchdog still counting up to
+                // its threshold) come from the exhausted-budget path, which has
+                // just set shouldReconnect = false. The watchdog is deliberately scheduling
                 // another attempt, so re-arm the flag the guard below reads;
                 // otherwise F11's own check would cancel the reconnect the revival
                 // just asked for. disconnect() and connect() clear it again, which
