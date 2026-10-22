@@ -2,7 +2,10 @@ package com.hermesandroid.bridge.executor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.res.Resources
 import android.graphics.Rect
+import android.graphics.RectF
+import android.util.DisplayMetrics
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.hermesandroid.bridge.bridgeTest
@@ -340,5 +343,69 @@ class ActionExecutorGestureTest {
         val gesture = slot<GestureDescription>()
         verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
         assertEquals(2, gesture.captured.strokeCount)
+    }
+
+    /** A 1080x2400 display, so pinch can size its span from the screen. */
+    private fun phoneDisplay() {
+        val res = mockk<Resources>(relaxed = true)
+        every { res.displayMetrics } returns DisplayMetrics().apply {
+            widthPixels = 1080
+            heightPixels = 2400
+        }
+        every { mockService.resources } returns res
+    }
+
+    /** Horizontal bounds of every stroke of the single dispatched gesture. */
+    private fun dispatchedStrokeBounds(): List<RectF> {
+        val gesture = slot<GestureDescription>()
+        verify(exactly = 1) { mockService.dispatchGesture(capture(gesture), any(), any()) }
+        return (0 until gesture.captured.strokeCount).map { i ->
+            RectF().also { gesture.captured.getStroke(i).path.computeBounds(it, true) }
+        }
+    }
+
+    /**
+     * Regression: the strokes started 50px either side of the centre, a 100px
+     * span far below ScaleGestureDetector's 27mm minimum scaling span, so apps
+     * never recognised the pinch. The start span is now half the short edge.
+     */
+    @Test
+    fun `pinch spans enough of the screen for a scale detector to see it`() = bridgeTest {
+        phoneDisplay()
+        completeGesture()
+
+        val result = ActionExecutor.pinch(540, 1200)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        val bounds = dispatchedStrokeBounds()
+        val outerSpan = bounds.maxOf { it.right } - bounds.minOf { it.left }
+        val innerSpan = bounds.maxOf { it.left } - bounds.minOf { it.right }
+        assertEquals("start span: half the 1080px short edge", 540f, innerSpan, 0.5f)
+        assertEquals("end span: start span * 1.5", 810f, outerSpan, 0.5f)
+    }
+
+    @Test
+    fun `pinch near the right screen edge stays on screen`() = bridgeTest {
+        phoneDisplay()
+        completeGesture()
+
+        val result = ActionExecutor.pinch(1060, 2390, scale = 2f)
+
+        assertTrue("expected success — got: ${result.message}", result.success)
+        for (b in dispatchedStrokeBounds()) {
+            assertTrue("stroke $b leaves the screen", b.left >= 0f && b.right <= 1079f)
+            assertTrue("stroke $b leaves the screen", b.top >= 0f && b.bottom <= 2399f)
+        }
+    }
+
+    @Test
+    fun `pinch rejects an unusable scale without dispatching`() = bridgeTest {
+        completeGesture()
+
+        for (bad in listOf(0f, -1f, 1f, Float.NaN, Float.POSITIVE_INFINITY)) {
+            val result = ActionExecutor.pinch(500, 500, scale = bad)
+            assertFalse("scale=$bad must be rejected", result.success)
+        }
+        verify(exactly = 0) { mockService.dispatchGesture(any(), any(), any()) }
     }
 }

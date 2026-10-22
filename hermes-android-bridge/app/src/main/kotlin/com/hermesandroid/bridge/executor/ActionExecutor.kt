@@ -73,6 +73,9 @@ object ActionExecutor {
     suspend fun pinch(x: Int, y: Int, scale: Float = 1.5f, duration: Long = 300): ActionResult =
         GestureExecutor.pinch(x, y, scale, duration)
 
+    fun pinchScaleError(scale: Float): String? =
+        GestureExecutor.pinchScaleError(scale)
+
     fun describeNode(nodeId: String): ActionResult =
         ScreenQueryExecutor.describeNode(nodeId)
 

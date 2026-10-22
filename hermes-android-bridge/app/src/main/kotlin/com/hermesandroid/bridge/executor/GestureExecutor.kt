@@ -197,40 +197,68 @@ internal object GestureExecutor {
         ActionResult(success, if (success) "Dragged ($startX,$startY) to ($endX,$endY)" else "Drag gesture cancelled")
     }
 
+    /**
+     * Returns an error message if [scale] is not a usable pinch factor, or
+     * null if it is. A pinch needs a finite, positive factor other than 1:
+     * 1 never moves the fingers, <= 0 crosses them, and NaN/Infinity build a
+     * nonsensical path.
+     */
+    fun pinchScaleError(scale: Float): String? = when {
+        !scale.isFinite() -> "scale must be a finite number"
+        scale <= 0f -> "scale must be greater than 0"
+        scale == 1f -> "scale must not be 1 (use >1 to zoom in, <1 to zoom out)"
+        else -> null
+    }
+
     suspend fun pinch(x: Int, y: Int, scale: Float = 1.5f, duration: Long = 300): ActionResult =
         WakeLockManager.wakeForAction {
+        pinchScaleError(scale)?.let { return@wakeForAction ActionResult(false, it) }
         val service = BridgeAccessibilityService.instance
             ?: return@wakeForAction ActionResult(false, "Accessibility service not running")
+        val metrics = service.resources?.displayMetrics
+        val screenW = metrics?.widthPixels ?: 0
+        val screenH = metrics?.heightPixels ?: 0
         val centerX = x.toFloat()
         val centerY = y.toFloat()
         // Perpendicular strokes on opposite sides of center along the X axis.
         // Fingers start at ±startOff and end at ±endOff. For scale>1 (zoom in),
         // endOff > startOff so fingers move apart; for scale<1 (zoom out),
         // endOff < startOff so fingers move together.
-        val startOff = 50f
-        val endOff = 50f * scale
+        //
+        // The start span (2 * startOff) is half the short screen edge. The old
+        // fixed 50px offsets gave a 100px span, far below ScaleGestureDetector's
+        // minimum scaling span (config_minScalingSpan, 27mm — ~400px on a
+        // typical phone), so apps never saw a scale gesture at all. 50px stays
+        // as the fallback when the display size is unknown.
+        val shortEdge = minOf(screenW, screenH)
+        val startOff = if (shortEdge > 0) shortEdge * 0.25f else 50f
+        val endOff = startOff * scale
         // StrokeDescription's constructor rejects a path whose computed bounds
         // are negative ("Path bounds must not be negative"), and the strokes
-        // reach endOff px either side of the centre — so a pinch within
-        // 50 * scale px of the left edge (x = 50 at the default 1.5) threw out
-        // of this function before dispatchGesture was ever reached: no gesture,
-        // no ActionResult, just an exception the transport turns into a 500.
-        // Clamp every coordinate at 0 on both axes. bounds.top is checked too,
-        // and a caller-supplied negative y reaches it directly. Near an edge the
-        // gesture is asymmetric — the finger that would have started off-screen
-        // starts at the edge instead — which is a slightly weaker pinch, where
-        // the alternative is a crash the caller cannot catch.
+        // reach endOff px either side of the centre — so a pinch near the left
+        // edge threw out of this function before dispatchGesture was ever
+        // reached: no gesture, no ActionResult, just an exception the transport
+        // turns into a 500. Clamp every coordinate at 0 on both axes. bounds.top
+        // is checked too, and a caller-supplied negative y reaches it directly.
+        // With the wider span the right/bottom edges matter as well, so clamp
+        // to the display there when its size is known. Near an edge the gesture
+        // is asymmetric — the finger that would have started off-screen starts
+        // at the edge instead — which is a slightly weaker pinch, where the
+        // alternative is a crash the caller cannot catch.
         //
         // Named pathY, not y: the result message interpolates the caller's Int
         // coordinates, and a local `y` would shadow the parameter and change it.
-        val pathY = centerY.coerceAtLeast(0f)
+        val maxX = if (screenW > 0) (screenW - 1).toFloat() else Float.MAX_VALUE
+        val maxY = if (screenH > 0) (screenH - 1).toFloat() else Float.MAX_VALUE
+        fun clampX(v: Float) = v.coerceIn(0f, maxX)
+        val pathY = centerY.coerceIn(0f, maxY)
         val path1 = Path().apply {
-            moveTo((centerX - startOff).coerceAtLeast(0f), pathY)
-            lineTo((centerX - endOff).coerceAtLeast(0f), pathY)
+            moveTo(clampX(centerX - startOff), pathY)
+            lineTo(clampX(centerX - endOff), pathY)
         }
         val path2 = Path().apply {
-            moveTo((centerX + startOff).coerceAtLeast(0f), pathY)
-            lineTo((centerX + endOff).coerceAtLeast(0f), pathY)
+            moveTo(clampX(centerX + startOff), pathY)
+            lineTo(clampX(centerX + endOff), pathY)
         }
         val stroke1 = GestureDescription.StrokeDescription(path1, 0, duration)
         val stroke2 = GestureDescription.StrokeDescription(path2, 0, duration)
