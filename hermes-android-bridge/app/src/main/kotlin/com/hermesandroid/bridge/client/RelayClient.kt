@@ -113,14 +113,23 @@ object RelayClient {
     }
 
     // Termux RUN_COMMAND target. Termux requires an absolute path under its own
-    // $HOME, and the user must have enabled Termux > Settings > "Allow external
-    // apps" — otherwise startService throws SecurityException.
+    // $HOME, and needs allow-external-apps=true in ~/.termux/termux.properties
+    // plus the RUN_COMMAND runtime permission — otherwise starting the service
+    // throws SecurityException (see REVIVAL_BLOCKED_HELP).
     internal const val TERMUX_PACKAGE = "com.termux"
     internal const val TERMUX_RUN_COMMAND_ACTION = "com.termux.RUN_COMMAND"
     internal const val TERMUX_RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService"
     internal const val EXTRA_RUN_COMMAND_PATH = "com.termux.RUN_COMMAND_PATH"
     internal const val EXTRA_RUN_COMMAND_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
     internal const val EXTRA_RUN_COMMAND_SESSION_ACTION = "com.termux.RUN_COMMAND_SESSION_ACTION"
+
+    /**
+     * Shown when Termux rejects RUN_COMMAND. Both steps are required, and the
+     * second is a line in a properties file, not a switch in Termux's settings.
+     */
+    internal const val REVIVAL_BLOCKED_HELP =
+        "Revival blocked — grant \"Run commands in Termux environment\" in App info, " +
+            "and set allow-external-apps=true in ~/.termux/termux.properties"
 
     /**
      * Script the watchdog asks Termux to run.
@@ -654,7 +663,13 @@ object RelayClient {
     private fun fireTermuxRestart(fireNumber: Int) {
         val ctx = appContext ?: return
         try {
-            ctx.startService(termuxRevivalIntent())
+            // startForegroundService, not startService: the watchdog fires
+            // exactly when Termux is likely dead, and from API 26 starting a
+            // stopped app's service from the background with startService throws
+            // IllegalStateException. RunCommandService promotes itself to the
+            // foreground, which is what Termux's RUN_COMMAND docs prescribe for
+            // API 26+ (our minSdk).
+            ctx.startForegroundService(termuxRevivalIntent())
             Log.i(TAG, "Termux revival: RUN_COMMAND fired (attempt $fireNumber/$WATCHDOG_MAX_FIRES)")
             notifyStatus(
                 false,
@@ -662,7 +677,7 @@ object RelayClient {
             )
         } catch (e: SecurityException) {
             Log.e(TAG, "Termux revival BLOCKED: RUN_COMMAND permission missing", e)
-            notifyStatus(false, "Revival blocked — allow Termux RUN_COMMAND (Termux > Allow external apps)")
+            notifyStatus(false, REVIVAL_BLOCKED_HELP)
         } catch (e: Exception) {
             Log.e(TAG, "Termux revival intent failed", e)
             notifyStatus(false, "Revival failed: ${e.message?.take(80) ?: "unknown error"}")

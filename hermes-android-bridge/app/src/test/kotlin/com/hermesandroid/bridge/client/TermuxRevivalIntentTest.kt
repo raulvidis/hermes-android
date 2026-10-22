@@ -76,6 +76,17 @@ class TermuxRevivalIntentTest {
     }
 
     @Test
+    fun `the blocked message names both things the user has to do`() {
+        // It used to point at a "Termux > Allow external apps" switch. That is a
+        // line in ~/.termux/termux.properties, and the runtime permission is a
+        // separate, equally required step.
+        val help = RelayClient.REVIVAL_BLOCKED_HELP
+        assertTrue(help, help.contains("allow-external-apps=true"))
+        assertTrue(help, help.contains("termux.properties"))
+        assertTrue(help, help.contains("Run commands in Termux environment"))
+    }
+
+    @Test
     fun `an explicit script path overrides the default`() {
         val intent = RelayClient.termuxRevivalIntent("/data/data/com.termux/files/home/restart.sh")
 
