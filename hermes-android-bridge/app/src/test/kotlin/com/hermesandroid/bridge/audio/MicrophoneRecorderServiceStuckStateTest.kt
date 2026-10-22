@@ -52,6 +52,71 @@ class MicrophoneRecorderServiceStuckStateTest {
         unmockkAll()
     }
 
+    private fun startIntent(): Intent =
+        Intent(RuntimeEnvironment.getApplication(), MicrophoneRecorderService::class.java)
+            .apply {
+                action = "start"
+                putExtra("duration", 5)
+            }
+
+    // ── FGS refusal: the system saying no must never crash the bridge ─────────
+
+    /**
+     * Android 14 throws SecurityException from startForeground() for a
+     * microphone FGS started while the app is in the background. On main that
+     * call sat in onCreate, on the main thread, so the refusal killed the
+     * whole bridge process instead of failing one /mic_start.
+     */
+    @Test
+    fun `a refused foreground start fails the reservation instead of crashing`() {
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            startIntent(),
+        )
+        controller.create()
+        controller.get().foregroundStarter = { throw SecurityException("while-in-use denied") }
+        controller.startCommand(0, 1)
+
+        val snapshot = MicrophoneRecordingState.snapshot()
+        assertEquals(MicrophoneRecordingPhase.ERROR, snapshot.phase)
+        assertEquals(MicrophoneRecorderService.BACKGROUND_START_MESSAGE, snapshot.error)
+        assertTrue("a retry must be reservable", MicrophoneRecordingState.tryReserveStart())
+        controller.destroy()
+    }
+
+    @Test
+    fun `a refused STOP still settles a stuck reservation`() {
+        assertTrue(MicrophoneRecordingState.tryReserveStart())
+
+        val controller = Robolectric.buildService(
+            MicrophoneRecorderService::class.java,
+            stopIntent(),
+        )
+        controller.create()
+        controller.get().foregroundStarter = { throw IllegalStateException("not allowed") }
+        controller.startCommand(0, 1)
+
+        assertFalse(MicrophoneRecordingState.snapshot().isActive)
+        controller.destroy()
+    }
+
+    @Test
+    fun `startForegroundService failures name the background restriction`() {
+        val background = MicrophoneRecorderService.startFailureMessage(IllegalStateException("x"))
+        assertTrue(background.startsWith(MicrophoneRecorderService.BACKGROUND_START_MESSAGE))
+        assertTrue(background.endsWith("(IllegalStateException)"))
+        assertTrue(
+            MicrophoneRecorderService.startFailureMessage(SecurityException("x"))
+                .startsWith(MicrophoneRecorderService.BACKGROUND_START_MESSAGE),
+        )
+        assertEquals(
+            "Could not start microphone service (RuntimeException)",
+            MicrophoneRecorderService.startFailureMessage(RuntimeException("x")),
+        )
+    }
+
     @Test
     fun `stop before the record loop resets a stuck STARTING state`() {
         assertTrue(MicrophoneRecordingState.tryReserveStart())

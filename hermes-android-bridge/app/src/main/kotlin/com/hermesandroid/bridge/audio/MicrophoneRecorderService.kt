@@ -8,10 +8,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +31,7 @@ class MicrophoneRecorderService : Service() {
 
     companion object {
         internal const val MAX_DURATION_SECONDS = 30 * 60
+        private const val TAG = "MicRecorderService"
         private const val CHANNEL_ID = "hermes_bridge_mic"
         private const val NOTIFICATION_ID = 1001
         private const val SAMPLE_RATE = 16_000
@@ -53,6 +57,26 @@ class MicrophoneRecorderService : Service() {
          */
         internal const val ABANDONED_RECORDING_MESSAGE =
             "Recorder service was destroyed before the recording completed"
+
+        /** What `/mic_status` reports when the system refuses the microphone foreground service. */
+        internal const val BACKGROUND_START_MESSAGE =
+            "Microphone can't start while the app is in the background on this Android version — " +
+                "open Hermes Bridge or keep it in the foreground"
+
+        /**
+         * User-facing reason for a failed startForegroundService() call.
+         * ForegroundServiceStartNotAllowedException (API 31+) is an
+         * IllegalStateException; while-in-use denials surface as
+         * SecurityException.
+         */
+        internal fun startFailureMessage(error: Throwable): String {
+            val type = error.javaClass.simpleName
+            return if (error is IllegalStateException || error is SecurityException) {
+                "$BACKGROUND_START_MESSAGE ($type)"
+            } else {
+                "Could not start microphone service ($type)"
+            }
+        }
 
         fun start(context: Context, durationSec: Int = 0) {
             require(durationSec in 0..MAX_DURATION_SECONDS) {
@@ -102,19 +126,58 @@ class MicrophoneRecorderService : Service() {
     @Volatile
     internal var ownedFileName: String? = null
 
+    /** Whether startForeground() last succeeded; notification refreshes are skipped otherwise. */
+    @Volatile
+    private var inForeground = false
+
+    /**
+     * Test seam replacing the platform startForeground() call, so a test can
+     * reproduce the system refusing the microphone FGS. Null in production.
+     */
+    internal var foregroundStarter: ((Notification) -> Unit)? = null
+
+    /** Latest delivered startId; only touched on the main thread. */
+    private var lastStartId = 0
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Preparing microphone…"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action ?: ACTION_START) {
-            ACTION_STOP -> requestStop()
-            else -> startRecording(intent?.getIntExtra(EXTRA_DURATION, 0) ?: 0)
+        lastStartId = startId
+        val action = intent?.action ?: ACTION_START
+        val recording = isRecording.get()
+        // Every command arrives via startForegroundService(), so each one must
+        // reach startForeground(). A refusal (Android 14's while-in-use rule
+        // for a microphone FGS started from the background) is never allowed
+        // to propagate: on the main thread it would crash the whole bridge.
+        val text = when {
+            action == ACTION_STOP && recording -> "Finalizing recording…"
+            action == ACTION_STOP -> "Stopping microphone…"
+            recording -> "Recording…"
+            else -> "Preparing microphone…"
         }
+        val foreground = enterForeground(buildNotification(text))
+
+        if (action == ACTION_STOP) {
+            requestStop()
+            return START_NOT_STICKY
+        }
+        if (!foreground) {
+            if (!recording) {
+                // The /mic_start reservation can never be fulfilled now.
+                if (MicrophoneRecordingState.snapshot().isAwaitingRecorder) {
+                    MicrophoneRecordingState.markError(BACKGROUND_START_MESSAGE)
+                }
+                stopForegroundCompat()
+                stopSelfResult(lastStartId)
+            }
+            return START_NOT_STICKY
+        }
+        startRecording(intent?.getIntExtra(EXTRA_DURATION, 0) ?: 0)
         return START_NOT_STICKY
     }
 
@@ -265,7 +328,7 @@ class MicrophoneRecorderService : Service() {
                 MicrophoneRecordingState.markError("Recording stopped before it completed")
             }
             stopForegroundCompat()
-            stopSelf()
+            stopSelfResult(lastStartId)
             return
         }
         stopRequested.set(true)
@@ -282,7 +345,7 @@ class MicrophoneRecorderService : Service() {
         MicrophoneRecordingState.markError(message)
         updateNotification(message)
         stopForegroundCompat()
-        stopSelf()
+        stopSelfResult(lastStartId)
     }
 
     private fun safelyStop(audioRecord: AudioRecord?) {
@@ -314,13 +377,41 @@ class MicrophoneRecorderService : Service() {
             .build()
     }
 
+    /**
+     * Enters (or refreshes) the microphone foreground state. Returns false
+     * instead of throwing when the system refuses: Android 14+ throws
+     * SecurityException for a microphone FGS started from the background, and
+     * Android 12+ may throw ForegroundServiceStartNotAllowedException (an
+     * IllegalStateException).
+     */
+    private fun enterForeground(notification: Notification): Boolean =
+        try {
+            val starter = foregroundStarter
+            if (starter != null) {
+                starter(notification)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            inForeground = true
+            true
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Microphone foreground start refused (${error.javaClass.simpleName})")
+            false
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "Microphone foreground start refused (${error.javaClass.simpleName})")
+            false
+        }
+
     private fun updateNotification(text: String) {
         // Updating the existing foreground-service notification this way does
         // not require the Android 13 POST_NOTIFICATIONS runtime permission.
-        startForeground(NOTIFICATION_ID, buildNotification(text))
+        if (inForeground) enterForeground(buildNotification(text))
     }
 
     private fun stopForegroundCompat() {
+        inForeground = false
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -328,6 +419,7 @@ class MicrophoneRecorderService : Service() {
         "$prefix (${error.javaClass.simpleName})"
 
     override fun onDestroy() {
+        inForeground = false
         stopRequested.set(true)
         isRecording.set(false)
         // The system can destroy the service before the record loop starts, with
