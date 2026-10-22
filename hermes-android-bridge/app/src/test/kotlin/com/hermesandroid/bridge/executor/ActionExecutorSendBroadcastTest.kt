@@ -87,4 +87,29 @@ class ActionExecutorSendBroadcastTest {
         assertEquals("com.example.SYNC_NOW", intent.captured.action)
         assertEquals("value", intent.captured.getStringExtra("key"))
     }
+
+    @Test
+    fun `sendBroadcast blocks reboot and shutdown requests`() {
+        for (action in listOf(
+            "android.intent.action.REBOOT",
+            "com.android.internal.intent.action.REQUEST_SHUTDOWN"
+        )) {
+            val result = ActionExecutor.sendBroadcast(action)
+            assertFalse(action, result.success)
+            assertTrue(result.message.contains("blocked for safety"))
+        }
+        verify(exactly = 0) { mockService.sendBroadcast(any()) }
+    }
+
+    @Test
+    fun `sendBroadcast turns any exception into an error result`() {
+        // Only SecurityException used to be caught; anything else escaped to
+        // the transport as a 500 instead of an ActionResult.
+        every { mockService.sendBroadcast(any()) } throws IllegalArgumentException("bad extras")
+
+        val result = ActionExecutor.sendBroadcast("com.example.SYNC_NOW")
+
+        assertFalse(result.success)
+        assertEquals("Broadcast failed: bad extras", result.message)
+    }
 }

@@ -91,7 +91,15 @@ class ActionExecutorSendIntentUriTest {
             "content://com.android.mms/1" to "AOSP MMS provider",
             "content://com.android.mms-sms/conversations" to "AOSP MMS-SMS provider",
             "content://com.android.providers.telephony/sms" to "AOSP telephony authority",
-            "content://com.android.providers.contacts/contacts" to "AOSP contacts authority"
+            "content://com.android.providers.contacts/contacts" to "AOSP contacts authority",
+            // user-qualified authorities: the resolver strips "<userId>@"
+            "content://0@com.android.contacts/data" to "user-qualified contacts provider",
+            "content://10@sms/inbox" to "user-qualified SMS provider",
+            "content://0@CALL_LOG/calls" to "user-qualified call log, upper case",
+            // other dialer entry points
+            "sip:alice@example.com" to "SIP call",
+            "voicemail:" to "voicemail",
+            "wtai://wp/mc;+19005550100" to "WTAI make-call"
         )
 
         /** URI → why it must still work. */
@@ -101,6 +109,7 @@ class ActionExecutorSendIntentUriTest {
             "HTTPS://EXAMPLE.COM/page" to "upper case is not a bypass in the safe direction",
             "geo:37.422,-122.084" to "map link",
             "content://com.example.notes/items/1" to "an app's own provider",
+            "content://0@com.example.notes/items/1" to "an app's own provider, user-qualified",
             "example://open?id=42" to "custom app scheme"
         )
     }

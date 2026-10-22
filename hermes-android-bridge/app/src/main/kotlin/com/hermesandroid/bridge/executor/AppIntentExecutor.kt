@@ -59,13 +59,44 @@ internal object AppIntentExecutor {
             "android.intent.action.DELETE",
             "android.intent.action.UNINSTALL_PACKAGE",
             "android.intent.action.PACKAGE_INSTALL",
-            // Device wipe / factory reset
+            // Device wipe / factory reset / power
             "android.intent.action.MASTER_CLEAR",
             "android.intent.action.FACTORY_RESET",
             "android.intent.action.ACTION_SHUTDOWN",
+            "android.intent.action.REBOOT",
+            "android.intent.action.REQUEST_SHUTDOWN",
+            "com.android.internal.intent.action.REQUEST_SHUTDOWN",
             // Telephony — direct dial without confirmation
             "android.intent.action.CALL",
             "android.intent.action.CALL_PRIVILEGED",
+            "android.intent.action.CALL_EMERGENCY",
+            // Default-app / role changes (e.g. taking over the default SMS app)
+            "android.provider.Telephony.ACTION_CHANGE_DEFAULT",
+            "android.telecom.action.CHANGE_DEFAULT_DIALER",
+            "android.app.role.action.REQUEST_ROLE",
+            // Runtime-permission management UI
+            "android.intent.action.MANAGE_PERMISSIONS",
+            "android.intent.action.MANAGE_APP_PERMISSIONS",
+            "android.intent.action.MANAGE_PERMISSION_APPS",
+            "android.intent.action.MANAGE_DEFAULT_APP",
+            // Device admin, screen lock and provisioning. Listed one by one
+            // rather than as an android.app.action. prefix: that namespace
+            // also holds harmless actions.
+            "android.app.action.ADD_DEVICE_ADMIN",
+            "android.app.action.SET_NEW_PASSWORD",
+            "android.app.action.SET_NEW_PARENT_PROFILE_PASSWORD",
+            "android.app.action.START_ENCRYPTION",
+            "android.app.action.PROVISION_MANAGED_PROFILE",
+            "android.app.action.PROVISION_MANAGED_DEVICE",
+            "android.app.action.PROVISION_FINANCED_DEVICE",
+            "android.app.action.PROVISION_MANAGED_DEVICE_FROM_TRUSTED_SOURCE",
+            "android.app.action.CONFIRM_DEVICE_CREDENTIAL",
+            "android.app.action.CONFIRM_FRP_CREDENTIAL",
+            // Credential storage — install/reset CA and user certificates
+            "android.credentials.INSTALL",
+            "android.credentials.INSTALL_AS_USER",
+            "android.credentials.RESET",
+            "android.credentials.UNLOCK",
             // Dangerous settings toggles — permissions, accessibility, dev options
             "android.settings.ACCESSIBILITY_SETTINGS",
             "android.settings.APPLICATION_DETAILS_SETTINGS",
@@ -112,7 +143,8 @@ internal object AppIntentExecutor {
                 // Denylist dangerous URI schemes that can bypass the action blocklist.
                 // An attacker can use a benign action like VIEW with a malicious URI
                 // (intent:// redirects, content:// providers, market:// deep links,
-                //  tel:, sms:, smsto:, mms:, mmsto:).
+                //  tel:, sms:, smsto:, mms:, mmsto:, and the sip:/voicemail:/wtai:
+                //  dialer entry points).
                 //
                 // CTRL-2: normalise ONCE, before any check. Leading whitespace used
                 // to defeat scheme extraction completely (" tel:+19005550100" yields
@@ -121,7 +153,8 @@ internal object AppIntentExecutor {
                 val normalizedUri = dataUri.trim()
                 val lowerUri = normalizedUri.lowercase()
                 val blockedUriSchemes = setOf(
-                    "intent", "market", "tel", "sms", "smsto", "mms", "mmsto"
+                    "intent", "market", "tel", "sms", "smsto", "mms", "mmsto",
+                    "sip", "voicemail", "wtai"
                 )
                 // Personal-data providers. Two entries ("content://settings" and
                 // "content://com.android.contacts") do not amount to "block
@@ -153,6 +186,17 @@ internal object AppIntentExecutor {
                 }
                 if (blockedUriPrefixes.any { lowerUri.startsWith(it) }) {
                     return ActionResult(false, "Content provider URI is blocked for safety")
+                }
+                // A content URI may name its provider with a "<userId>@" prefix
+                // (content://0@com.android.contacts/...), which the resolver
+                // strips but the raw prefix check above does not. Re-check the
+                // parsed authority with that qualifier removed.
+                if (scheme == "content") {
+                    val authority = android.net.Uri.parse(normalizedUri).authority
+                        ?.substringAfterLast('@')?.trim()?.lowercase()
+                    if (authority != null && blockedUriPrefixes.any { "content://$authority".startsWith(it) }) {
+                        return ActionResult(false, "Content provider URI is blocked for safety")
+                    }
                 }
                 setData(android.net.Uri.parse(normalizedUri))
             }
@@ -192,7 +236,10 @@ internal object AppIntentExecutor {
             "android.intent.action.DEVICE_STORAGE_OK",
             "android.intent.action.ACTION_SHUTDOWN",
             "android.intent.action.MASTER_CLEAR",
-            "android.intent.action.FACTORY_RESET"
+            "android.intent.action.FACTORY_RESET",
+            "android.intent.action.REBOOT",
+            "android.intent.action.REQUEST_SHUTDOWN",
+            "com.android.internal.intent.action.REQUEST_SHUTDOWN"
         )
         if (action.isBlank()) {
             return ActionResult(false, "Broadcast action is empty")
@@ -206,7 +253,10 @@ internal object AppIntentExecutor {
             extras?.forEach { (key, value) -> intent.putExtra(key, value) }
             service.sendBroadcast(intent)
             ActionResult(true, "Broadcast sent: $action")
-        } catch (e: SecurityException) {
+        } catch (e: Exception) {
+            // SecurityException (a protected broadcast) is the common case, but
+            // anything thrown here must become an error result, as in
+            // sendIntent, rather than escape to the transport as a 500.
             ActionResult(false, "Broadcast failed: ${e.message}")
         }
     }

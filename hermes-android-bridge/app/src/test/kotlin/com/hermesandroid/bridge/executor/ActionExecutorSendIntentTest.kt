@@ -238,4 +238,25 @@ class ActionExecutorSendIntentTest {
         assertTrue("expected success — got: ${result.message}", result.success)
         verify(exactly = 1) { mockService.startActivity(any()) }
     }
+
+    @Test
+    fun `sendIntent blocks credential, admin, role and power actions`() {
+        val actions = listOf(
+            "android.app.action.ADD_DEVICE_ADMIN",
+            "android.app.action.SET_NEW_PASSWORD",
+            "android.app.action.PROVISION_MANAGED_DEVICE",
+            "android.credentials.INSTALL",
+            "android.credentials.RESET",
+            "android.provider.Telephony.ACTION_CHANGE_DEFAULT",
+            "android.telecom.action.CHANGE_DEFAULT_DIALER",
+            "android.app.role.action.REQUEST_ROLE",
+            "android.intent.action.MANAGE_APP_PERMISSIONS",
+            "android.intent.action.CALL_EMERGENCY",
+            "android.intent.action.REBOOT",
+            "com.android.internal.intent.action.REQUEST_SHUTDOWN"
+        )
+        val allowed = actions.filter { ActionExecutor.sendIntent(action = it).success }
+        assertTrue("not blocked: $allowed", allowed.isEmpty())
+        verify(exactly = 0) { mockService.startActivity(any()) }
+    }
 }
