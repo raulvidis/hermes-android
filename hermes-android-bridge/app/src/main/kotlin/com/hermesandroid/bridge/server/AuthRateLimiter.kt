@@ -22,6 +22,11 @@ internal class AuthRateLimiter(
     private val cleanupIntervalMs: Long = 120_000L,
     private val now: () -> Long = { System.currentTimeMillis() },
 ) {
+    // Each IP's list is only ever read or mutated inside a ConcurrentHashMap
+    // compute/computeIfPresent call for that key, which runs atomically per
+    // key. That is what keeps recordFailure and the sweep from racing: the
+    // sweep can no longer remove a list another thread has just fetched and
+    // is about to append to (which silently dropped that failure).
     private val failures = ConcurrentHashMap<String, MutableList<Long>>()
     private val blocked = ConcurrentHashMap<String, Long>()
     @Volatile
@@ -35,7 +40,10 @@ internal class AuthRateLimiter(
         val t = now()
         val until = blocked[ip] ?: return false
         if (t < until) return true
-        blocked.remove(ip)
+        // Conditional remove: only drop the expired value we just read. A
+        // concurrent recordFailure may have installed a fresh block in the
+        // meantime, and an unconditional remove would lift it.
+        blocked.remove(ip, until)
         return false
     }
 
@@ -63,14 +71,16 @@ internal class AuthRateLimiter(
     fun recordFailure(ip: String) {
         val t = now()
         val cutoff = t - windowMs
-        val attempts = failures.computeIfAbsent(ip) { mutableListOf() }
-        synchronized(attempts) {
+        failures.compute(ip) { _, existing ->
+            val attempts = existing ?: mutableListOf()
             // Drop attempts that fell out of the sliding window.
             attempts.removeAll { it <= cutoff }
             attempts.add(t)
             if (attempts.size >= maxAttempts) {
                 blocked[ip] = t + blockMs
-                attempts.clear()
+                null // history cleared: remove the mapping
+            } else {
+                attempts
             }
         }
         maybeSweep(t, cutoff)
@@ -79,19 +89,24 @@ internal class AuthRateLimiter(
     /**
      * Runs a cleanup sweep at most once per [cleanupIntervalMs]. Removes IPs
      * whose all timestamps are older than [cutoff]. A snapshot of keys is
-     * iterated to avoid ConcurrentModificationException; each list is locked
-     * individually during inspection.
+     * iterated; each entry is inspected and removed atomically via
+     * computeIfPresent, so a concurrent recordFailure for the same IP is
+     * either fully before or fully after the check.
      */
     private fun maybeSweep(t: Long, cutoff: Long) {
         if (t - lastCleanup < cleanupIntervalMs) return
         lastCleanup = t
         for (ip in failures.keys.toList()) {
-            val list = failures[ip] ?: continue
-            synchronized(list) {
-                if (list.none { it > cutoff }) {
-                    failures.remove(ip)
-                }
+            failures.computeIfPresent(ip) { _, list ->
+                if (list.none { it > cutoff }) null else list
             }
         }
+        // Expired blocks would otherwise linger until that IP is seen again.
+        for ((ip, until) in blocked.entries.toList()) {
+            if (t >= until) blocked.remove(ip, until)
+        }
     }
+
+    /** Test hook: number of IPs with a tracked failure history. */
+    internal fun trackedIpCount(): Int = failures.size
 }
