@@ -44,6 +44,32 @@ class RevivalPolicyTest {
         val d = policy.onFailure(enabled = true, failures = 4, lastFireMs = lastFire, nowMs = lastFire + 600_001L)
         assertEquals("after the cooldown the threshold fires again", RevivalPolicy.Decision.Fire, d)
     }
+
+    /**
+     * Regression: the cooldown was a bare `now - lastFire < cooldown`. If the wall
+     * clock is corrected backwards after a fire, lastFire sits in the FUTURE, the
+     * subtraction goes negative and the watchdog stays shut until that bogus
+     * timestamp passes.
+     */
+    @Test
+    fun `a last fire in the future does not wedge the cooldown shut`() {
+        val now = 1_000_000L
+        val d = policy.onFailure(enabled = true, failures = 4, lastFireMs = now + 5_000_000L, nowMs = now)
+        assertEquals(RevivalPolicy.Decision.Fire, d)
+    }
+
+    @Test
+    fun `a future last fire still respects the fire budget`() {
+        val now = 1_000_000L
+        val d = policy.onFailure(
+            enabled = true,
+            failures = 4,
+            lastFireMs = now + 5_000_000L,
+            nowMs = now,
+            fires = RevivalPolicy.DEFAULT_MAX_FIRES,
+        )
+        assertEquals(RevivalPolicy.Decision.Exhausted, d)
+    }
 }
 
 /**

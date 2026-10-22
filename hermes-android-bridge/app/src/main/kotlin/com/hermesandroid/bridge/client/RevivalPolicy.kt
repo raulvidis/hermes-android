@@ -60,8 +60,13 @@ class RevivalPolicy(
         if (fires >= maxFires) return Decision.Exhausted
         val next = failures + 1
         if (next < failuresToTrigger) return Decision.Wait(next)
-        // Reached the threshold, but the cooldown bounds re-firing.
-        if (nowMs - lastFireMs < cooldownMs) return Decision.Wait(next)
+        // Reached the threshold, but the cooldown bounds re-firing. A NEGATIVE
+        // elapsed time means lastFireMs is in the future — the wall clock was
+        // corrected backwards after the last fire. Treat that as elapsed: a bare
+        // `now - last < cooldown` would wedge the watchdog shut until the bogus
+        // timestamp passes, which can be days. The fire budget still bounds it.
+        val sinceLast = nowMs - lastFireMs
+        if (sinceLast in 0 until cooldownMs) return Decision.Wait(next)
         return Decision.Fire
     }
 
