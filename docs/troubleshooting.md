@@ -14,7 +14,7 @@ read_when:
 - Direct USB: run `adb forward tcp:8765 tcp:8765`, set `ANDROID_BRIDGE_URL=http://localhost:8765`.
 - Repeated auth failures → IP blocked 5 min after 5 fails/60s. Wait or use a fresh IP. The bridge enforces the same policy on `:8765`, so a brute-forced direct connection is throttled too.
 - Pairing code is case-sensitive (#43) — match exactly as shown.
-- Regenerated the code in the app? A relay that is already running keeps validating the **previous** code and answers `403`; restart the hermes process (or the systemd relay unit) and re-run `android_setup` with the new code. Tracked in `docs/refactor/2026-09-29-commit-review.md` (F2).
+- Regenerated the code in the app? A relay that is already running keeps validating the **previous** code and answers `403`; restart the hermes process (or the systemd relay unit) and re-run `android_setup` with the new code.
 - TLS on? The app must be given an `https://`/`wss://` address and the certificate must be CA-trusted — the bridge uses the platform trust store, so a self-signed cert fails the handshake with no bypass. Drop `ANDROID_RELAY_CERT`/`ANDROID_RELAY_KEY` to serve plaintext again.
 
 ## Tools fail or return empty

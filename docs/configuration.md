@@ -79,6 +79,6 @@ already set, in either the environment or the file.
   - **Script path** — `RelayClient.DEFAULT_REVIVAL_SCRIPT`, `/data/data/com.termux/files/home/.termux/boot/start-hermes.sh`. Not configurable and there is no UI for it, so **leave the switch off unless you have created that exact file**. It must be an absolute path inside Termux's own home, and executable. Because it lives in `.termux/boot/`, Termux also runs it at its own startup.
   - **Termux setting** — Termux > Settings > *Allow external apps* must be enabled, or `startService` throws `SecurityException` and the app shows "Revival blocked — allow Termux RUN_COMMAND". The manifest declares `com.termux.permission.RUN_COMMAND` for every install; the permission alone is not sufficient.
   - The status line carries the attempt count (`firing Termux revival (2/3)`).
-- **Regenerating the pairing code** in the app does not update a relay that is already running; restart the hermes process (or the systemd relay unit) so the new code is loaded. See `docs/refactor/2026-09-29-commit-review.md` (F2).
+- **Regenerating the pairing code** in the app does not update a relay that is already running; restart the hermes process (or the systemd relay unit) so the new code is loaded.
 
 Never echo or dump these env values — `ANDROID_BRIDGE_TOKEN` is the pairing code. See SECURITY.md.

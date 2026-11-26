@@ -64,7 +64,7 @@ Automated: `pytest tests/` (Python toolset) and `cd hermes-android-bridge && ./g
 ## Relay transport
 
 29. With `ANDROID_RELAY_CERT` and `ANDROID_RELAY_KEY` exported before the relay starts, enter `https://<server>:8766` in the app → it connects over `wss://` and tools keep working. With a self-signed certificate the handshake must fail (platform trust store, no bypass).
-30. Regenerate the pairing code in the app, re-run `android_setup("<new code>")`, then connect → the phone must be accepted. **Known failure:** a relay that is already running keeps validating the previous code and answers 403 until the process restarts; see `docs/refactor/2026-09-29-commit-review.md` (F2).
+30. Regenerate the pairing code in the app, re-run `android_setup("<new code>")`, then connect → the phone must be accepted. **Known failure:** a relay that is already running keeps validating the previous code and answers 403 until the process restarts.
 
 ## Termux auto-revival (opt-in)
 

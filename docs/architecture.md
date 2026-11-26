@@ -88,7 +88,7 @@ A route that throws answers `{"error": "<exception class>"}` at `500` on **both*
 
 The relay adds its own statuses before the phone is ever reached: `401` (missing or wrong Bearer token), `429` (IP blocked by the auth throttle), `503` (no phone connected), `502` (send failed or the phone connection dropped) and `504` (no reply within `_RESPONSE_TIMEOUT`, 30s). aiohttp answers `404`/`405` for a path or method that is not in `_ROUTES`.
 
-The bridge's Ktor layer has no exception mapping, so an exception thrown inside a handler surfaces as a non-JSON `500` over HTTP while the relay path converts it to `{"error": …}` with status `500` — see `docs/refactor/2026-09-29-commit-review.md` (L1).
+The bridge's Ktor layer has no exception mapping, so an exception thrown inside a handler surfaces as a non-JSON `500` over HTTP while the relay path converts it to `{"error": …}` with status `500`.
 
 ## Tools
 
